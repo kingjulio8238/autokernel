@@ -1,0 +1,37 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git reset:*)",
+      "Bash(git checkout:*)",
+      "Bash(git config:*)",
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Bash(git status:*)",
+      "Bash(git branch:*)",
+      "Bash(git init:*)",
+      "Bash(uv run:*)",
+      "Bash(export PATH=*)",
+      "Bash(grep:*)",
+      "Bash(tail:*)",
+      "Bash(head:*)",
+      "Bash(cat:*)",
+      "Bash(ls:*)",
+      "Bash(mkdir:*)",
+      "Bash(git push:*)",
+      "Write(/workspace/autokernel/kernel.py)",
+      "Write(/workspace/autokernel/results.tsv)",
+      "Write(/workspace/autokernel/run.log)",
+      "Edit(/workspace/autokernel/kernel.py)",
+      "Edit(/workspace/autokernel/results.tsv)",
+      "Edit(/workspace/autokernel/docs/*)"
+    ],
+    "deny": [
+      "Write(/workspace/autokernel/prepare.py)",
+      "Write(/workspace/autokernel/reference.py)",
+      "Edit(/workspace/autokernel/prepare.py)",
+      "Edit(/workspace/autokernel/reference.py)"
+    ]
+  }
+}
