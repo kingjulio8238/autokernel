@@ -740,9 +740,9 @@ Fork created at `https://github.com/kingjulio8238/autokernel.git`. The repo curr
 - Tokenizer (not needed)
 - Model architecture (replaced by kernel code)
 
-### Stage 2: Core Implementation (MVP) — 🖥️ OFF-POD ✅ DONE
+### Stage 2: Core Implementation (MVP) — ✅ DONE (off-pod + on-pod validated)
 
-All file writing done off-pod. Files replaced:
+All file writing done off-pod. On-pod gate validated 2026-03-12 on NVIDIA A100-SXM4-80GB. Files replaced:
 
 | File | Status |
 |---|---|
@@ -808,9 +808,11 @@ eval_seconds:<some_number>
 ```
 
 **Gate passes if:**
-- [ ] `status:correct` (kernel compiles and passes correctness check)
-- [ ] `speedup:` line is present with a positive number (any value — even 0.5x is fine)
-- [ ] No Python tracebacks or crashes
+- [x] `status:correct` (kernel compiles and passes correctness check)
+- [x] `speedup:` line is present with a positive number (any value — even 0.5x is fine) — got `speedup:0.9550`
+- [x] No Python tracebacks or crashes
+
+**Gate validated**: 2026-03-12, NVIDIA A100-SXM4-80GB, torch 2.9.1+cu128, `status:correct`, `speedup:0.9550`, runtime 7.56µs, ref 7.22µs.
 
 **If it fails**, check:
 - `status:compile_error` → KernelBench or Triton install issue, check CUDA toolkit
@@ -898,8 +900,7 @@ Extend to fusion problems (L2) and full models (L3). This is where the combinato
 
 ```
 Stage 1:  Fork ✅ DONE
-Stage 2:  Core implementation OFF-POD — replace autoresearch files, write all new code
-          Validate ON-POD — uv run python prepare.py works end-to-end
+Stage 2:  Core implementation ✅ DONE — off-pod file replacement + on-pod gate validated (2026-03-12)
 Stage 3:  ON-POD — first autonomous run, 20+ iterations on GEMM, beat 1.0x
 Stage 4:  ON-POD — 5 deep dives, 100 iterations each, beat 10-turn SOTA per-problem
 Stage 5:  ON-POD — full L1 sweep, fast₁ >50%, beat all published SOTA
