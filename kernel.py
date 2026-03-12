@@ -1,6 +1,6 @@
 """
-Autokernel — Iteration 4: torch.mm with cuBLAS warmup in __init__.
-Force cuBLAS to select the optimal algorithm before perf measurement begins.
+Autokernel — L2 #12: Gemm + Multiply + LeakyReLU
+Baseline: same ops as reference, separate PyTorch calls.
 """
 
 import torch
@@ -8,16 +8,14 @@ import torch.nn as nn
 
 
 class ModelNew(nn.Module):
-    def __init__(self):
+    def __init__(self, in_features, out_features, multiplier, negative_slope):
         super(ModelNew, self).__init__()
-        # Warm up cuBLAS: force algorithm selection for 4096x4096 fp32 GEMM
-        # This ensures the first timed forward() call uses the already-selected algo
-        dummy_a = torch.randn(4096, 4096, device='cuda', dtype=torch.float32)
-        dummy_b = torch.randn(4096, 4096, device='cuda', dtype=torch.float32)
-        for _ in range(5):
-            torch.mm(dummy_a, dummy_b)
-        torch.cuda.synchronize()
-        del dummy_a, dummy_b
+        self.gemm = nn.Linear(in_features, out_features)
+        self.multiplier = multiplier
+        self.leaky_relu = nn.LeakyReLU(negative_slope)
 
-    def forward(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
-        return torch.mm(A, B)
+    def forward(self, x):
+        x = self.gemm(x)
+        x = x * self.multiplier
+        x = self.leaky_relu(x)
+        return x

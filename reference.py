@@ -1,5 +1,5 @@
 """
-KernelBench Level 1, Problem 1: Square matrix multiplication (C = A * B)
+KernelBench Level 2, Problem 12: 12_Gemm_Multiply_LeakyReLU
 READ-ONLY — do not modify this file. The agent modifies kernel.py instead.
 Loaded via scripts/setup_problem.py from KernelBench dataset.
 """
@@ -7,29 +7,30 @@ Loaded via scripts/setup_problem.py from KernelBench dataset.
 import torch
 import torch.nn as nn
 
-
 class Model(nn.Module):
     """
-    Simple model that performs a single square matrix multiplication (C = A * B)
+    Simple model that performs a Gemm, multiplies the result, and applies LeakyReLU.
     """
-
-    def __init__(self):
+    def __init__(self, in_features, out_features, multiplier, negative_slope):
         super(Model, self).__init__()
+        self.gemm = nn.Linear(in_features, out_features)
+        self.multiplier = multiplier
+        self.leaky_relu = nn.LeakyReLU(negative_slope)
 
-    def forward(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
-        return torch.matmul(A, B)
+    def forward(self, x):
+        x = self.gemm(x)
+        x = x * self.multiplier
+        x = self.leaky_relu(x)
+        return x
 
-
-M = 4096
-K = 4096
-N = 4096
-
+batch_size = 1024
+in_features  = 8192  
+out_features = 8192
+multiplier = 2.0
+negative_slope = 0.1
 
 def get_inputs():
-    A = torch.randn(M, K)
-    B = torch.randn(K, N)
-    return [A, B]
-
+    return [torch.rand(batch_size, in_features)]
 
 def get_init_inputs():
-    return []  # No special initialization inputs needed
+    return [in_features, out_features, multiplier, negative_slope]
