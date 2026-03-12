@@ -20,24 +20,31 @@ If you are new to neural networks, this ["Dummy's Guide"](https://x.com/hooeem/s
 
 ## Quick start
 
-**Requirements:** A single NVIDIA GPU (tested on H100), Python 3.10+, [uv](https://docs.astral.sh/uv/).
+**Requirements:** A single NVIDIA GPU (24GB+ VRAM), Python 3.10+, [uv](https://docs.astral.sh/uv/), CUDA toolkit with dev headers.
 
 ```bash
+# 1. Clone (replace <PAT> with your GitHub personal access token)
+git clone https://ghp_<PAT>@github.com/kingjulio8238/autokernel.git
+cd autokernel
 
-# 1. Install uv project manager (if you don't already have it)
+# 2. Install uv project manager (if you don't already have it)
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 2. Install dependencies
+# 3. Install dependencies
 uv sync
 
-# 3. Download data and train tokenizer (one-time, ~2 min)
-uv run prepare.py
+# 4. Install Python dev headers (needed for CUDA/Triton compilation)
+apt-get update && apt-get install -y python3.10-dev
 
-# 4. Manually run a single training experiment (~5 min)
-uv run train.py
+# 5. Verify setup
+uv run python -c "import torch; print(torch.cuda.get_device_name(0))"
+uv run python -c "from kernelbench.eval import eval_kernel_against_ref; print('OK')"
+
+# 6. Run the evaluation gate
+uv run python prepare.py
 ```
 
-If the above commands all work ok, your setup is working and you can go into autonomous research mode.
+Gate passes when you see `status:correct` and a `speedup:` line in the output.
 
 ## Running the agent
 
