@@ -1,6 +1,6 @@
 """
 Autokernel — agent-modifiable kernel file.
-Iteration 43: cuBLASLt FP32 heuristic (same as best) - rerun for measurement variance.
+Iteration 46: cuBLASLt fully pre-cached descriptors + algo + no per-call alloc/dealloc.
 """
 
 import torch
@@ -18,67 +18,72 @@ static cublasLtHandle_t ltHandle = nullptr;
 static void* workspace = nullptr;
 static const size_t workspaceSize = 32 * 1024 * 1024;
 
-void ensure_handle() {
+// Pre-cached descriptors for 4096x4096 GEMM
+static cublasLtMatmulDesc_t cachedMatmulDesc = nullptr;
+static cublasLtMatrixLayout_t cachedBdesc = nullptr;
+static cublasLtMatrixLayout_t cachedAdesc = nullptr;
+static cublasLtMatrixLayout_t cachedCdesc = nullptr;
+static cublasLtMatmulAlgo_t cachedAlgo;
+static bool algoValid = false;
+
+void ensure_init() {
     if (ltHandle == nullptr) {
         cublasLtCreate(&ltHandle);
         cudaMalloc(&workspace, workspaceSize);
+
+        // Pre-create descriptors for M=K=N=4096
+        const int M = 4096, K = 4096, N = 4096;
+
+        cublasLtMatmulDescCreate(&cachedMatmulDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+        cublasOperation_t opN = CUBLAS_OP_N;
+        cublasLtMatmulDescSetAttribute(cachedMatmulDesc, CUBLASLT_MATMUL_DESC_TRANSA, &opN, sizeof(opN));
+        cublasLtMatmulDescSetAttribute(cachedMatmulDesc, CUBLASLT_MATMUL_DESC_TRANSB, &opN, sizeof(opN));
+
+        cublasLtMatrixLayoutCreate(&cachedBdesc, CUDA_R_32F, N, K, N);
+        cublasLtMatrixLayoutCreate(&cachedAdesc, CUDA_R_32F, K, M, K);
+        cublasLtMatrixLayoutCreate(&cachedCdesc, CUDA_R_32F, N, M, N);
+
+        // Pre-select algorithm
+        cublasLtMatmulPreference_t pref;
+        cublasLtMatmulPreferenceCreate(&pref);
+        cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                                              &workspaceSize, sizeof(workspaceSize));
+
+        cublasLtMatmulHeuristicResult_t heurResult;
+        int returnedResults = 0;
+        cublasLtMatmulAlgoGetHeuristic(ltHandle, cachedMatmulDesc, cachedBdesc, cachedAdesc,
+                                        cachedCdesc, cachedCdesc, pref, 1, &heurResult, &returnedResults);
+
+        if (returnedResults > 0) {
+            cachedAlgo = heurResult.algo;
+            algoValid = true;
+        }
+        cublasLtMatmulPreferenceDestroy(pref);
     }
 }
 
 torch::Tensor matmul_cuda(torch::Tensor A, torch::Tensor B) {
-    ensure_handle();
+    ensure_init();
 
-    int M = A.size(0);
-    int K = A.size(1);
-    int N = B.size(1);
-
-    auto C = torch::empty({M, N}, A.options());
+    auto C = torch::empty({A.size(0), B.size(1)}, A.options());
 
     float alpha = 1.0f;
     float beta = 0.0f;
 
-    cublasLtMatmulDesc_t matmulDesc;
-    cublasLtMatmulDescCreate(&matmulDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
-
-    cublasOperation_t opN = CUBLAS_OP_N;
-    cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSA, &opN, sizeof(opN));
-    cublasLtMatmulDescSetAttribute(matmulDesc, CUBLASLT_MATMUL_DESC_TRANSB, &opN, sizeof(opN));
-
-    cublasLtMatrixLayout_t Bdesc, Adesc, Cdesc;
-    cublasLtMatrixLayoutCreate(&Bdesc, CUDA_R_32F, N, K, N);
-    cublasLtMatrixLayoutCreate(&Adesc, CUDA_R_32F, K, M, K);
-    cublasLtMatrixLayoutCreate(&Cdesc, CUDA_R_32F, N, M, N);
-
-    cublasLtMatmulPreference_t pref;
-    cublasLtMatmulPreferenceCreate(&pref);
-    cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
-                                          &workspaceSize, sizeof(workspaceSize));
-
-    cublasLtMatmulHeuristicResult_t heurResult;
-    int returnedResults = 0;
-    cublasLtMatmulAlgoGetHeuristic(ltHandle, matmulDesc, Bdesc, Adesc, Cdesc, Cdesc,
-                                    pref, 1, &heurResult, &returnedResults);
-
     cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
 
-    if (returnedResults > 0) {
-        cublasLtMatmul(ltHandle, matmulDesc,
+    if (algoValid) {
+        cublasLtMatmul(ltHandle, cachedMatmulDesc,
                        &alpha,
-                       B.data_ptr<float>(), Bdesc,
-                       A.data_ptr<float>(), Adesc,
+                       B.data_ptr<float>(), cachedBdesc,
+                       A.data_ptr<float>(), cachedAdesc,
                        &beta,
-                       C.data_ptr<float>(), Cdesc,
-                       C.data_ptr<float>(), Cdesc,
-                       &heurResult.algo,
+                       C.data_ptr<float>(), cachedCdesc,
+                       C.data_ptr<float>(), cachedCdesc,
+                       &cachedAlgo,
                        workspace, workspaceSize,
                        stream);
     }
-
-    cublasLtMatmulPreferenceDestroy(pref);
-    cublasLtMatrixLayoutDestroy(Bdesc);
-    cublasLtMatrixLayoutDestroy(Adesc);
-    cublasLtMatrixLayoutDestroy(Cdesc);
-    cublasLtMatmulDescDestroy(matmulDesc);
 
     return C;
 }
@@ -89,7 +94,7 @@ torch::Tensor matmul_cuda(torch::Tensor A, torch::Tensor B);
 """
 
 matmul_ext = load_inline(
-    name="matmul_cublaslt_rerun",
+    name="matmul_cublaslt_fullcache",
     cpp_sources=cpp_source,
     cuda_sources=cuda_source,
     functions=["matmul_cuda"],
