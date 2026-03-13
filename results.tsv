@@ -1,0 +1,54 @@
+commit	speedup	runtime_us	ref_runtime_us	status	description
+369eace	0.9960	2.51	2.50	keep	baseline (torch.matmul passthrough)
+047ec77	0.0000	0.00	0.00	compile_error	triton jit fails with KernelBench exec-based eval
+e1fdb1b	0.0000	0.00	0.00	incorrect	CUDA tiled GEMM max_diff=0.001 exceeds tolerance
+6fa62e9	0.0000	0.00	0.00	crash	cuBLAS via ctypes illegal memory access
+f498c82	0.0000	0.00	0.00	incorrect	cuBLAS sgemm wrong results max_diff=500
+4094181	0.9097	2.77	2.52	discard	torch.compile max-autotune slower due to compile overhead
+d0540c7	0.0000	0.00	0.00	incorrect	triton tiled GEMM max_diff=0.27 TF32 precision mismatch
+a475263	0.0000	0.00	0.00	incorrect	triton FP32 GEMM with TF32 disabled max_diff=0.001 still exceeds atol=1e-4
+e47ac01	1.0000	2.50	2.50	keep	cuBLAS sgemm via C++ extension - matches reference exactly
+89c0fb0	1.0080	2.49	2.51	keep	cuBLASLt FP32 with algo heuristic search - first speedup >1.0
+72d91c9	1.0040	2.50	2.51	discard	cuBLASLt cached descriptors 64MB workspace - no gain
+3498e4e	1.0000	2.50	2.50	discard	cuBLASLt pre-cached module-level init - no gain
+5ed6cdf	1.0000	2.51	2.51	discard	cuBLASLt FP32 + disable TF32 globally - no change
+902f7de	0.0000	0.00	0.00	incorrect	CUDA graph capture wrong output for correctness check
+3c3f42d	1.0080	2.49	2.51	discard	cuBLASLt 64MB workspace 16 algo candidates - same as best
+5a4fbaf	1.0000	2.52	2.52	discard	cuBLASLt runtime algo benchmark 32 candidates - no gain
+08fe48f	1.0080	2.49	2.51	discard	cuBLASLt cached descs + fast_math - same as best
+df14dd8	0.9760	1.67	1.63	discard	cuBLASLt TF32 slower than PyTorch TF32 path
+1a470bb	1.0040	2.50	2.51	discard	torch.mm pre-allocated output - less than best
+7f57d66	1.0080	2.50	2.52	discard	cuBLASLt CUDA-side pre-alloc output - same as best
+4a5da52	1.0080	2.49	2.51	discard	cublasGemmEx TENSOR_OP algo - same as best
+adb09ca	0.1037	24.40	2.53	discard	cublasGemmEx exhaustive algo search - picked bad algo
+5df5718	0.0000	0.00	0.00	incorrect	Strassen one-level max_diff=0.000565 FP accumulation order change
+c7a14c7	1.0000	2.50	2.50	discard	fully pre-cached cuBLASLt zero per-call overhead - no gain
+77e61e7	1.0080	2.50	2.52	discard	cuBLASLt 64MB workspace splitK heuristics - same as best
+0367ba8	0.9061	2.77	2.51	discard	torch.compile reduce-overhead pre-compiled - CUDA graph overhead slower
+7d1aa55	1.0040	2.51	2.52	discard	cuBLASLt runtime benchmark 16 candidates - no gain over best
+258c13a	0.9760	1.67	1.63	discard	TF32 global + cuBLASLt TF32 - ref faster at TF32
+ffff936	1.0040	2.49	2.50	discard	cublasSgemm via PyTorch internal handle - no gain
+f8f6211	1.0000	2.50	2.50	discard	torch.addmm beta=0 pre-alloc output - no gain
+5c4199d	0.9960	2.51	2.50	discard	cuBLASLt SM_COUNT_TARGET=128 - slightly slower
+e6e0825	1.0040	2.50	2.51	discard	torch.mm with inference_mode - no gain
+1bfda5d	1.0040	2.50	2.51	discard	torch.compile default mode pre-compiled - same
+e1e2092	0.9760	1.67	1.63	discard	cuBLASLt TF32 runtime benchmark - ref TF32 still faster
+27f5fd6	0.9529	1.70	1.62	discard	TF32 cublasSgemm via PyTorch handle - ref TF32 is faster
+03617f0	1.0000	2.49	2.49	discard	at::mm from C++ - same speed as reference
+5282545	0.0000	0.00	0.00	incorrect	Triton GEMM FP32 max_diff=0.001 accumulation order diff
+53eb696	0.0000	0.00	0.00	incorrect	cuBLASLt algo enumeration - picked numerically different algo max_diff=0.001
+fef1cac	0.9960	2.50	2.49	discard	cuBLASLt PEDANTIC FP32 - slightly slower
+0cd5fb0	0.9960	2.50	2.49	discard	torch.bmm batch=1 - same speed
+642337f	1.0000	2.50	2.50	discard	cuBLASLt pre-allocated output as arg - no gain
+e322fc7	0.9960	2.50	2.49	discard	cuBLASLt 128MB workspace + reduced threads - no gain
+7578e35	1.0040	2.49	2.50	discard	torch.einsum - same performance
+63e1afb	0.0000	0.00	0.00	incorrect	conv2d 1x1 wrong reshape max_diff=481
+03d8d73	1.0000	2.51	2.51	discard	F.linear dispatch - same speed
+85e9719	1.0081	2.48	2.50	keep	cuBLASLt FP32 heuristic rerun - marginal improvement
+fe1a702	0.0000	0.00	0.00	incorrect	cuBLASLt TRANSB=T wrong dimensions max_diff=527
+5aec7e6	0.9960	2.52	2.51	discard	cuBLASLt FP32 + disable JIT profiling + prefer L1 cache - no gain
+2d8b349	1.0120	2.49	2.52	keep	cuBLASLt fully pre-cached descriptors + algo zero per-call overhead
+ef4476a	1.0080	2.50	2.52	discard	cuBLASLt fully pre-cached 64MB workspace top 4 algos - no gain over 32MB
+7adf470	1.0080	2.49	2.51	discard	cuBLASLt fully pre-cached + pre-alloc output cudaMalloc - no gain
+abea99c	0.0000	0.00	0.00	compile_error	cublasSgemm PEDANTIC_HMMA undefined identifier
+1baaf93	1.0040	2.51	2.52	discard	cublasSgemm pre-cached handle DEFAULT math - no gain
