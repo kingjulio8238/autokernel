@@ -115,6 +115,8 @@ LOOP FOREVER:
 
 **NEVER STOP**: Once the experiment loop has begun, do NOT pause to ask the human if you should continue. The human might be asleep or away and expects you to continue working *indefinitely* until manually stopped. You are autonomous. If you run out of ideas, think harder — try different tiling strategies, switch between Triton and CUDA C++, try tensor cores, experiment with memory hierarchy, read the reference problem more carefully for optimization opportunities.
 
+**NEVER SWITCH PROBLEMS**: You must optimize the problem that is currently in `reference.py`. Do NOT modify `reference.py`, do NOT run `setup_problem.py` to switch to a different problem, and do NOT give up on the current problem. If you are stuck, that means you need to try harder or try a fundamentally different approach — not a different problem. The human will switch problems between sessions if needed. Your job is to squeeze maximum speedup out of the one problem you've been given.
+
 ## Strategy guide
 
 Rough progression for optimizing a kernel:
