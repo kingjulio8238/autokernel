@@ -819,16 +819,45 @@ eval_seconds:<some_number>
 - `status:error` → lock file issue, retry or check GPU visibility
 - Python traceback → dependency issue, re-run `uv sync`
 
-### Stage 3: First Autonomous Run — 🔥 ON-POD
+### Stage 3: First Autonomous Run — 🔥 ON-POD ✅ DONE
 
-Requires GPU. Run the agent loop on a single problem (L1 #1 square GEMM, 4096x4096).
+Ran 50 iterations on L1 #1 square GEMM (4096x4096) on A100-SXM4-80GB. Branch: `autokernel/mar13-gemm`.
 
 **Gates** (benchmarked against one-shot SOTA on GEMM):
-- [ ] Agent completes 20+ iterations unattended without crashing
-- [ ] Keep/discard mechanic works — speedup is monotonically non-decreasing
-- [ ] `results.tsv` logs correctly, git history tracks each experiment
-- [ ] Achieve speedup >1.0x on GEMM (beat PyTorch eager). One-shot SOTA on this problem: **0.17x** (Claude 3.5 Sonnet). Beating 1.0x on GEMM with iteration would already exceed every one-shot result on this problem by ~6x.
-- [ ] Stretch: achieve speedup >2.0x on GEMM (approach cuBLAS territory)
+- [x] Agent completes 20+ iterations unattended without crashing (50 total)
+- [x] Keep/discard mechanic works — speedup is monotonically non-decreasing
+- [x] `results.tsv` logs correctly, git history tracks each experiment
+- [x] Achieve speedup >1.0x on GEMM (beat PyTorch eager). Achieved **1.012x**. One-shot SOTA on this problem: **0.17x** (Claude 3.5 Sonnet) — autokernel beats it by ~6x.
+- [ ] Stretch: achieve speedup >2.0x on GEMM — not achieved (cuBLAS ceiling)
+
+**Results (50 iterations)**:
+
+| Metric | Value |
+|---|---|
+| Total iterations | 50 |
+| KEEPs | 5 (including baseline) |
+| DISCARDs | 35 |
+| Compile errors | 2 |
+| Incorrect | 8 |
+| Best speedup | **1.012x** |
+
+**KEEP progression**:
+
+```
+baseline:  0.996x  torch.matmul passthrough
+iter 9:    1.000x  cuBLAS sgemm via C++ extension
+iter 10:   1.008x  cuBLASLt with algo heuristic search
+iter 43:   1.008x  cuBLASLt heuristic rerun (marginal)
+iter 46:   1.012x  cuBLASLt fully pre-cached descriptors + algo, zero per-call overhead
+```
+
+**Analysis**:
+
+The agent hit a wall. GEMM is the hardest possible problem to beat because `torch.matmul` already dispatches to cuBLAS — the same library the agent ended up calling directly. The 1.2% speedup comes entirely from eliminating Python/PyTorch dispatch overhead by going straight to cuBLASLt with pre-cached descriptors. There's essentially no room to beat cuBLAS on a standard GEMM at this size without dropping to PTX or finding a fundamentally different algorithm.
+
+The 8 incorrect results (mostly from Triton with FP32 accumulation order differences hitting the atol=1e-4 wall) and the repeated "same as best" discards show the agent explored thoroughly but the ceiling is cuBLAS itself.
+
+**Takeaway**: GEMM was the worst-case test — a problem where PyTorch is already near-optimal. Stage 4 targets problems with much more headroom: Softmax, GELU, and fusion patterns where PyTorch does not dispatch to hand-tuned libraries.
 
 ### Stage 4: Phase 1 Benchmarks (5 Deep Dives) — 🔥 ON-POD
 
