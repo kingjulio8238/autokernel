@@ -1,0 +1,10 @@
+{
+  "id": "fusion_default",
+  "description": "For L2 fusion problems (attention, MLP blocks, residual+norm chains): fuse multiple operations into a single kernel to eliminate intermediate memory writes. Focus on operator fusion patterns — fuse matmul+bias+activation, residual+layernorm, QKV projection+attention. Balance register pressure against fusion depth.",
+  "problem_types": ["attention", "flash_attention", "mlp", "transformer_block", "residual", "fused_attention", "fusion", "multi_op", "chain"],
+  "backend": "any",
+  "hardware_targets": ["nvidia_ampere", "nvidia_hopper"],
+  "success_history": [],
+  "failure_history": [],
+  "pareto_scores": {}
+}

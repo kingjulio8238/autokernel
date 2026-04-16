@@ -1,0 +1,10 @@
+{
+  "id": "triton_elementwise_vectorized",
+  "name": "Vectorized Elementwise (Triton)",
+  "trigger": "Elementwise operation (GELU, ReLU, Sigmoid, etc.) that is memory-bound",
+  "approach": "Use vectorized float4 loads, large BLOCK_SIZE (1024-2048), minimize shared memory. For GELU/Sigmoid, consider polynomial approximation if precision allows. Single-pass over data with maximum bandwidth utilization.",
+  "backend": "triton",
+  "evidence": [],
+  "code_template": null,
+  "tags": ["elementwise", "memory_bound", "vectorization", "bandwidth"]
+}

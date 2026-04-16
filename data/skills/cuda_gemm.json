@@ -1,0 +1,10 @@
+{
+  "id": "cuda_gemm_cublas",
+  "name": "GEMM via cuBLAS/cuBLASLt (CUDA)",
+  "trigger": "Standard dense GEMM, especially large matrices (>1024) where cuBLAS is near-optimal",
+  "approach": "For standard GEMM, calling cuBLASLt directly with pre-cached descriptors and algo heuristic search eliminates PyTorch dispatch overhead. For non-standard GEMM (batched, strided, fused epilogue), use CUTLASS CuTe templates. Focus on epilogue fusion (bias add, activation) into the GEMM output loop to avoid extra memory passes.",
+  "backend": "cuda",
+  "evidence": [],
+  "code_template": null,
+  "tags": ["gemm", "matmul", "compute_bound", "cublas", "cutlass", "epilogue_fusion"]
+}

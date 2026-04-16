@@ -1,0 +1,10 @@
+{
+  "id": "triton_tiled_gemm",
+  "name": "Tiled GEMM (Triton)",
+  "trigger": "Matrix multiplication or GEMM-like operation, compute-bound for large matrices",
+  "approach": "Tiled GEMM with @triton.autotune over BLOCK_M/N/K in {64,128,256}. Use tl.dot for tensor core utilization. Accumulate in float64 for fp32 correctness (avoids atol=1e-4 failures from accumulation order). For large GEMMs (>2048): cuBLAS via torch.matmul is likely near-optimal — focus on dispatch overhead reduction instead.",
+  "backend": "triton",
+  "evidence": [],
+  "code_template": null,
+  "tags": ["gemm", "matmul", "compute_bound", "tensor_cores", "tiling"]
+}

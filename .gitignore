@@ -1,0 +1,46 @@
+# Optimization traces (local + uploaded to HF Hub)
+traces/raw/
+traces/processed/
+traces/metadata/
+
+# KernelBench sweep results (local)
+results/sweeps/
+results/comparisons/
+results/charts/
+
+# Live session cache
+cache/sessions/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.eggs/
+dist/
+build/
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment
+.env
+.env.local
+
+# Modal
+.modal/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+run.log

@@ -1,0 +1,54 @@
+{
+  "models": [
+    {
+      "id": "claude-sonnet-4-20250514",
+      "provider": "anthropic",
+      "name": "Claude Sonnet 4",
+      "strengths": ["Strong at Triton + CUDA generation", "Good structured output", "Fast inference"],
+      "cost_tier": "medium",
+      "recommended_for": ["general", "triton", "cuda"]
+    },
+    {
+      "id": "claude-opus-4-20250514",
+      "provider": "anthropic",
+      "name": "Claude Opus 4",
+      "strengths": ["Best reasoning for complex optimization strategies", "Excellent at world model search"],
+      "cost_tier": "high",
+      "recommended_for": ["complex_kernels", "strategy_reasoning"]
+    },
+    {
+      "id": "gpt-4o",
+      "provider": "openai",
+      "name": "GPT-4o",
+      "strengths": ["Good code generation", "Fast", "Multi-modal"],
+      "cost_tier": "medium",
+      "recommended_for": ["general", "triton", "cuda"]
+    },
+    {
+      "id": "o3",
+      "provider": "openai",
+      "name": "o3",
+      "strengths": ["Strong reasoning", "Good at complex optimization paths"],
+      "cost_tier": "high",
+      "recommended_for": ["complex_kernels", "strategy_reasoning"]
+    },
+    {
+      "id": "gemini-2.5-pro",
+      "provider": "google",
+      "name": "Gemini 2.5 Pro",
+      "strengths": ["Large context window", "Good code generation"],
+      "cost_tier": "medium",
+      "recommended_for": ["general", "triton"]
+    },
+    {
+      "id": "qwen3-32b",
+      "provider": "local",
+      "name": "Qwen3-32B",
+      "strengths": ["Open source", "No API cost", "Good kernel generation"],
+      "cost_tier": "free",
+      "recommended_for": ["cost_sensitive", "local_inference"]
+    }
+  ],
+  "default": "claude-sonnet-4-20250514",
+  "notes": "This list is updated based on internal benchmarking. Run scripts/benchmark_models.py to re-evaluate."
+}

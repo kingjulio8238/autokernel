@@ -1,0 +1,10 @@
+{
+  "id": "fusion_patterns",
+  "name": "Operator Fusion Patterns",
+  "trigger": "Multi-operator pattern (L2 problems): Conv+ReLU+BiasAdd, GEMM+Scale+Activation, etc.",
+  "approach": "Fuse adjacent operators to eliminate intermediate memory round-trips. Strategy: (1) Identify which ops share data — those should fuse first. (2) Start with the easiest pair (e.g., activation + bias). (3) Measure after each fusion step. (4) For GEMM-based fusions, fuse post-GEMM ops into the GEMM epilogue. For Conv-based fusions, fuse activation + bias into the conv output loop. Exploration: try all 2^n fusion topologies for n operators, prune based on memory access analysis.",
+  "backend": "any",
+  "evidence": [],
+  "code_template": null,
+  "tags": ["fusion", "l2", "memory_bound", "epilogue", "multi_operator"]
+}
