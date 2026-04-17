@@ -1,6 +1,6 @@
 """Plotly Dash dashboard server for kernel code.
 
-Serves on localhost:8050 with 7 panels:
+Serves on localhost:8050 with 10 panels:
   1. Optimization trajectory chart
   2. Roofline model
   3. Resource utilization gauges
@@ -8,6 +8,9 @@ Serves on localhost:8050 with 7 panels:
   5. Code diff
   6. Optimization landscape (3D)
   7. Strategy tree (treemap)
+  8. Convergence analysis (post-hoc)
+  9. Cost efficiency frontier (post-hoc)
+  10. Strategy statistics (post-hoc)
 
 Auto-refresh every 5 seconds.
 """
@@ -27,6 +30,9 @@ from kernel_code.dashboard.layouts.landscape import (
     create_landscape_figure,
 )
 from kernel_code.dashboard.layouts.strategy_tree import create_strategy_tree_figure
+from kernel_code.dashboard.layouts.convergence import create_convergence_figure
+from kernel_code.dashboard.layouts.cost_efficiency import create_cost_efficiency_figure
+from kernel_code.dashboard.layouts.strategy_stats import create_strategy_stats_figure
 
 
 def create_dash_app(session_id: str) -> Dash:
@@ -138,6 +144,22 @@ def create_dash_app(session_id: str) -> Dash:
             ),
             # --- Row 5: Experiment Table ---
             _section("Experiment Log", [html.Div(id="experiment-table-container")]),
+            # --- Row 6: Post-Hoc Analysis ---
+            html.Div(
+                style={"display": "flex", "gap": "16px", "marginBottom": "16px"},
+                children=[
+                    html.Div(
+                        style={"flex": "1", "minWidth": "0"},
+                        children=[dcc.Graph(id="convergence-chart")],
+                    ),
+                    html.Div(
+                        style={"flex": "1", "minWidth": "0"},
+                        children=[dcc.Graph(id="cost-efficiency-chart")],
+                    ),
+                ],
+            ),
+            # --- Row 7: Strategy Stats ---
+            _section("Strategy Analysis", [dcc.Graph(id="strategy-stats-chart")]),
             # Auto-refresh interval (every 5 seconds)
             dcc.Interval(id="refresh-interval", interval=5000, n_intervals=0),
             # Stores
@@ -155,6 +177,9 @@ def create_dash_app(session_id: str) -> Dash:
             Output("strategy-tree-chart", "figure"),
             Output("code-diff-container", "children"),
             Output("experiment-table-container", "children"),
+            Output("convergence-chart", "figure"),
+            Output("cost-efficiency-chart", "figure"),
+            Output("strategy-stats-chart", "figure"),
         ],
         [
             Input("refresh-interval", "n_intervals"),
@@ -163,7 +188,7 @@ def create_dash_app(session_id: str) -> Dash:
         ],
     )
     def update_dashboard(n_intervals: int, sid: str, hw: str):
-        """Refresh dashboard panels with latest session data."""
+        """Refresh all 10 dashboard panels with latest session data."""
         try:
             df = load_session(sid)
         except FileNotFoundError:
@@ -175,7 +200,7 @@ def create_dash_app(session_id: str) -> Dash:
                 template="plotly_dark",
             )
             no_data = html.Div("No data available.", style={"color": "#64748b"})
-            return empty_fig, empty_fig, empty_fig, empty_fig, no_data, no_data
+            return (empty_fig,) * 4 + (no_data, no_data) + (empty_fig,) * 3
 
         trajectory_fig = create_trajectory_figure(df)
         roofline_fig = create_roofline_figure(df, hardware=hw)
@@ -183,6 +208,9 @@ def create_dash_app(session_id: str) -> Dash:
         strategy_tree_fig = create_strategy_tree_figure(df)
         code_diff = create_code_diff_component(df)
         experiment_table = create_experiment_table(df)
+        convergence_fig = create_convergence_figure(df)
+        cost_efficiency_fig = create_cost_efficiency_figure(df)
+        strategy_stats_fig = create_strategy_stats_figure(df)
 
         return (
             trajectory_fig,
@@ -191,6 +219,9 @@ def create_dash_app(session_id: str) -> Dash:
             strategy_tree_fig,
             code_diff,
             experiment_table,
+            convergence_fig,
+            cost_efficiency_fig,
+            strategy_stats_fig,
         )
 
     # ---- Callback: landscape axis changes ----
