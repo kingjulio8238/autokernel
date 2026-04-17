@@ -11,7 +11,7 @@ model:
   provider: groq
   model_id: groq/qwen-qwq-32b
   temperature: 0.7
-  max_tokens: 8192
+  max_tokens: 4096
 
 modal:
   gpu_type: L40S

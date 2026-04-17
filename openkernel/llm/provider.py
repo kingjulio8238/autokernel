@@ -52,7 +52,7 @@ class LLMProvider:
         self._total_prompt_tokens: int = 0
         self._total_completion_tokens: int = 0
         self._total_cost: float = 0.0
-        self._max_retries: int = 3
+        self._max_retries: int = 5  # higher for rate-limited free tiers
         self._retry_base_delay: float = 1.0  # seconds
 
         # Resolve API key and api_base per provider.
@@ -135,7 +135,12 @@ class LLMProvider:
             except Exception as exc:
                 last_error = exc
                 if attempt < self._max_retries:
-                    delay = self._retry_base_delay * (2 ** (attempt - 1))
+                    # Use longer delay for rate limit errors
+                    exc_str = str(exc).lower()
+                    if "rate_limit" in exc_str or "429" in exc_str or "rate limit" in exc_str:
+                        delay = 20.0  # Groq free tier asks for ~17s
+                    else:
+                        delay = self._retry_base_delay * (2 ** (attempt - 1))
                     logger.warning(
                         "LLM call failed (attempt %d/%d): %s — retrying in %.1fs",
                         attempt,
