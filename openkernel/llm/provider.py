@@ -50,13 +50,22 @@ class LLMProvider:
         self._max_retries: int = 3
         self._retry_base_delay: float = 1.0  # seconds
 
-        # Set the API key in litellm's environment if provided explicitly.
+        # Resolve the API key: explicit config > provider-specific env var > None.
+        # When using openai/ prefix with a custom api_base (e.g., MiniMax),
+        # litellm looks for OPENAI_API_KEY, but the actual key is in
+        # MINIMAX_API_KEY. We resolve it here and pass it explicitly.
+        import os
+        _PROVIDER_ENV_VARS = {
+            "minimax": "MINIMAX_API_KEY",
+            "anthropic": "ANTHROPIC_API_KEY",
+            "openai": "OPENAI_API_KEY",
+            "google": "GOOGLE_API_KEY",
+        }
         if config.api_key:
-            # litellm reads from provider-specific env vars, but also
-            # accepts api_key as a call parameter. We store it for later.
             self._api_key = config.api_key
         else:
-            self._api_key = None
+            env_var = _PROVIDER_ENV_VARS.get(config.provider, "")
+            self._api_key = os.environ.get(env_var) if env_var else None
 
     # ------------------------------------------------------------------
     # Public API
