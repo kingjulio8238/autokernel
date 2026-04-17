@@ -40,13 +40,14 @@ app = modal.App("openkernel-eval", image=kernelbench_image)
 
 # ---------------------------------------------------------------------------
 # GPU type mapping — matches openkernel.config.GpuType
+# Modal v1.x uses string GPU specifiers instead of modal.gpu.* objects
 # ---------------------------------------------------------------------------
 
 _GPU_MAP = {
-    "H100": modal.gpu.H100(),
-    "A100-80GB": modal.gpu.A100(size="80GB"),
-    "A100-40GB": modal.gpu.A100(size="40GB"),
-    "L40S": modal.gpu.L40S(),
+    "H100": "H100",
+    "A100-80GB": "A100-80GB",
+    "A100-40GB": "A100-40GB",
+    "L40S": "L40S",
 }
 
 # ---------------------------------------------------------------------------
@@ -55,7 +56,7 @@ _GPU_MAP = {
 
 
 @app.function(
-    gpu=modal.gpu.L40S(),
+    gpu="L40S",
     timeout=600,
     retries=0,
 )
@@ -437,7 +438,7 @@ class EvalWorker:
 # ---------------------------------------------------------------------------
 
 
-@app.function(gpu=modal.gpu.L40S(), timeout=60)
+@app.function(gpu="L40S", timeout=60)
 def health_check() -> dict[str, Any]:
     """Verify the container is functional and GPU is accessible."""
     import torch
