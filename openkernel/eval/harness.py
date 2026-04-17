@@ -122,7 +122,9 @@ def _call_modal(
         TimeoutError: If the Modal call exceeds the configured timeout.
         ConnectionError: If Modal is unreachable.
     """
-    from modal_infra.app import eval_kernel_on_gpu
+    import modal
+
+    eval_kernel_on_gpu = modal.Function.from_name("openkernel-eval", "eval_kernel_on_gpu")
 
     logger.info(
         "Calling Modal eval: mode=%s gpu=%s",
