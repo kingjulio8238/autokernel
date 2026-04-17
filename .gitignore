@@ -28,6 +28,9 @@ build/
 .env
 .env.local
 
+# kernel-code local settings (personal overrides, not committed)
+.kernel-code/settings.local.yaml
+
 # Modal
 .modal/
 

@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING
 from openkernel.config import ModelConfig
 from openkernel.llm.provider import LLMProvider
 
+from kernel_code.compaction import compact_session, should_compact
+
 if TYPE_CHECKING:
     from kernel_code.kernel_config import KernelConfig
 
@@ -42,13 +44,21 @@ def format_session_context(session_data: dict) -> str:
 
     The output is kept under ~3000 tokens so that the full prompt
     (system + context + question) fits within 4000 tokens.
+
+    For sessions with more than 20 iterations, delegates to
+    :func:`~kernel_code.compaction.compact_session` which produces a
+    category-level summary instead of raw iteration history.
     """
+    # For long sessions, use compacted context to stay within token budget
+    iterations: list[dict] = session_data.get("iterations", [])
+    if should_compact(session_data):
+        return compact_session(session_data)
+
     parts: list[str] = []
 
     # ------------------------------------------------------------------
     # 1. Summary stats (always included)
     # ------------------------------------------------------------------
-    iterations: list[dict] = session_data.get("iterations", [])
     kept = [it for it in iterations if it.get("decision") == "keep" or it.get("status") == "keep"]
     errors = [it for it in iterations if it.get("status") in ("compile_error", "incorrect", "error")]
     discarded = [it for it in iterations if it.get("decision") == "discard" or it.get("status") == "discard"]

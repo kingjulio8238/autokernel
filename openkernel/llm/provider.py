@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
 from typing import Any
 
 import litellm
@@ -94,6 +95,34 @@ class LLMProvider:
         Retries up to 3 times with exponential backoff on transient errors.
         """
         return await self._call_with_retries(prompt)
+
+    async def generate_stream(self, prompt: str) -> AsyncIterator[str]:
+        """Generate a completion with streaming. Yields token strings as they arrive."""
+        kwargs: dict[str, Any] = {
+            "model": self._config.model_id,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": self._config.temperature,
+            "max_tokens": self._config.max_tokens,
+            "stream": True,
+        }
+        if self._api_key:
+            kwargs["api_key"] = self._api_key
+        if self._api_base:
+            kwargs["api_base"] = self._api_base
+
+        response = await litellm.acompletion(**kwargs)
+        full_text = ""
+        async for chunk in response:
+            delta = chunk.choices[0].delta.content
+            if delta:
+                full_text += delta
+                yield delta
+
+        # Track tokens after streaming completes
+        # Estimate: ~4 chars per token
+        estimated_tokens = len(full_text) // 4
+        self._total_completion_tokens += estimated_tokens
+        self._total_cost += self._estimate_cost(0, estimated_tokens)
 
     async def generate_structured(
         self,

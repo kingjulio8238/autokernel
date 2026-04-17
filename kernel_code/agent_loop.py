@@ -13,11 +13,13 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import AsyncIterator
 from typing import Any
 
 from openkernel.config import ModelConfig
 from openkernel.llm.provider import LLMProvider
 
+from kernel_code.compaction import compact_session, should_compact
 from kernel_code.shell_ai import format_session_context
 
 logger = logging.getLogger(__name__)
@@ -533,7 +535,11 @@ class AgentLoop:
         Returns:
             The final text answer from the LLM.
         """
-        context_str = format_session_context(self._session_context)
+        # Use compacted context for long sessions to stay within token budget
+        if should_compact(self._session_context):
+            context_str = compact_session(self._session_context)
+        else:
+            context_str = format_session_context(self._session_context)
 
         # Build the initial prompt
         prompt_parts = [
@@ -592,3 +598,86 @@ class AgentLoop:
 
         # Should not reach here, but just in case
         return "I was unable to complete the request within the tool call limit."
+
+    async def run_stream(self, user_input: str) -> AsyncIterator[str]:
+        """Like run() but yields final response tokens for streaming display.
+
+        Tool calls are handled internally (not streamed) since they need
+        JSON parsing.  Only the final text answer is streamed token by token.
+
+        Yields:
+            Token strings as they arrive from the LLM.
+        """
+        # Use compacted context for long sessions to stay within token budget
+        if should_compact(self._session_context):
+            context_str = compact_session(self._session_context)
+        else:
+            context_str = format_session_context(self._session_context)
+
+        # Build the initial prompt
+        prompt_parts = [
+            self._system_prompt,
+            "--- SESSION DATA ---",
+            context_str,
+            "--- USER ---",
+            user_input,
+        ]
+
+        tool_calls_made = 0
+
+        for _ in range(_MAX_TOOL_CALLS + 1):  # +1 for the final text answer
+            prompt = "\n\n".join(prompt_parts)
+
+            # On the last possible iteration (or when we expect a final
+            # answer), try streaming.  For tool-call rounds, we use the
+            # non-streaming generate() since we need the full JSON.
+
+            if tool_calls_made >= _MAX_TOOL_CALLS:
+                # Final round — stream it
+                async for token in self._provider.generate_stream(prompt):
+                    yield token
+                return
+
+            # Attempt a non-streaming call to check for tool calls
+            try:
+                response = await self._provider.generate(prompt)
+            except Exception as exc:
+                logger.error("AgentLoop LLM call failed: %s", exc)
+                yield (
+                    f"[AI error] Could not generate a response: {exc}\n"
+                    "Check your API key and network connection."
+                )
+                return
+
+            response = response.strip()
+
+            # Try to parse a tool call
+            tool_call = _parse_tool_call(response)
+
+            if tool_call is None:
+                # Plain text answer on a non-final round.
+                # Re-do this as a streaming call for the nice UX.
+                async for token in self._provider.generate_stream(prompt):
+                    yield token
+                return
+
+            tool_name = tool_call.get("tool", "")
+            tool_args = tool_call.get("args", {})
+
+            logger.info("AgentLoop: calling tool %s(%s)", tool_name, tool_args)
+
+            tool_result = _execute_tool(
+                tool_name, tool_args, self._session_context
+            )
+            tool_calls_made += 1
+
+            # Append the tool interaction to the conversation
+            prompt_parts.append(f"--- TOOL CALL ---\n{json.dumps(tool_call)}")
+            prompt_parts.append(f"--- TOOL RESULT ---\n{tool_result}")
+            prompt_parts.append(
+                "Based on the tool result above, either call another tool or "
+                "give a final answer to the user."
+            )
+
+        # Should not reach here, but just in case
+        yield "I was unable to complete the request within the tool call limit."

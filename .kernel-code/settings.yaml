@@ -1,0 +1,6 @@
+# kernel code project settings
+default_backend: triton
+default_gpu: L40S
+max_budget: 5.00
+auto_save: true
+dashboard_port: 8050

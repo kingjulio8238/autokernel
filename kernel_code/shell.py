@@ -35,6 +35,13 @@ from rich.text import Text
 from kernel_code.agent_loop import AgentLoop
 from kernel_code.hooks import HookRegistry, create_default_hooks
 from kernel_code.permissions import BudgetTracker, confirm_cost, estimate_cost
+from kernel_code.settings import (
+    KernelCodeSettings,
+    load_settings,
+    save_project_setting,
+    settings_to_config,
+    _FIELD_TYPES,
+)
 
 # Project root -- cache lives at repo root
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -56,6 +63,13 @@ class KernelCodeShell:
         self._active_skill: dict | None = None
         self._skill_library: list[dict] = self._load_skills()
 
+        # Load hierarchical settings (global -> project -> local)
+        self._settings: KernelCodeSettings = load_settings()
+
+        # Apply budget cap from settings
+        if self._settings.max_budget is not None:
+            self._budget = BudgetTracker(max_budget=self._settings.max_budget)
+
         # Discover project-level KERNEL.md / kernel.toml config
         from kernel_code.kernel_config import KernelConfig, discover_kernel_config
 
@@ -72,6 +86,7 @@ class KernelCodeShell:
             "/dashboard": self._cmd_dashboard,
             "/history": self._cmd_history,
             "/skills": self._cmd_skills,
+            "/config": self._cmd_config,
             "/help": self._cmd_help,
             "/quit": self._cmd_quit,
             "/exit": self._cmd_quit,
@@ -154,21 +169,22 @@ class KernelCodeShell:
     # ------------------------------------------------------------------
 
     def _cmd_optimize(self, args_str: str) -> None:
-        """/optimize --reference FILE [--backend triton|cuda] [--config YAML] [--mock] [--iterations N]"""
+        """/optimize --reference FILE [--backend triton|cuda] [--config YAML] [--mock] [--iterations N] [--parallel]"""
         try:
             tokens = shlex.split(args_str)
         except ValueError as exc:
             self._console.print(f"[red]Parse error:[/red] {exc}")
             return
 
-        # Simple argument parsing
+        # Simple argument parsing -- defaults from settings
         reference = None
-        backend = "triton"
+        backend = self._settings.default_backend
         config_path = None
         mock = True
         iterations = 20
         level = 1
         problem = 23
+        parallel = False
 
         i = 0
         while i < len(tokens):
@@ -191,6 +207,9 @@ class KernelCodeShell:
             elif tok == "--no-mock":
                 mock = False
                 i += 1
+            elif tok == "--parallel":
+                parallel = True
+                i += 1
             elif tok in ("--level",) and i + 1 < len(tokens):
                 level = int(tokens[i + 1])
                 i += 2
@@ -211,8 +230,10 @@ class KernelCodeShell:
             return
 
         # Cost gate -- estimate and confirm before running
-        gpu_type = "L40S"  # default; live mode may override from config
-        est = estimate_cost(iterations, gpu_type=gpu_type)
+        # Parallel mode runs two backends, so double the cost estimate
+        gpu_type = self._settings.default_gpu
+        cost_multiplier = 2 if parallel else 1
+        est = estimate_cost(iterations, gpu_type=gpu_type) * cost_multiplier
 
         if not self._budget.check(est):
             self._console.print(
@@ -222,12 +243,25 @@ class KernelCodeShell:
             )
             return
 
-        if not confirm_cost(est, gpu_type, iterations, console=self._console):
+        # Auto-approve if cost is below the configured threshold
+        if est < self._settings.auto_confirm_under:
+            pass  # skip confirmation
+        elif not confirm_cost(est, gpu_type, iterations * cost_multiplier, console=self._console):
             self._console.print("[dim]Optimization cancelled.[/dim]")
             return
 
         self._console.print()
-        if mock:
+
+        if parallel:
+            self._run_parallel_optimization(
+                reference=reference,
+                config_path=config_path,
+                iterations=iterations,
+                mock=mock,
+                level=level,
+                problem=problem,
+            )
+        elif mock:
             self._run_mock_optimization(iterations=iterations)
         else:
             self._run_live_optimization(
@@ -363,12 +397,15 @@ class KernelCodeShell:
             ("  --config YAML", "  Configuration file"),
             ("  --iterations N", "  Number of iterations (default: 20)"),
             ("  --mock / --no-mock", "  Use mock data (default: --mock)"),
+            ("  --parallel", "  Run both Triton and CUDA, compare results"),
             ("/show best", "Display best kernel with syntax highlighting"),
             ("/show results", "Display summary table of current session"),
             ("/show run N", "Display details of run N"),
             ("/compare", "Compare current best to baseline (side-by-side)"),
             ("/dashboard", "Open browser dashboard for current session"),
             ("/history", "List all runs in current session"),
+            ("/config", "Show resolved settings (with source files)"),
+            ("/config set KEY VALUE", "Update a project setting"),
             ("/skills", "List all available optimization skills"),
             ("/skill:NAME", "Load a skill as seed for next /optimize"),
             ("/help", "Show this help message"),
@@ -492,6 +529,82 @@ class KernelCodeShell:
                 continue
         return skills
 
+    def _cmd_config(self, args_str: str) -> None:
+        """/config -- show current settings.  /config set KEY VALUE -- update project settings."""
+        tokens = args_str.strip().split()
+
+        if not tokens:
+            # Show all resolved settings with origins
+            self._show_config()
+            return
+
+        if tokens[0].lower() == "set" and len(tokens) >= 3:
+            key = tokens[1]
+            value = " ".join(tokens[2:])
+            self._set_config(key, value)
+            return
+
+        self._console.print(
+            "[dim]Usage:[/dim] /config  or  /config set KEY VALUE"
+        )
+
+    def _show_config(self) -> None:
+        """Display resolved settings, showing which file each value came from."""
+        self._console.print()
+
+        table = Table(
+            title="Resolved Settings",
+            show_header=True,
+            header_style="bold",
+            border_style="dim",
+            pad_edge=True,
+        )
+        table.add_column("Setting", style="cyan", width=22)
+        table.add_column("Value", width=28)
+        table.add_column("Source", style="dim", ratio=1)
+
+        for key in _FIELD_TYPES:
+            value = getattr(self._settings, key, None)
+            origin = self._settings._origins.get(key, "default")
+            value_str = str(value) if value is not None else "[dim]None[/dim]"
+            table.add_row(key, value_str, origin)
+
+        self._console.print(table)
+
+        if self._settings.source_files:
+            self._console.print()
+            self._console.print("[dim]Loaded from:[/dim]")
+            for f in self._settings.source_files:
+                self._console.print(f"  [dim]{f}[/dim]")
+
+        self._console.print()
+
+    def _set_config(self, key: str, raw_value: str) -> None:
+        """Update a single setting in the project settings file."""
+        if key not in _FIELD_TYPES:
+            self._console.print(
+                f"[red]Unknown setting:[/red] {escape(key)}. "
+                f"Valid keys: {', '.join(sorted(_FIELD_TYPES))}"
+            )
+            return
+
+        try:
+            path = save_project_setting(key, raw_value)
+        except Exception as exc:
+            self._console.print(f"[red]Error saving setting:[/red] {escape(str(exc))}")
+            return
+
+        # Reload settings so the change takes effect immediately
+        self._settings = load_settings()
+        if self._settings.max_budget is not None:
+            self._budget = BudgetTracker(max_budget=self._settings.max_budget)
+
+        new_value = getattr(self._settings, key, None)
+        self._console.print(
+            f"[green]Updated:[/green] {key} = {new_value}  "
+            f"[dim](saved to {path})[/dim]"
+        )
+
     def _cmd_quit(self, _args_str: str) -> None:
         """/quit or /exit -- exit the shell."""
         self._console.print("[dim]Goodbye.[/dim]")
@@ -507,6 +620,9 @@ class KernelCodeShell:
         The AgentLoop sends the user's question plus session context and
         available tools to the LLM.  The LLM may call tools (up to 3 per
         turn) to gather data before producing a final text answer.
+
+        Uses streaming to display the final response token-by-token.
+        Falls back to non-streaming if streaming fails.
         """
         # Lazy-initialise the agent loop so we only create the LLM
         # provider when actually needed.
@@ -517,17 +633,46 @@ class KernelCodeShell:
             self._agent_loop.update_context(self._session_data)
 
         self._console.print()
-        with self._console.status("[dim]Thinking...[/dim]", spinner="dots"):
-            try:
-                answer = asyncio.run(self._agent_loop.run(text))
-            except Exception as exc:
-                self._console.print(
-                    f"[red]Agent error:[/red] {escape(str(exc))}"
-                )
-                return
 
-        self._console.print(escape(answer))
+        try:
+            asyncio.run(self._stream_response(text))
+        except Exception:
+            # Fall back to non-streaming if streaming fails
+            with self._console.status("[dim]Thinking...[/dim]", spinner="dots"):
+                try:
+                    answer = asyncio.run(self._agent_loop.run(text))
+                except Exception as exc:
+                    self._console.print(
+                        f"[red]Agent error:[/red] {escape(str(exc))}"
+                    )
+                    return
+            self._console.print(escape(answer))
+
         self._console.print()
+
+    async def _stream_response(self, text: str) -> None:
+        """Run the agent loop with streaming and print tokens as they arrive.
+
+        Shows a "Thinking..." spinner while tool calls are being processed.
+        Once the final response starts streaming, the spinner is removed and
+        tokens are printed directly.
+        """
+        got_first_token = False
+        status = self._console.status("[dim]Thinking...[/dim]", spinner="dots")
+        status.start()
+        try:
+            async for token in self._agent_loop.run_stream(text):
+                if not got_first_token:
+                    # Stop the spinner before printing the first token
+                    status.stop()
+                    got_first_token = True
+                self._console.print(escape(token), end="")
+        finally:
+            if not got_first_token:
+                status.stop()
+        if got_first_token:
+            # Print a final newline after streaming completes
+            self._console.print()
 
     # ------------------------------------------------------------------
     # Optimization runners
@@ -657,10 +802,14 @@ class KernelCodeShell:
         try:
             from openkernel.config import Backend as _Backend, OpenKernelConfig, ModalConfig, GpuType
 
+            # Build config from settings hierarchy, then layer CLI overrides
+            settings_kwargs = settings_to_config(self._settings)
             config = OpenKernelConfig(
-                backend=_Backend.CUDA if backend == "cuda" else _Backend.TRITON,
+                **settings_kwargs,
                 max_iterations=iterations,
             )
+            # CLI --backend overrides settings
+            config.backend = _Backend.CUDA if backend == "cuda" else _Backend.TRITON
             if config_path:
                 config = OpenKernelConfig.from_yaml(config_path)
 
@@ -740,6 +889,80 @@ class KernelCodeShell:
         except Exception as exc:
             self._console.print(f"[red]Optimization failed:[/red] {escape(str(exc))}")
 
+    def _run_parallel_optimization(
+        self,
+        reference: str | None,
+        config_path: str | None,
+        iterations: int,
+        mock: bool,
+        level: int,
+        problem: int,
+    ) -> None:
+        """Run optimization with both Triton and CUDA backends, compare results."""
+        from kernel_code.parallel import run_parallel_backends, print_comparison
+
+        self._console.print("[bold]Running parallel backend exploration (Triton + CUDA)...[/bold]")
+        self._console.print(f"  Mode: {'mock' if mock else 'live'}")
+        self._console.print(f"  Iterations per backend: {iterations}")
+        self._console.print()
+
+        # Build base config for live mode
+        config_base = None
+        if not mock:
+            from openkernel.config import OpenKernelConfig
+
+            if config_path:
+                config_base = OpenKernelConfig.from_yaml(config_path)
+            else:
+                settings_kwargs = settings_to_config(self._settings)
+                config_base = OpenKernelConfig(
+                    **settings_kwargs,
+                    max_iterations=iterations,
+                )
+
+        results = run_parallel_backends(
+            reference_path=reference or "",
+            config_base=config_base,
+            iterations=iterations,
+            mock=mock,
+            console=self._console,
+        )
+
+        triton_result = results.get("triton", {})
+        cuda_result = results.get("cuda", {})
+        winner = results.get("winner", "none")
+
+        # Print comparison table
+        if triton_result and cuda_result:
+            print_comparison(triton_result, cuda_result, self._console)
+
+        # Record cost (both backends)
+        run_cost = estimate_cost(iterations) * 2
+        self._total_cost += run_cost
+        self._budget.record(run_cost)
+
+        # Load the winner's session data into the shell state
+        winner_session = results.get("winner_session", {})
+        if winner_session:
+            self._session_data = winner_session
+            self._runs = winner_session.get("iterations", [])
+
+            best = None
+            for it in self._runs:
+                if it["status"] == "keep":
+                    if best is None or it["speedup"] > best["speedup"]:
+                        best = it
+            self._best_run = best
+
+            kept = sum(1 for it in self._runs if it["status"] == "keep")
+
+            self._console.print(
+                f"[dim]Loaded [bold]{winner}[/bold] results into session "
+                f"({kept}/{len(self._runs)} kept, "
+                f"best {winner_session.get('best_speedup', 0.0):.2f}x).[/dim]"
+            )
+            self._console.print()
+
     # ------------------------------------------------------------------
     # Display helpers
     # ------------------------------------------------------------------
@@ -752,6 +975,10 @@ class KernelCodeShell:
         )
         self._console.print()
         self._console.print(f"  Session: [cyan]{self._session_id}[/cyan] (new)")
+        if self._settings.source_files:
+            self._console.print(
+                f"  Settings: [green]{len(self._settings.source_files)} file(s) loaded[/green]"
+            )
         if self._kernel_config and self._kernel_config.source_path:
             self._console.print(
                 f"  Loaded KERNEL.md from: [green]{self._kernel_config.source_path}[/green]"
