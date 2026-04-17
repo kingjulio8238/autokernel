@@ -78,7 +78,11 @@ def _check(condition: bool, pass_msg: str, fail_msg: str) -> bool:
 
 
 def _has_modal() -> bool:
-    return bool(os.environ.get("MODAL_TOKEN_ID") or Path.home().joinpath(".modal").is_dir())
+    return bool(
+        os.environ.get("MODAL_TOKEN_ID")
+        or Path.home().joinpath(".modal.toml").is_file()
+        or Path.home().joinpath(".modal").is_dir()
+    )
 
 
 def _has_minimax() -> bool:

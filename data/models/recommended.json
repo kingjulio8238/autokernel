@@ -1,7 +1,7 @@
 {
   "models": [
     {
-      "id": "minimax/MiniMax-M2.5",
+      "id": "openai/MiniMax-M2.5",
       "provider": "minimax",
       "name": "MiniMax M2.5",
       "strengths": [
@@ -21,7 +21,7 @@
       "recommended_for": ["default", "general", "triton", "cuda", "sweeps"]
     },
     {
-      "id": "minimax/MiniMax-M2.7",
+      "id": "openai/MiniMax-M2.7",
       "provider": "minimax",
       "name": "MiniMax M2.7",
       "strengths": [
@@ -114,9 +114,9 @@
       "providers": ["together", "fireworks", "openrouter"]
     }
   ],
-  "default": "minimax/MiniMax-M2.5",
+  "default": "openai/MiniMax-M2.5",
   "tiers": {
-    "default": "minimax/MiniMax-M2.5",
+    "default": "openai/MiniMax-M2.5",
     "premium": "z-ai/glm-5.1",
     "speed": "moonshotai/kimi-k2.5",
     "budget": "qwen3.5-397b",

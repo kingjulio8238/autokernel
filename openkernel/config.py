@@ -38,10 +38,13 @@ class ModelConfig(BaseModel):
 
     Default: MiniMax M2.5 — best cost/quality/integration ratio for kernel optimization.
     80.2% SWE-Bench Verified at $0.30/$1.20 per M tokens with native OpenAI-compatible API.
+
+    MiniMax uses OpenAI-compatible API, so litellm model_id uses the ``openai/`` prefix
+    with a custom api_base pointing to ``api.minimax.io``.
     """
 
     provider: str = "minimax"  # minimax, openai, anthropic, google, local, etc.
-    model_id: str = "minimax/MiniMax-M2.5"
+    model_id: str = "openai/MiniMax-M2.5"  # openai/ prefix for litellm with custom api_base
     api_key: str | None = None  # loaded from env if not set (MINIMAX_API_KEY)
     api_base: str | None = "https://api.minimax.io/v1"  # OpenAI-compatible endpoint
     temperature: float = 0.7
@@ -170,10 +173,14 @@ class OpenKernelConfig(BaseModel):
     def check_modal(self) -> bool:
         """Check if Modal is likely configured (token exists).
 
-        Returns ``True`` when either ``MODAL_TOKEN_ID`` is set in the
-        environment **or** a ``~/.modal`` configuration directory exists.
+        Returns ``True`` when any of these are present:
+        - ``MODAL_TOKEN_ID`` environment variable
+        - ``~/.modal.toml`` configuration file (created by ``modal setup``)
+        - ``~/.modal/`` configuration directory (legacy)
         """
         if os.environ.get("MODAL_TOKEN_ID"):
+            return True
+        if Path.home().joinpath(".modal.toml").is_file():
             return True
         if Path.home().joinpath(".modal").is_dir():
             return True

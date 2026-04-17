@@ -19,9 +19,11 @@ logger = logging.getLogger(__name__)
 # Estimated cost per million tokens (input/output) for common models.
 # litellm has its own cost tracking, but we keep a fallback table.
 _COST_PER_M_TOKENS: dict[str, tuple[float, float]] = {
-    # Default — MiniMax M2.5
-    "minimax/MiniMax-M2.5": (0.30, 1.20),
-    "minimax/MiniMax-M2.7": (0.30, 1.20),
+    # Default — MiniMax M2.5 (via OpenAI-compatible API)
+    "openai/MiniMax-M2.5": (0.30, 1.20),
+    "openai/MiniMax-M2.7": (0.30, 1.20),
+    "MiniMax-M2.5": (0.30, 1.20),
+    "MiniMax-M2.7": (0.30, 1.20),
     # Open-source premium
     "z-ai/glm-5.1": (1.40, 4.40),
     "moonshotai/kimi-k2.5": (0.50, 2.80),
