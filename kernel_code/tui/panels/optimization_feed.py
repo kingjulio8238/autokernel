@@ -46,7 +46,7 @@ class OptimizationFeedPanel(Widget):
 
     OptimizationFeedPanel > VerticalScroll {
         height: 1fr;
-        padding: 0 1;
+        padding: 1 2;
     }
 
     OptimizationFeedPanel #feed-content {
@@ -93,23 +93,36 @@ class OptimizationFeedPanel(Widget):
 
     def _build_content(self) -> str:
         """Build the full panel content as a Rich-markup string."""
+        sep = "[dim]" + "\u2500" * 44 + "[/dim]"  # thin horizontal rule
         parts: list[str] = []
 
+        parts.append("")
         parts.append(self._render_header())
         parts.append("")
         parts.append(self._render_summary())
         parts.append("")
+        parts.append(sep)
 
         if self._visible:
+            parts.append("")
             parts.append(self._render_intent())
+            parts.append("")
+            parts.append(sep)
             parts.append("")
             parts.append(self._render_critic())
             parts.append("")
+            parts.append(sep)
+            parts.append("")
             parts.append(self._render_best_kernel())
             parts.append("")
+            parts.append(sep)
+            parts.append("")
             parts.append(self._render_recent_activity())
+            parts.append("")
         else:
+            parts.append("")
             parts.append("[dim]Waiting for first iteration...[/dim]")
+            parts.append("")
 
         return "\n".join(parts)
 

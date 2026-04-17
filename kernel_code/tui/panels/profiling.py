@@ -38,9 +38,10 @@ class ProfilingPanel(Widget):
     ProfilingPanel {
         height: auto;
         min-height: 10;
+        margin-bottom: 1;
         background: #24231f;
         border: solid #3d3a36;
-        padding: 0;
+        padding: 0 1;
     }
     ProfilingPanel > Static {
         height: 1;
