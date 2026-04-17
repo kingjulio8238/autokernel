@@ -23,8 +23,8 @@ class StatusBar(Widget):
     StatusBar {
         dock: bottom;
         height: 2;
-        background: #252220;
-        border-top: solid #3d3835;
+        background: #24231f;
+        border-top: solid #3d3a36;
         padding: 0 1;
     }
     """
@@ -131,13 +131,13 @@ class StatusBar(Widget):
         # --- Line 1: info ---
         line1 = Text()
         line1.append(" ")
-        line1.append(self._hardware, style="bold #e8e0d8")
+        line1.append(self._hardware, style="bold #e0ddd8")
         line1.append(sep, style="#6b6360")
-        line1.append(self._backend, style="#e8e0d8")
+        line1.append(self._backend, style="#e0ddd8")
         line1.append(sep, style="#6b6360")
-        line1.append(model_short, style="#e8e0d8")
+        line1.append(model_short, style="#e0ddd8")
         line1.append(sep, style="#6b6360")
-        line1.append(self._problem, style="bold #e8e0d8")
+        line1.append(self._problem, style="bold #e0ddd8")
         line1.append(sep, style="#6b6360")
         line1.append(self._format_iter(), style="bold #fbbf24")
         line1.append(sep, style="#6b6360")
@@ -156,7 +156,7 @@ class StatusBar(Widget):
             ("r", "oofline", False),
             ("q", "uit", True),
         ]:
-            line2.append(key, style="bold #e8e0d8 underline")
+            line2.append(key, style="bold #e0ddd8 underline")
             line2.append(label, style="#a09890")
             if not last:
                 line2.append("  ", style="")

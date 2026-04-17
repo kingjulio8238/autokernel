@@ -37,9 +37,9 @@ class OptimizationFeedPanel(Widget):
     OptimizationFeedPanel {
         width: 2fr;
         height: 1fr;
-        background: #252220;
-        border: solid #3d3835;
-        color: #e8e0d8;
+        background: #24231f;
+        border: solid #3d3a36;
+        color: #e0ddd8;
         padding: 0;
         overflow-y: auto;
     }

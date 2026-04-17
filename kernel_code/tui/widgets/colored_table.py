@@ -45,7 +45,7 @@ class ColoredTable(Widget):
     ColoredTable {
         height: auto;
         padding: 0 1;
-        color: #e8e0d8;
+        color: #e0ddd8;
     }
     """
 
@@ -122,7 +122,7 @@ class ColoredTable(Widget):
 
             # Determine style
             if is_best_row:
-                style = "bold #4ade80 on #1a3a2a"
+                style = "bold #4ade80 on #1a2e1a"
             elif is_keep:
                 style = f"bold {color}"
             elif is_discard:

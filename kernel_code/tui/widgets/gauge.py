@@ -33,7 +33,7 @@ class GaugeWidget(Widget):
     GaugeWidget {
         height: 1;
         padding: 0 1;
-        color: #e8e0d8;
+        color: #e0ddd8;
     }
     """
 

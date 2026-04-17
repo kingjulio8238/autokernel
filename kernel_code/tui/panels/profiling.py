@@ -38,8 +38,8 @@ class ProfilingPanel(Widget):
     ProfilingPanel {
         height: auto;
         min-height: 10;
-        background: #252220;
-        border: solid #3d3835;
+        background: #24231f;
+        border: solid #3d3a36;
         padding: 0;
     }
     ProfilingPanel > Static {
@@ -47,7 +47,7 @@ class ProfilingPanel(Widget):
         padding: 0 1;
     }
     ProfilingPanel > .panel-title {
-        background: #302c28;
+        background: #2e2c28;
         color: #a09890;
         text-style: bold;
     }

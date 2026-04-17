@@ -51,7 +51,7 @@ class SparklineWidget(Widget):
         height: auto;
         min-height: 7;
         padding: 0 1;
-        color: #e8e0d8;
+        color: #e0ddd8;
     }
     """
 

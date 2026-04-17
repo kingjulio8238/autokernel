@@ -22,13 +22,13 @@ class TrajectoryPanel(Widget):
     TrajectoryPanel {
         height: auto;
         min-height: 8;
-        background: #252220;
-        border: solid #3d3835;
+        background: #24231f;
+        border: solid #3d3a36;
         padding: 0;
     }
     TrajectoryPanel > Static {
         height: 1;
-        background: #302c28;
+        background: #2e2c28;
         color: #a09890;
         text-style: bold;
         padding: 0 1;

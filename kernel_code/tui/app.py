@@ -43,7 +43,7 @@ class KernelCodeApp(App):
     CSS = """
     Screen {
         layout: vertical;
-        background: #1a1816;
+        background: #1a1a18;
     }
 
     #main-area {
