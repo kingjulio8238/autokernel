@@ -41,7 +41,7 @@ __all__ = [
 
 async def optimize(
     reference_source: str,
-    backend: str = "triton",
+    backend: str | None = None,
     config: OpenKernelConfig | None = None,
     eval_fn: Callable[[str, str], Awaitable[EvalResult]] | None = None,
 ) -> OptimizationResult:
@@ -53,7 +53,8 @@ async def optimize(
     Args:
         reference_source: Python source code of the reference kernel
             (must define ``Model``, ``get_inputs``, ``get_init_inputs``).
-        backend: Target backend — ``"triton"`` or ``"cuda"``.
+        backend: Target backend — ``"triton"`` or ``"cuda"``. If None,
+            uses the backend from config.
         config: Full configuration. Defaults are used when ``None``.
         eval_fn: Optional async evaluation function
             ``(kernel_source, reference_source) -> EvalResult``.
@@ -72,7 +73,7 @@ async def optimize(
         config = OpenKernelConfig()
 
     # Override backend in config if the caller specified one explicitly.
-    if backend != config.backend.value:
+    if backend is not None and backend != config.backend.value:
         config = config.model_copy(update={"backend": Backend(backend)})
 
     try:
