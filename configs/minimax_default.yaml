@@ -1,0 +1,23 @@
+# MiniMax M2.5 — default production config
+# Good for: production optimization, KernelBench sweeps
+# Cost: $0.30/$1.20 per M tokens
+
+backend: triton
+eval_mode: fast
+max_iterations: 50
+max_retries_per_intent: 5
+stagnation_threshold: 7
+
+model:
+  provider: minimax
+  model_id: openai/MiniMax-M2.5
+  api_base: https://api.minimax.io/v1
+  temperature: 0.7
+  max_tokens: 8192
+
+modal:
+  gpu_type: L40S
+  timeout_seconds: 300
+
+capture_traces: true
+analytical_prescreen: true

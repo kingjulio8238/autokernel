@@ -111,6 +111,7 @@ class OpenKernelConfig(BaseModel):
 
     _PROVIDER_ENV_VARS: ClassVar[dict[str, str]] = {
         "minimax": "MINIMAX_API_KEY",
+        "groq": "GROQ_API_KEY",
         "anthropic": "ANTHROPIC_API_KEY",
         "openai": "OPENAI_API_KEY",
         "google": "GOOGLE_API_KEY",
@@ -185,3 +186,45 @@ class OpenKernelConfig(BaseModel):
         if Path.home().joinpath(".modal").is_dir():
             return True
         return False
+
+    # -- YAML config -----------------------------------------------------------
+
+    @classmethod
+    def from_yaml(cls, path: str | Path) -> "OpenKernelConfig":
+        """Load configuration from a YAML file.
+
+        YAML fields map directly to OpenKernelConfig fields. Nested objects
+        (model, modal, hub) use nested dicts. Missing fields use defaults.
+
+        Example YAML::
+
+            backend: triton
+            eval_mode: fast
+            max_iterations: 50
+            model:
+              provider: groq
+              model_id: groq/llama-3.3-70b-versatile
+            modal:
+              gpu_type: L40S
+        """
+        import yaml  # pip install pyyaml
+
+        path = Path(path)
+        if not path.exists():
+            raise ConfigurationError(f"Config file not found: {path}")
+
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+
+        return cls(**data)
+
+    def to_yaml(self, path: str | Path) -> None:
+        """Save configuration to a YAML file."""
+        import yaml
+
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        data = self.model_dump(mode="json")
+        with open(path, "w") as f:
+            yaml.dump(data, f, default_flow_style=False, sort_keys=False)

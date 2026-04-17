@@ -1,0 +1,21 @@
+# Fast iteration with Groq free tier
+# Good for: testing, development, verifying the flow works
+# Cost: free (Groq free tier, 30 req/min)
+
+backend: triton
+eval_mode: fast
+max_iterations: 10
+max_retries_per_intent: 3
+
+model:
+  provider: groq
+  model_id: groq/llama-3.3-70b-versatile
+  temperature: 0.7
+  max_tokens: 8192
+
+modal:
+  gpu_type: L40S
+  timeout_seconds: 300
+
+capture_traces: true
+analytical_prescreen: true

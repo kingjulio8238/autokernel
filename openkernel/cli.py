@@ -30,50 +30,74 @@ def main() -> None:
     help="Path to reference kernel source file.",
 )
 @click.option(
+    "--config", "config_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="YAML config file (e.g. configs/groq_fast.yaml). CLI flags override YAML values.",
+)
+@click.option(
     "--backend",
     type=click.Choice(["triton", "cuda"], case_sensitive=False),
-    default="triton",
-    show_default=True,
-    help="Target backend.",
+    default=None,
+    help="Target backend (default: from config or triton).",
 )
 @click.option(
     "--model",
     "model_id",
     default=None,
-    help="LLM model ID (e.g. claude-sonnet-4-20250514).",
+    help="LLM model ID (e.g. groq/llama-3.3-70b-versatile).",
 )
 @click.option(
     "--eval-mode",
     type=click.Choice(["fast", "thorough"], case_sensitive=False),
-    default="fast",
-    show_default=True,
-    help="Evaluation mode.",
+    default=None,
+    help="Evaluation mode (default: from config or fast).",
 )
 @click.option(
     "--max-iterations",
     type=int,
     default=None,
-    help="Maximum optimization iterations (default: 100).",
+    help="Maximum optimization iterations (default: from config or 100).",
 )
 def optimize(
     reference: Path,
-    backend: str,
+    config_path: Path | None,
+    backend: str | None,
     model_id: str | None,
-    eval_mode: str,
+    eval_mode: str | None,
     max_iterations: int | None,
 ) -> None:
-    """Optimize a GPU kernel from a reference implementation."""
+    """Optimize a GPU kernel from a reference implementation.
+
+    Use --config to load a YAML preset (see configs/ directory).
+    CLI flags override YAML values.
+
+    Examples:
+
+        openkernel optimize --reference kernel.py --config configs/groq_fast.yaml
+
+        openkernel optimize --reference kernel.py --model groq/llama-3.3-70b-versatile
+
+        openkernel optimize --reference kernel.py --config configs/minimax_default.yaml --max-iterations 20
+    """
     reference_source = reference.read_text()
 
-    # Build config
-    config_updates: dict = {
-        "backend": Backend(backend),
-        "eval_mode": EvalMode(eval_mode),
-    }
-    if max_iterations is not None:
-        config_updates["max_iterations"] = max_iterations
+    # Load config: YAML file → CLI overrides → defaults
+    if config_path is not None:
+        config = OpenKernelConfig.from_yaml(config_path)
+    else:
+        config = OpenKernelConfig()
 
-    config = OpenKernelConfig(**config_updates)
+    # Apply CLI overrides on top of YAML/defaults
+    updates: dict = {}
+    if backend is not None:
+        updates["backend"] = Backend(backend)
+    if eval_mode is not None:
+        updates["eval_mode"] = EvalMode(eval_mode)
+    if max_iterations is not None:
+        updates["max_iterations"] = max_iterations
+    if updates:
+        config = config.model_copy(update=updates)
 
     if model_id is not None:
         config = config.model_copy(

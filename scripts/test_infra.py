@@ -311,19 +311,32 @@ class ModelNew(nn.Module):
 # Test 4: Single LLM call
 # ---------------------------------------------------------------------------
 
-def test_4_llm_call() -> bool:
-    _header(4, "Single LLM call (MiniMax M2.5)", "<$0.01", "MINIMAX_API_KEY")
+def _has_groq() -> bool:
+    return bool(os.environ.get("GROQ_API_KEY"))
 
-    if not _has_minimax():
-        _skip("MINIMAX_API_KEY not set")
+
+def test_4_llm_call() -> bool:
+    # Pick the best available LLM provider
+    if _has_groq():
+        provider, model_id, api_base, label = "groq", "groq/llama-3.3-70b-versatile", None, "Groq Llama 3.3 70B"
+    elif _has_minimax():
+        provider, model_id, api_base, label = "minimax", "openai/MiniMax-M2.5", "https://api.minimax.io/v1", "MiniMax M2.5"
+    else:
+        provider, model_id, api_base, label = None, None, None, None
+
+    _header(4, f"Single LLM call ({label or 'no provider'})", "<$0.01", "GROQ_API_KEY or MINIMAX_API_KEY")
+
+    if provider is None:
+        _skip("No LLM API key set (set GROQ_API_KEY or MINIMAX_API_KEY)")
         return False
 
     try:
         from openkernel.llm.provider import LLMProvider
         from openkernel.config import ModelConfig
 
-        config = ModelConfig()
+        config = ModelConfig(provider=provider, model_id=model_id, api_base=api_base)
         llm = LLMProvider(config)
+        _pass(f"Using {label}")
 
         response = asyncio.run(llm.generate(
             "Write a Python function that returns the sum of two numbers. "
@@ -611,8 +624,12 @@ def main() -> None:
     print()
     print("Credentials detected:")
     print(f"  Modal:   {'YES' if _has_modal() else 'NO  (run: modal setup)'}")
+    print(f"  Groq:    {'YES' if _has_groq() else 'NO  (set: GROQ_API_KEY — free tier)'}")
     print(f"  MiniMax: {'YES' if _has_minimax() else 'NO  (set: MINIMAX_API_KEY)'}")
     print(f"  HF Hub:  {'YES' if _has_hf() else 'NO  (set: HF_TOKEN)'}")
+    llm_available = _has_groq() or _has_minimax()
+    if not llm_available:
+        print(f"  LLM:     NO  (need at least one: GROQ_API_KEY or MINIMAX_API_KEY)")
 
     if args.local_only:
         tests_to_run = [(n, name, fn) for n, name, fn in ALL_TESTS if n == 1]

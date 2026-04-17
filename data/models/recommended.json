@@ -78,6 +78,41 @@
       "providers": ["fireworks", "together", "deepinfra", "openrouter"]
     },
     {
+      "id": "groq/llama-3.3-70b-versatile",
+      "provider": "groq",
+      "name": "Llama 3.3 70B (Groq)",
+      "strengths": [
+        "Free tier (30 req/min, no credit card)",
+        "Very fast inference (Groq LPU)",
+        "Strong coding from Llama 3.3 70B",
+        "Good for testing and development"
+      ],
+      "cost_tier": "free",
+      "cost_per_m_input": 0.59,
+      "cost_per_m_output": 0.79,
+      "context_window": 131072,
+      "api_base": null,
+      "env_key": "GROQ_API_KEY",
+      "recommended_for": ["testing", "development", "free_tier"]
+    },
+    {
+      "id": "groq/qwen-qwq-32b",
+      "provider": "groq",
+      "name": "Qwen QwQ 32B (Groq)",
+      "strengths": [
+        "Free tier",
+        "Strong reasoning model",
+        "Good for kernel optimization strategy"
+      ],
+      "cost_tier": "free",
+      "cost_per_m_input": 0.20,
+      "cost_per_m_output": 0.20,
+      "context_window": 131072,
+      "api_base": null,
+      "env_key": "GROQ_API_KEY",
+      "recommended_for": ["testing", "reasoning", "free_tier"]
+    },
+    {
       "id": "claude-sonnet-4-20250514",
       "provider": "anthropic",
       "name": "Claude Sonnet 4",

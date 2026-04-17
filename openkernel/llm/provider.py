@@ -24,6 +24,11 @@ _COST_PER_M_TOKENS: dict[str, tuple[float, float]] = {
     "openai/MiniMax-M2.7": (0.30, 1.20),
     "MiniMax-M2.5": (0.30, 1.20),
     "MiniMax-M2.7": (0.30, 1.20),
+    # Groq (free tier / very cheap)
+    "groq/llama-3.3-70b-versatile": (0.59, 0.79),
+    "groq/llama-3.1-8b-instant": (0.05, 0.08),
+    "groq/qwen-qwq-32b": (0.20, 0.20),
+    "groq/meta-llama/llama-4-scout-17b-16e-instruct": (0.11, 0.34),
     # Open-source premium
     "z-ai/glm-5.1": (1.40, 4.40),
     "moonshotai/kimi-k2.5": (0.50, 2.80),
@@ -57,6 +62,7 @@ class LLMProvider:
         import os
         _PROVIDER_ENV_VARS = {
             "minimax": "MINIMAX_API_KEY",
+            "groq": "GROQ_API_KEY",
             "anthropic": "ANTHROPIC_API_KEY",
             "openai": "OPENAI_API_KEY",
             "google": "GOOGLE_API_KEY",
