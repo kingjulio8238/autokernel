@@ -1,8 +1,10 @@
 """CLI entry point for kernel-code.
 
 Commands:
-    kernel-code optimize  — launch the optimization TUI
-    kernel-code dashboard — open the Plotly Dash dashboard in a browser
+    kernel-code            — launch the interactive shell (default)
+    kernel-code shell      — launch the interactive shell (explicit)
+    kernel-code optimize   — launch the optimization TUI (non-interactive)
+    kernel-code dashboard  — open the Plotly Dash dashboard in a browser
 """
 
 from __future__ import annotations
@@ -12,10 +14,44 @@ import webbrowser
 import click
 
 
-@click.group()
+class _ShellDefaultGroup(click.Group):
+    """Click group that launches the shell when no subcommand is given.
+
+    If the user runs ``kernel-code`` with no arguments, or with arguments
+    that don't match a known subcommand, fall through to the shell.
+    """
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        # If no args at all, invoke the shell
+        if not args:
+            args = ["shell"]
+        return super().parse_args(ctx, args)
+
+    def resolve_command(self, ctx: click.Context, args: list[str]) -> tuple:
+        try:
+            return super().resolve_command(ctx, args)
+        except click.UsageError:
+            # Unknown subcommand -- fall through to shell
+            return "shell", "shell", args
+
+
+@click.group(cls=_ShellDefaultGroup)
 @click.version_option(version="0.1.0", prog_name="kernel-code")
 def main() -> None:
     """kernel code -- terminal-native GPU kernel optimization tool."""
+
+
+@main.command()
+@click.option("--session", type=str, default=None, help="Resume a specific session ID.")
+def shell(session: str | None) -> None:
+    """Launch the interactive kernel optimization shell (default)."""
+    from kernel_code.shell import KernelCodeShell
+
+    s = KernelCodeShell(session_id=session)
+    try:
+        s.run()
+    except (SystemExit, KeyboardInterrupt):
+        pass
 
 
 @main.command()
