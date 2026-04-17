@@ -360,10 +360,18 @@ def test_4_llm_call() -> bool:
 # ---------------------------------------------------------------------------
 
 def test_5_agent_pair() -> bool:
-    _header(5, "Generator + Critic on real problem", "<$0.05", "MINIMAX_API_KEY")
+    # Pick the best available LLM provider (same logic as test 4)
+    if _has_groq():
+        provider, model_id, api_base, label = "groq", "groq/llama-3.3-70b-versatile", None, "Groq Llama 3.3 70B"
+    elif _has_minimax():
+        provider, model_id, api_base, label = "minimax", "openai/MiniMax-M2.5", "https://api.minimax.io/v1", "MiniMax M2.5"
+    else:
+        provider, model_id, api_base, label = None, None, None, None
 
-    if not _has_minimax():
-        _skip("MINIMAX_API_KEY not set")
+    _header(5, f"Generator + Critic ({label or 'no provider'})", "<$0.05", "GROQ_API_KEY or MINIMAX_API_KEY")
+
+    if provider is None:
+        _skip("No LLM API key set (set GROQ_API_KEY or MINIMAX_API_KEY)")
         return False
 
     try:
@@ -374,11 +382,12 @@ def test_5_agent_pair() -> bool:
         from openkernel.config import ModelConfig
         from openkernel.eval.types import EvalResult, EvalStatus, ProfileData, BottleneckType
 
-        config = ModelConfig()
+        config = ModelConfig(provider=provider, model_id=model_id, api_base=api_base)
         llm = LLMProvider(config)
         backend = TritonBackend()
         generator = Generator(llm, backend)
         critic = Critic(LLMProvider(config))
+        _pass(f"Using {label}")
 
         reference = (REPO_ROOT / "reference.py").read_text()
 
@@ -431,14 +440,20 @@ def test_5_agent_pair() -> bool:
 # ---------------------------------------------------------------------------
 
 def test_6_full_run() -> bool:
-    _header(6, "Full optimization run (1 problem, 5 iterations)", "<$1.00", "Modal + MINIMAX_API_KEY")
+    _header(6, "Full optimization run (1 problem, 5 iterations)", "<$1.00", "Modal + LLM API key")
 
     if not _has_modal():
         _skip("Modal not configured")
         return False
-    if not _has_minimax():
-        _skip("MINIMAX_API_KEY not set")
+    if not (_has_groq() or _has_minimax()):
+        _skip("No LLM API key set")
         return False
+
+    # Pick config file based on available provider
+    if _has_groq():
+        config_file = str(REPO_ROOT / "configs" / "groq_fast.yaml")
+    else:
+        config_file = str(REPO_ROOT / "configs" / "minimax_default.yaml")
 
     try:
         import subprocess
@@ -447,7 +462,7 @@ def test_6_full_run() -> bool:
                 sys.executable, "-m", "openkernel.cli",
                 "optimize",
                 "--reference", str(REPO_ROOT / "reference.py"),
-                "--backend", "triton",
+                "--config", config_file,
                 "--max-iterations", "5",
             ],
             capture_output=True, text=True, timeout=600,
@@ -485,13 +500,13 @@ def test_6_full_run() -> bool:
 # ---------------------------------------------------------------------------
 
 def test_7_mini_sweep() -> bool:
-    _header(7, "Mini sweep (3 KernelBench problems, 10 iterations each)", "<$5.00", "Modal + MINIMAX_API_KEY")
+    _header(7, "Mini sweep (3 KernelBench problems, 10 iterations each)", "<$5.00", "Modal + LLM API key")
 
     if not _has_modal():
         _skip("Modal not configured")
         return False
-    if not _has_minimax():
-        _skip("MINIMAX_API_KEY not set")
+    if not (_has_groq() or _has_minimax()):
+        _skip("No LLM API key set")
         return False
 
     try:
