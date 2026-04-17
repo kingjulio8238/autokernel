@@ -53,8 +53,9 @@ class InnerLoopAdapter:
     Key differences handled:
 
     * **async -> sync**: ``InnerLoop.refine`` is async; the orchestrator calls
-      ``refine`` synchronously. The adapter runs the coroutine via
-      ``asyncio.get_event_loop().run_until_complete`` (or creates a loop).
+      ``refine`` synchronously. The adapter uses a **persistent** event loop
+      (not ``asyncio.run()`` per call) to avoid "Event loop is closed" errors
+      from LLM clients (Groq, litellm) that cache connections across calls.
     * **Parameter mapping**: The orchestrator passes ``(intent, reference_code,
       backend, config)`` whereas the real inner loop expects
       ``(intent, reference, eval_fn, current_best)``.
@@ -73,6 +74,9 @@ class InnerLoopAdapter:
         self._eval_fn = eval_fn
         self._critic = critic
         self._current_best: float = 0.0
+        # Persistent event loop — avoids "Event loop is closed" from LLM
+        # clients (Groq/litellm) that cache connections across async calls.
+        self._loop = asyncio.new_event_loop()
 
     def refine(
         self,
@@ -97,26 +101,29 @@ class InnerLoopAdapter:
 
         return self._translate(inner_result)
 
+    def close(self) -> None:
+        """Close the persistent event loop."""
+        if self._loop and not self._loop.is_closed():
+            self._loop.close()
+
     # -- helpers -----------------------------------------------------------
 
-    @staticmethod
-    def _run_async(coro):
-        """Run an async coroutine from a synchronous context."""
+    def _run_async(self, coro):
+        """Run an async coroutine on the persistent event loop."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = None
 
         if loop is not None and loop.is_running():
-            # We're inside an already-running event loop (e.g. Jupyter).
-            # Create a new loop in a thread to avoid "cannot run nested".
+            # Inside an already-running loop (Jupyter) — use a thread.
             import concurrent.futures
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(asyncio.run, coro)
+                future = pool.submit(self._loop.run_until_complete, coro)
                 return future.result()
         else:
-            return asyncio.run(coro)
+            return self._loop.run_until_complete(coro)
 
     @staticmethod
     def _translate(inner: InnerRefinementResult) -> RefinementResult:
