@@ -141,7 +141,7 @@ class LLMProvider:
                     )
 
         raise RuntimeError(
-            f"LLM call failed after {self._max_retries} retries"
+            f"LLM call failed after {self._max_retries} retries: {last_error}"
         ) from last_error
 
     async def _single_call(
