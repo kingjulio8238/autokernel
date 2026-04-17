@@ -51,9 +51,10 @@ def deploy_app(dry_run: bool = False) -> int:
 def run_health_check() -> int:
     """Call the health_check function on the deployed app."""
     try:
-        from modal_infra.app import health_check
+        import modal
 
         print("Running health check on deployed app...")
+        health_check = modal.Function.from_name("openkernel-eval", "health_check")
         result = health_check.remote()
         print(f"Health check result: {result}")
         if result.get("status") == "ok" and result.get("cuda_available"):
