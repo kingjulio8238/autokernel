@@ -9,9 +9,13 @@ model alongside the user's question.
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 from openkernel.config import ModelConfig
 from openkernel.llm.provider import LLMProvider
+
+if TYPE_CHECKING:
+    from kernel_code.kernel_config import KernelConfig
 
 logger = logging.getLogger(__name__)
 
@@ -177,12 +181,21 @@ class ShellAI:
 
         ai = ShellAI()                       # uses default ModelConfig
         answer = await ai.answer(question, session_data)
+
+    If a :class:`~kernel_code.kernel_config.KernelConfig` is provided, its
+    contents are injected into every prompt so the LLM respects project-level
+    constraints from ``KERNEL.md``.
     """
 
-    def __init__(self, model_config: ModelConfig | None = None) -> None:
+    def __init__(
+        self,
+        model_config: ModelConfig | None = None,
+        kernel_config: "KernelConfig | None" = None,
+    ) -> None:
         if model_config is None:
             model_config = ModelConfig()
         self._provider = LLMProvider(model_config)
+        self._kernel_config = kernel_config
 
     async def answer(self, question: str, session_context: dict) -> str:
         """Answer a natural language question about optimization results.
@@ -210,11 +223,23 @@ class ShellAI:
                 "You can set GROQ_API_KEY or MINIMAX_API_KEY in your environment."
             )
 
-    @staticmethod
-    def _build_prompt(context: str, question: str) -> str:
-        """Assemble the full prompt from system instructions, context, and question."""
-        return (
-            f"{_SYSTEM_PROMPT}\n\n"
-            f"--- SESSION DATA ---\n{context}\n\n"
-            f"--- USER QUESTION ---\n{question}"
-        )
+    def _build_prompt(self, context: str, question: str) -> str:
+        """Assemble the full prompt from system instructions, context, and question.
+
+        When a KERNEL.md config is available, its contents are injected between
+        the system prompt and the session data so that every response respects
+        the project-level constraints.
+        """
+        parts = [_SYSTEM_PROMPT]
+
+        # Inject KERNEL.md config context when available
+        if self._kernel_config is not None:
+            from kernel_code.kernel_config import inject_config_context
+
+            config_ctx = inject_config_context(self._kernel_config)
+            parts.append(f"--- PROJECT CONFIG (KERNEL.md) ---\n{config_ctx}")
+
+        parts.append(f"--- SESSION DATA ---\n{context}")
+        parts.append(f"--- USER QUESTION ---\n{question}")
+
+        return "\n\n".join(parts)

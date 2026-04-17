@@ -5,6 +5,6 @@
   "approach": "Use online algorithm: compute running max/sum in single pass instead of multi-pass. Tile rows across thread blocks. Use shared memory for partial reductions within blocks. For Softmax: online max + exp + sum in one pass avoids materializing intermediate tensors.",
   "backend": "triton",
   "evidence": [],
-  "code_template": null,
+  "code_template": "import triton\nimport triton.language as tl\nimport torch\n\n@triton.jit\ndef softmax_kernel(input_ptr, output_ptr, n_cols, stride_row,\n                   BLOCK_SIZE: tl.constexpr):\n    row_idx = tl.program_id(0)\n    row_start = row_idx * stride_row\n    offsets = tl.arange(0, BLOCK_SIZE)\n    mask = offsets < n_cols\n    row = tl.load(input_ptr + row_start + offsets, mask=mask, other=float('-inf'))\n    # Online softmax: single-pass max + exp + sum\n    row_max = tl.max(row, axis=0)\n    numerator = tl.exp(row - row_max)\n    denominator = tl.sum(numerator, axis=0)\n    result = numerator / denominator\n    tl.store(output_ptr + row_start + offsets, result, mask=mask)\n\nclass ModelNew(torch.nn.Module):\n    def __init__(self):\n        super().__init__()\n\n    def forward(self, x):\n        n_rows, n_cols = x.shape\n        BLOCK_SIZE = triton.next_power_of_2(n_cols)\n        output = torch.empty_like(x)\n        softmax_kernel[(n_rows,)](x, output, n_cols, x.stride(0), BLOCK_SIZE=BLOCK_SIZE)\n        return output",
   "tags": ["reduction", "softmax", "layernorm", "memory_bound", "online_algorithm"]
 }

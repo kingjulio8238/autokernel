@@ -17,6 +17,7 @@ Or from the CLI::
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shlex
 import uuid
@@ -30,6 +31,10 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
+
+from kernel_code.agent_loop import AgentLoop
+from kernel_code.hooks import HookRegistry, create_default_hooks
+from kernel_code.permissions import BudgetTracker, confirm_cost, estimate_cost
 
 # Project root -- cache lives at repo root
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -46,6 +51,18 @@ class KernelCodeShell:
         self._best_run: dict | None = None
         self._session_data: dict = {}
         self._total_cost: float = 0.0
+        self._budget = BudgetTracker()
+        self._hooks: HookRegistry = create_default_hooks(console=self._console)
+        self._active_skill: dict | None = None
+        self._skill_library: list[dict] = self._load_skills()
+
+        # Discover project-level KERNEL.md / kernel.toml config
+        from kernel_code.kernel_config import KernelConfig, discover_kernel_config
+
+        self._kernel_config: KernelConfig | None = discover_kernel_config()
+
+        # Agentic loop for natural language (lazy-init on first NL input)
+        self._agent_loop: AgentLoop | None = None
 
         # Command dispatch table
         self._commands: dict[str, Callable[[str], None]] = {
@@ -54,6 +71,7 @@ class KernelCodeShell:
             "/compare": self._cmd_compare,
             "/dashboard": self._cmd_dashboard,
             "/history": self._cmd_history,
+            "/skills": self._cmd_skills,
             "/help": self._cmd_help,
             "/quit": self._cmd_quit,
             "/exit": self._cmd_quit,
@@ -104,6 +122,17 @@ class KernelCodeShell:
         parts = raw.split(None, 1)
         cmd = parts[0].lower()
         args_str = parts[1] if len(parts) > 1 else ""
+
+        # Handle /skill:NAME prefix
+        if cmd.startswith("/skill:"):
+            skill_name = cmd[len("/skill:"):]
+            try:
+                self._cmd_skill_load(skill_name)
+            except SystemExit:
+                raise
+            except Exception as exc:
+                self._console.print(f"[red]Error:[/red] {escape(str(exc))}")
+            return
 
         handler = self._commands.get(cmd)
         if handler is None:
@@ -179,6 +208,22 @@ class KernelCodeShell:
                 "[red]Error:[/red] --reference is required in live mode (--no-mock). "
                 "Use [bold]/optimize --reference FILE --no-mock[/bold]"
             )
+            return
+
+        # Cost gate -- estimate and confirm before running
+        gpu_type = "L40S"  # default; live mode may override from config
+        est = estimate_cost(iterations, gpu_type=gpu_type)
+
+        if not self._budget.check(est):
+            self._console.print(
+                f"[red]Budget limit reached.[/red] "
+                f"Spent ${self._budget.total_spent:.2f}, "
+                f"this run would add ~${est:.2f}."
+            )
+            return
+
+        if not confirm_cost(est, gpu_type, iterations, console=self._console):
+            self._console.print("[dim]Optimization cancelled.[/dim]")
             return
 
         self._console.print()
@@ -324,6 +369,8 @@ class KernelCodeShell:
             ("/compare", "Compare current best to baseline (side-by-side)"),
             ("/dashboard", "Open browser dashboard for current session"),
             ("/history", "List all runs in current session"),
+            ("/skills", "List all available optimization skills"),
+            ("/skill:NAME", "Load a skill as seed for next /optimize"),
             ("/help", "Show this help message"),
             ("/quit, /exit", "Exit the shell"),
         ]
@@ -338,6 +385,113 @@ class KernelCodeShell:
         )
         self._console.print()
 
+    def _cmd_skills(self, _args_str: str) -> None:
+        """/skills -- list all available optimization skills."""
+        if not self._skill_library:
+            self._console.print("[dim]No skills found in data/skills/.[/dim]")
+            return
+
+        self._console.print()
+        self._console.print("[bold]Available optimization skills:[/bold]")
+
+        table = Table(
+            show_header=True,
+            header_style="bold",
+            border_style="dim",
+            pad_edge=False,
+        )
+        table.add_column("ID", style="cyan", width=26)
+        table.add_column("Name", width=32)
+        table.add_column("Backend", width=10)
+
+        for skill in self._skill_library:
+            table.add_row(
+                skill.get("id", ""),
+                skill.get("name", ""),
+                skill.get("backend", ""),
+            )
+
+        self._console.print(table)
+        self._console.print()
+        self._console.print(
+            "[dim]Use /skill:ID to load a skill (e.g. /skill:triton_tiled_gemm)[/dim]"
+        )
+        self._console.print()
+
+    def _cmd_skill_load(self, skill_name: str) -> None:
+        """/skill:NAME -- load a specific skill into the optimization context."""
+        skill_name = skill_name.strip()
+        if not skill_name:
+            self._console.print(
+                "[dim]Usage:[/dim] /skill:NAME  (e.g. /skill:triton_tiled_gemm)"
+            )
+            return
+
+        # Find by id (exact match)
+        match = None
+        for skill in self._skill_library:
+            if skill.get("id") == skill_name:
+                match = skill
+                break
+
+        # Fallback: partial match on id or name
+        if match is None:
+            for skill in self._skill_library:
+                sid = skill.get("id", "").lower()
+                sname = skill.get("name", "").lower()
+                if skill_name.lower() in sid or skill_name.lower() in sname:
+                    match = skill
+                    break
+
+        if match is None:
+            self._console.print(
+                f"[red]Skill not found:[/red] {escape(skill_name)}. "
+                "Use [bold]/skills[/bold] to see available skills."
+            )
+            return
+
+        self._active_skill = match
+
+        self._console.print()
+        self._console.print(
+            f"[bold green]Loaded:[/bold green] {escape(match.get('name', ''))}"
+        )
+        self._console.print(
+            f"[bold]Trigger:[/bold] {escape(match.get('trigger', ''))}"
+        )
+        self._console.print(
+            f"[bold]Approach:[/bold] {escape(match.get('approach', ''))}"
+        )
+
+        template = match.get("code_template")
+        if template:
+            self._console.print()
+            self._console.print("[bold]Template:[/bold]")
+            syntax = Syntax(
+                template,
+                "python",
+                theme="monokai",
+                line_numbers=True,
+                padding=1,
+            )
+            self._console.print(syntax)
+        self._console.print()
+
+    @staticmethod
+    def _load_skills() -> list[dict]:
+        """Load all skill JSON files from data/skills/."""
+        skills_dir = _PROJECT_ROOT / "data" / "skills"
+        skills: list[dict] = []
+        if not skills_dir.exists():
+            return skills
+        for path in sorted(skills_dir.glob("*.json")):
+            try:
+                with open(path) as f:
+                    skills.append(json.load(f))
+            except (json.JSONDecodeError, OSError):
+                continue
+        return skills
+
     def _cmd_quit(self, _args_str: str) -> None:
         """/quit or /exit -- exit the shell."""
         self._console.print("[dim]Goodbye.[/dim]")
@@ -348,9 +502,31 @@ class KernelCodeShell:
     # ------------------------------------------------------------------
 
     def _handle_natural_language(self, text: str) -> None:
-        """Handle natural language input (AI Q&A placeholder)."""
+        """Handle natural language input through the agentic loop.
+
+        The AgentLoop sends the user's question plus session context and
+        available tools to the LLM.  The LLM may call tools (up to 3 per
+        turn) to gather data before producing a final text answer.
+        """
+        # Lazy-initialise the agent loop so we only create the LLM
+        # provider when actually needed.
+        if self._agent_loop is None:
+            self._agent_loop = AgentLoop(session_context=self._session_data)
+        else:
+            # Keep context in sync after new optimization runs
+            self._agent_loop.update_context(self._session_data)
+
         self._console.print()
-        self._console.print(f"[dim italic]\\[AI response would go here][/dim italic]")
+        with self._console.status("[dim]Thinking...[/dim]", spinner="dots"):
+            try:
+                answer = asyncio.run(self._agent_loop.run(text))
+            except Exception as exc:
+                self._console.print(
+                    f"[red]Agent error:[/red] {escape(str(exc))}"
+                )
+                return
+
+        self._console.print(escape(answer))
         self._console.print()
 
     # ------------------------------------------------------------------
@@ -360,6 +536,13 @@ class KernelCodeShell:
     def _run_mock_optimization(self, iterations: int = 20) -> None:
         """Run optimization with mock data."""
         from kernel_code.mock_data import generate_mock_session
+
+        # Fire pre_optimize hooks
+        self._hooks.fire(
+            HookRegistry.PRE_OPTIMIZE,
+            config={"backend": "mock", "hardware": "mock"},
+            iterations=iterations,
+        )
 
         self._console.print("[bold]Running optimization (mock mode)...[/bold]")
         self._console.print()
@@ -372,14 +555,38 @@ class KernelCodeShell:
         self._session_data = json.loads(session_path.read_text())
         iters = self._session_data.get("iterations", [])
         self._runs = iters
-        self._total_cost = len(iters) * 0.02
+        run_cost = estimate_cost(len(iters))
+        self._total_cost += run_cost
+        self._budget.record(run_cost)
 
-        # Find the best run
+        # Find the best run and fire per-iteration hooks
         best = None
+        best_speedup = 0.0
         for it in iters:
             if it["status"] == "keep":
                 if best is None or it["speedup"] > best["speedup"]:
                     best = it
+                    best_speedup = it["speedup"]
+                self._hooks.fire(
+                    HookRegistry.POST_KEEP,
+                    speedup=it["speedup"],
+                    iteration=it["iteration"],
+                    intent=it.get("intent", ""),
+                )
+            elif it["status"] == "discard":
+                self._hooks.fire(
+                    HookRegistry.POST_DISCARD,
+                    speedup=it["speedup"],
+                    best_speedup=best_speedup,
+                    intent=it.get("intent", ""),
+                )
+            self._hooks.fire(
+                HookRegistry.POST_ITERATE,
+                iteration=it["iteration"],
+                speedup=it["speedup"],
+                status=it["status"],
+                intent=it.get("intent", ""),
+            )
         self._best_run = best
 
         kept = sum(1 for it in iters if it["status"] == "keep")
@@ -396,12 +603,23 @@ class KernelCodeShell:
         except Exception as exc:
             self._console.print(f"[yellow]TUI exited:[/yellow] {escape(str(exc))}")
 
+        # Fire post_optimize hooks
+        self._hooks.fire(
+            HookRegistry.POST_OPTIMIZE,
+            best_speedup=self._session_data.get("best_speedup", 0.0),
+            iterations_kept=kept,
+            iterations_total=len(iters),
+            cost=self._total_cost,
+            cache_session_id=self._session_id,
+        )
+
         # Post-optimization summary
         self._print_post_optimization_summary(
             best_speedup=self._session_data.get("best_speedup", 0.0),
             kept=kept,
             total=len(iters),
             cost=self._total_cost,
+            session_total=self._budget.total_spent,
         )
 
     def _run_live_optimization(
@@ -422,6 +640,13 @@ class KernelCodeShell:
             return
 
         reference_source = ref_path.read_text()
+
+        # Fire pre_optimize hooks
+        self._hooks.fire(
+            HookRegistry.PRE_OPTIMIZE,
+            config={"backend": backend, "hardware": "H100"},
+            iterations=iterations,
+        )
 
         self._console.print(f"[bold]Running optimization (live mode)...[/bold]")
         self._console.print(f"  Reference: {escape(reference)}")
@@ -448,6 +673,7 @@ class KernelCodeShell:
                 problem_label=problem_label,
                 hardware="H100",
                 backend=backend,
+                hooks=self._hooks,
             )
 
             self._console.print(f"  Session:   {bridge.session_id}")
@@ -460,7 +686,9 @@ class KernelCodeShell:
             if bridge.cache_path.exists():
                 self._session_data = json.loads(bridge.cache_path.read_text())
                 self._runs = self._session_data.get("iterations", [])
-                self._total_cost = len(self._runs) * 0.02
+                run_cost = estimate_cost(len(self._runs), gpu_type=config.modal.gpu_type.value)
+                self._total_cost += run_cost
+                self._budget.record(run_cost)
 
                 best = None
                 for it in self._runs:
@@ -481,12 +709,23 @@ class KernelCodeShell:
             except Exception as exc:
                 self._console.print(f"[yellow]TUI exited:[/yellow] {escape(str(exc))}")
 
+            # Fire post_optimize hooks
+            self._hooks.fire(
+                HookRegistry.POST_OPTIMIZE,
+                best_speedup=result.final_speedup,
+                iterations_kept=kept,
+                iterations_total=len(self._runs),
+                cost=self._total_cost,
+                cache_session_id=bridge.session_id,
+            )
+
             # Post-optimization summary
             self._print_post_optimization_summary(
                 best_speedup=result.final_speedup,
                 kept=kept,
                 total=len(self._runs),
                 cost=self._total_cost,
+                session_total=self._budget.total_spent,
             )
 
             # Save best kernel to file
@@ -513,6 +752,10 @@ class KernelCodeShell:
         )
         self._console.print()
         self._console.print(f"  Session: [cyan]{self._session_id}[/cyan] (new)")
+        if self._kernel_config and self._kernel_config.source_path:
+            self._console.print(
+                f"  Loaded KERNEL.md from: [green]{self._kernel_config.source_path}[/green]"
+            )
         self._console.print(
             "  Type [bold]/help[/bold] for commands, or ask a question in natural language."
         )
@@ -524,6 +767,7 @@ class KernelCodeShell:
         kept: int,
         total: int,
         cost: float,
+        session_total: float | None = None,
     ) -> None:
         """Print the post-optimization summary block."""
         self._console.print()
@@ -536,6 +780,8 @@ class KernelCodeShell:
         summary.append(f"{kept}/{total} kept", style="dim")
         summary.append(" | ", style="dim")
         summary.append(f"${cost:.2f}", style="dim")
+        if session_total is not None and session_total != cost:
+            summary.append(f" (session: ${session_total:.2f})", style="dim")
         self._console.print(summary)
 
         # Dashboard link

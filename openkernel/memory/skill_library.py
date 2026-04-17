@@ -75,6 +75,22 @@ class SkillLibrary:
             skill.id = uuid.uuid4().hex[:12]
         self._skills[skill.id] = skill
 
+    def update_evidence(self, skill_id: str, evidence: dict) -> None:
+        """Append an evidence entry to an existing skill.
+
+        Args:
+            skill_id: ID of the skill to update.
+            evidence: Dict with keys like ``problem``, ``speedup``,
+                ``hardware``, ``iteration``, ``intent``.
+
+        Raises:
+            KeyError: If *skill_id* does not exist in the library.
+        """
+        skill = self._skills.get(skill_id)
+        if skill is None:
+            raise KeyError(f"Skill {skill_id!r} not found in library")
+        skill.evidence.append(evidence)
+
     @property
     def all_skills(self) -> list[OptimizationSkill]:
         """Return every skill currently in memory."""

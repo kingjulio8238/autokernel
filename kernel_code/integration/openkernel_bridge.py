@@ -17,6 +17,10 @@ import logging
 import time
 import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from kernel_code.hooks import HookRegistry
 
 from openkernel.config import OpenKernelConfig
 from openkernel.engine.factory import create_engine
@@ -197,12 +201,14 @@ class OpenKernelBridge:
         problem_label: str = "custom kernel",
         hardware: str = "H100",
         backend: str = "triton",
+        hooks: "HookRegistry | None" = None,
     ) -> None:
         self._config = config
         self._session_id = session_id or uuid.uuid4().hex[:12]
         self._problem_label = problem_label
         self._hardware = hardware
         self._backend = backend
+        self._hooks = hooks
 
         # Where the TUI looks for data
         _SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
@@ -334,6 +340,34 @@ class OpenKernelBridge:
 
         self._iterations.append(iteration_data)
         self._flush_cache()
+
+        # Fire lifecycle hooks
+        if self._hooks is not None:
+            from kernel_code.hooks import HookRegistry
+
+            self._hooks.fire(
+                HookRegistry.POST_ITERATE,
+                iteration=iteration,
+                speedup=speedup,
+                status=status,
+                intent=node.description,
+            )
+            if decision == "keep":
+                self._hooks.fire(
+                    HookRegistry.POST_KEEP,
+                    speedup=speedup,
+                    iteration=iteration,
+                    intent=node.description,
+                    problem=self._problem_label,
+                    hardware=self._hardware,
+                )
+            elif decision == "discard":
+                self._hooks.fire(
+                    HookRegistry.POST_DISCARD,
+                    speedup=speedup,
+                    best_speedup=self._best_speedup,
+                    intent=node.description,
+                )
 
     def _flush_cache(self) -> None:
         """Write current state to the JSON cache file (TUI schema)."""
