@@ -22,14 +22,14 @@ import modal
 # ---------------------------------------------------------------------------
 
 kernelbench_image = (
-    modal.Image.debian_slim(python_version="3.11")
+    modal.Image.debian_slim(python_version="3.10")
     .apt_install("git", "build-essential", "ninja-build")
     .pip_install(
         # PyTorch (CUDA 12.8 wheel)
         "torch>=2.5",
         # Triton (ships with torch but pin explicitly)
         "triton>=3.0",
-        # KernelBench from source
+        # KernelBench from source (requires Python 3.10)
         "kernelbench @ git+https://github.com/ScalingIntelligence/KernelBench.git",
         # Profiling
         "pydantic>=2.0",
