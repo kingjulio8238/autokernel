@@ -55,10 +55,10 @@ class LLMProvider:
         self._max_retries: int = 3
         self._retry_base_delay: float = 1.0  # seconds
 
-        # Resolve the API key: explicit config > provider-specific env var > None.
-        # When using openai/ prefix with a custom api_base (e.g., MiniMax),
-        # litellm looks for OPENAI_API_KEY, but the actual key is in
-        # MINIMAX_API_KEY. We resolve it here and pass it explicitly.
+        # Resolve API key and api_base per provider.
+        # litellm's native providers (groq/, anthropic/) read their own env
+        # vars, but for openai/ prefix with custom api_base (MiniMax), we
+        # must pass both api_key and api_base explicitly.
         import os
         _PROVIDER_ENV_VARS = {
             "minimax": "MINIMAX_API_KEY",
@@ -67,11 +67,22 @@ class LLMProvider:
             "openai": "OPENAI_API_KEY",
             "google": "GOOGLE_API_KEY",
         }
+        _PROVIDER_API_BASE = {
+            "minimax": "https://api.minimax.io/v1",
+        }
+
+        # API key resolution
         if config.api_key:
             self._api_key = config.api_key
         else:
             env_var = _PROVIDER_ENV_VARS.get(config.provider, "")
             self._api_key = os.environ.get(env_var) if env_var else None
+
+        # API base resolution: explicit config > provider default > None
+        if config.api_base:
+            self._api_base = config.api_base
+        else:
+            self._api_base = _PROVIDER_API_BASE.get(config.provider)
 
     # ------------------------------------------------------------------
     # Public API
@@ -159,8 +170,8 @@ class LLMProvider:
         if self._api_key:
             kwargs["api_key"] = self._api_key
 
-        if self._config.api_base:
-            kwargs["api_base"] = self._config.api_base
+        if self._api_base:
+            kwargs["api_base"] = self._api_base
 
         if response_format is not None:
             kwargs["response_format"] = response_format
