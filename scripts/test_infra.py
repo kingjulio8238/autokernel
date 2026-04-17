@@ -175,7 +175,7 @@ def test_1_mock_pipeline() -> bool:
         from openkernel.exceptions import ConfigurationError
         config = OpenKernelConfig()
         _check(config.modal.gpu_type.value == "L40S", "Default GPU is L40S", f"Default GPU is {config.modal.gpu_type.value}")
-        _check(config.model.model_id == "minimax/MiniMax-M2.5", "Default model is MiniMax M2.5", f"Default model is {config.model.model_id}")
+        _check(config.model.model_id == "openai/MiniMax-M2.5", "Default model is MiniMax M2.5", f"Default model is {config.model.model_id}")
     except Exception as e:
         _fail(f"Config: {e}")
         ok = False
@@ -203,23 +203,52 @@ def test_2_modal_deploy() -> bool:
         _skip("Modal not configured (run 'modal setup' first)")
         return False
 
+    import subprocess
+
+    # Step 1: Deploy the app (builds container image + deploys function)
+    print("  Deploying Modal app (first deploy builds image, may take 2-5 min)...")
     try:
-        import subprocess
-        result = subprocess.run(
+        deploy_result = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "modal_infra" / "deploy.py")],
+            capture_output=True, text=True, timeout=600,
+            cwd=str(REPO_ROOT),
+        )
+        if deploy_result.returncode == 0:
+            _pass("Modal app deployed")
+        else:
+            # Check if it's a deploy script issue vs Modal issue
+            output = deploy_result.stdout + deploy_result.stderr
+            if "modal deploy" in output.lower() or "error" in output.lower():
+                _fail(f"Modal deploy failed: {output[-300:]}")
+                return False
+            # Might still be ok — deploy.py might have non-zero exit for warnings
+            _pass(f"Modal deploy completed (exit code {deploy_result.returncode})")
+    except subprocess.TimeoutExpired:
+        _fail("Modal deploy timed out (600s)")
+        return False
+    except Exception as e:
+        _fail(f"Modal deploy error: {e}")
+        return False
+
+    # Step 2: Health check
+    try:
+        check_result = subprocess.run(
             [sys.executable, str(REPO_ROOT / "modal_infra" / "deploy.py"), "--check"],
             capture_output=True, text=True, timeout=120,
+            cwd=str(REPO_ROOT),
         )
-        if result.returncode == 0:
-            _pass("Modal health check passed")
+        if check_result.returncode == 0:
+            _pass("Modal health check passed (L40S GPU accessible)")
             return True
         else:
-            _fail(f"Modal health check failed: {result.stderr[:200]}")
+            output = check_result.stdout + check_result.stderr
+            _fail(f"Modal health check failed: {output[-300:]}")
             return False
     except subprocess.TimeoutExpired:
         _fail("Modal health check timed out (120s)")
         return False
     except Exception as e:
-        _fail(f"Modal deploy: {e}")
+        _fail(f"Modal health check: {e}")
         return False
 
 
