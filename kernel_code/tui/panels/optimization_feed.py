@@ -67,7 +67,7 @@ class OptimizationFeedPanel(Widget):
 
     def compose(self) -> ComposeResult:
         with VerticalScroll():
-            yield Static(self._render(), id="feed-content", markup=True)
+            yield Static(self._build_content(), id="feed-content", markup=True)
 
     # ------------------------------------------------------------------
     # Public API -- called from app._update_all_panels()
@@ -83,7 +83,7 @@ class OptimizationFeedPanel(Widget):
         self._visible = visible_iterations
         try:
             content = self.query_one("#feed-content", Static)
-            content.update(self._render())
+            content.update(self._build_content())
         except Exception:
             pass
 
@@ -91,7 +91,7 @@ class OptimizationFeedPanel(Widget):
     # Rendering
     # ------------------------------------------------------------------
 
-    def _render(self) -> str:
+    def _build_content(self) -> str:
         """Build the full panel content as a Rich-markup string."""
         parts: list[str] = []
 
