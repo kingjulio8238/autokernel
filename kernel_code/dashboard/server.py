@@ -1,9 +1,15 @@
 """Plotly Dash dashboard server for kernel code.
 
-Serves on localhost:8050 with:
-  - Optimization trajectory chart (Panel 1)
-  - Experiment results table (Panel 4)
-  - Auto-refresh every 5 seconds
+Serves on localhost:8050 with 7 panels:
+  1. Optimization trajectory chart
+  2. Roofline model
+  3. Resource utilization gauges
+  4. Experiment results table
+  5. Code diff
+  6. Optimization landscape (3D)
+  7. Strategy tree (treemap)
+
+Auto-refresh every 5 seconds.
 """
 
 from __future__ import annotations
@@ -13,6 +19,14 @@ from dash import Dash, html, dcc, Input, Output
 from kernel_code.dashboard.data import load_session, load_session_metadata
 from kernel_code.dashboard.layouts.trajectory import create_trajectory_figure
 from kernel_code.dashboard.layouts.experiment_table import create_experiment_table
+from kernel_code.dashboard.layouts.roofline import create_roofline_figure
+from kernel_code.dashboard.layouts.utilization import create_utilization_figure
+from kernel_code.dashboard.layouts.code_diff import create_code_diff_component
+from kernel_code.dashboard.layouts.landscape import (
+    create_landscape_controls,
+    create_landscape_figure,
+)
+from kernel_code.dashboard.layouts.strategy_tree import create_strategy_tree_figure
 
 
 def create_dash_app(session_id: str) -> Dash:
@@ -35,6 +49,18 @@ def create_dash_app(session_id: str) -> Dash:
         metadata = load_session_metadata(session_id)
     except FileNotFoundError:
         metadata = {"session_id": session_id, "problem": "unknown", "hardware": "", "backend": ""}
+
+    hardware = metadata.get("hardware", "H100") or "H100"
+
+    # Reusable section wrapper
+    def _section(title: str, children: list) -> html.Div:
+        return html.Div(
+            style={"marginBottom": "24px"},
+            children=[
+                html.H3(title, style={"color": "#e2e8f0", "marginBottom": "8px"}),
+                *children,
+            ],
+        )
 
     app.layout = html.Div(
         style={
@@ -72,30 +98,71 @@ def create_dash_app(session_id: str) -> Dash:
                     html.Span(f"Session: {session_id}"),
                 ],
             ),
-            # Trajectory chart
-            dcc.Graph(id="trajectory-chart"),
-            html.Br(),
-            # Experiment table
-            html.H3("Experiment Log", style={"color": "#e2e8f0"}),
-            html.Div(id="experiment-table-container"),
+            # --- Row 1: Trajectory + Roofline ---
+            html.Div(
+                style={"display": "flex", "gap": "16px", "marginBottom": "16px"},
+                children=[
+                    html.Div(
+                        style={"flex": "1", "minWidth": "0"},
+                        children=[dcc.Graph(id="trajectory-chart")],
+                    ),
+                    html.Div(
+                        style={"flex": "1", "minWidth": "0"},
+                        children=[dcc.Graph(id="roofline-chart")],
+                    ),
+                ],
+            ),
+            # --- Row 2: Utilization + Strategy Tree ---
+            html.Div(
+                style={"display": "flex", "gap": "16px", "marginBottom": "16px"},
+                children=[
+                    html.Div(
+                        style={"flex": "1", "minWidth": "0"},
+                        children=[dcc.Graph(id="utilization-chart")],
+                    ),
+                    html.Div(
+                        style={"flex": "1", "minWidth": "0"},
+                        children=[dcc.Graph(id="strategy-tree-chart")],
+                    ),
+                ],
+            ),
+            # --- Row 3: Code Diff ---
+            _section("Code Diff", [html.Div(id="code-diff-container")]),
+            # --- Row 4: Optimization Landscape (3D) ---
+            _section(
+                "Optimization Landscape",
+                [
+                    create_landscape_controls(),
+                    dcc.Graph(id="landscape-chart"),
+                ],
+            ),
+            # --- Row 5: Experiment Table ---
+            _section("Experiment Log", [html.Div(id="experiment-table-container")]),
             # Auto-refresh interval (every 5 seconds)
             dcc.Interval(id="refresh-interval", interval=5000, n_intervals=0),
-            # Store the session_id for callbacks
+            # Stores
             dcc.Store(id="session-id-store", data=session_id),
+            dcc.Store(id="hardware-store", data=hardware),
         ],
     )
 
+    # ---- Callback: refresh all panels ----
     @app.callback(
         [
             Output("trajectory-chart", "figure"),
+            Output("roofline-chart", "figure"),
+            Output("utilization-chart", "figure"),
+            Output("strategy-tree-chart", "figure"),
+            Output("code-diff-container", "children"),
             Output("experiment-table-container", "children"),
         ],
         [
             Input("refresh-interval", "n_intervals"),
             Input("session-id-store", "data"),
+            Input("hardware-store", "data"),
         ],
     )
-    def update_dashboard(n_intervals: int, sid: str):
+    def update_dashboard(n_intervals: int, sid: str, hw: str):
         """Refresh dashboard panels with latest session data."""
         try:
             df = load_session(sid)
@@ -107,12 +174,51 @@ def create_dash_app(session_id: str) -> Dash:
                 title="No session data found",
                 template="plotly_dark",
             )
-            return empty_fig, html.Div("No data available.")
+            no_data = html.Div("No data available.", style={"color": "#64748b"})
+            return empty_fig, empty_fig, empty_fig, empty_fig, no_data, no_data
 
         trajectory_fig = create_trajectory_figure(df)
+        roofline_fig = create_roofline_figure(df, hardware=hw)
+        utilization_fig = create_utilization_figure(df)
+        strategy_tree_fig = create_strategy_tree_figure(df)
+        code_diff = create_code_diff_component(df)
         experiment_table = create_experiment_table(df)
 
-        return trajectory_fig, experiment_table
+        return (
+            trajectory_fig,
+            roofline_fig,
+            utilization_fig,
+            strategy_tree_fig,
+            code_diff,
+            experiment_table,
+        )
+
+    # ---- Callback: landscape axis changes ----
+    @app.callback(
+        Output("landscape-chart", "figure"),
+        [
+            Input("refresh-interval", "n_intervals"),
+            Input("session-id-store", "data"),
+            Input("landscape-x", "value"),
+            Input("landscape-y", "value"),
+            Input("landscape-z", "value"),
+        ],
+    )
+    def update_landscape(n_intervals: int, sid: str, x_col: str, y_col: str, z_col: str):
+        """Rebuild the 3D landscape when axes or data change."""
+        try:
+            df = load_session(sid)
+        except FileNotFoundError:
+            import plotly.graph_objects as go
+
+            empty_fig = go.Figure()
+            empty_fig.update_layout(
+                title="No session data found",
+                template="plotly_dark",
+            )
+            return empty_fig
+
+        return create_landscape_figure(df, x_col=x_col, y_col=y_col, z_col=z_col)
 
     return app
 

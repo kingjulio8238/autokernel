@@ -46,6 +46,7 @@ def load_session(session_id: str) -> pd.DataFrame:
             "ref_runtime_us": it.get("ref_runtime_us", 0.0),
             "intent": it.get("intent", ""),
             "error": it.get("error"),
+            "kernel_code_snippet": it.get("kernel_code_snippet", ""),
             "bandwidth_util": profile.get("bandwidth_util", 0.0),
             "compute_util": profile.get("compute_util", 0.0),
             "cache_efficiency": profile.get("cache_efficiency", 0.0),

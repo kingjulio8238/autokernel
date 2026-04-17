@@ -37,6 +37,7 @@ from openkernel.engine.orchestrator import (
 from openkernel.engine.world_model import IntentNode
 from openkernel.llm.models import get_default_model
 from openkernel.llm.provider import LLMProvider
+from openkernel.traces.capture import TraceCapture
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +148,8 @@ class InnerLoopAdapter:
             best_speedup=inner.best_speedup,
             iterations=inner.iterations_used,
             critic_feedback=critic_feedback,
+            total_tokens=inner.total_tokens,
+            total_cost_usd=inner.total_cost_usd,
         )
 
 
@@ -213,15 +216,27 @@ def create_engine(
     # 6. Adapter
     adapter = InnerLoopAdapter(inner_loop, eval_fn, critic)
 
-    # 7. Orchestrator config dict (the Orchestrator still expects a plain dict)
+    # 7. Trace capture (optional)
+    trace_capture: TraceCapture | None = None
+    if config.capture_traces:
+        trace_capture = TraceCapture(config=config)
+
+    # 8. Orchestrator config dict (the Orchestrator still expects a plain dict)
     orch_config = {
         "max_iterations": config.max_iterations,
         "stagnation_threshold": config.stagnation_threshold,
         "max_retries_per_intent": config.max_retries_per_intent,
+        "model_id": model_config.model_id,
+        "traces_dir": f"{config.traces_dir}/raw",
     }
 
-    # 8. Assemble — pass the real LLM provider for tree operations
-    orchestrator = Orchestrator(inner_loop=adapter, config=orch_config, llm=llm)
+    # 9. Assemble — pass the real LLM provider for tree operations
+    orchestrator = Orchestrator(
+        inner_loop=adapter,
+        config=orch_config,
+        llm=llm,
+        trace_capture=trace_capture,
+    )
 
     logger.info(
         "Engine created: model=%s, backend=%s, max_iterations=%d",

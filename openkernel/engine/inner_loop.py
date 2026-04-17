@@ -58,6 +58,8 @@ class InnerRefinementResult:
     iterations_used: int = 0
     final_diagnosis: CriticDiagnosis | None = None
     all_speedups: list[float] = field(default_factory=list)
+    total_tokens: int = 0
+    total_cost_usd: float = 0.0
 
 
 # Backward-compat alias — existing code that imported ``RefinementResult``
@@ -127,6 +129,18 @@ class InnerLoop:
         critic_feedback: str | None = None
         last_diagnosis: CriticDiagnosis | None = None
         all_speedups: list[float] = []
+
+        # Snapshot LLM usage before this refinement cycle so we can compute
+        # the delta afterwards.  Generator and critic may share the same
+        # LLMProvider instance, so we de-duplicate.
+        _llm_instances: set[int] = set()
+        _llm_list = []
+        for llm in (self._generator._llm, self._critic._llm):
+            if id(llm) not in _llm_instances:
+                _llm_instances.add(id(llm))
+                _llm_list.append(llm)
+        tokens_before = sum(llm.tokens_used for llm in _llm_list)
+        cost_before = sum(llm.cost_usd for llm in _llm_list)
 
         logger.info(
             "InnerLoop: starting refinement for intent %r (max %d attempts, current_best=%.2f)",
@@ -214,6 +228,10 @@ class InnerLoop:
         else:
             status = RefinementStatus.FAILED
 
+        # Compute LLM token/cost delta for this refinement cycle.
+        tokens_after = sum(llm.tokens_used for llm in _llm_list)
+        cost_after = sum(llm.cost_usd for llm in _llm_list)
+
         result = RefinementResult(
             status=status,
             best_kernel=best_kernel,
@@ -221,6 +239,8 @@ class InnerLoop:
             iterations_used=len(all_speedups),
             final_diagnosis=last_diagnosis,
             all_speedups=all_speedups,
+            total_tokens=tokens_after - tokens_before,
+            total_cost_usd=cost_after - cost_before,
         )
 
         logger.info(

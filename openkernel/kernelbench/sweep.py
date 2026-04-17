@@ -146,6 +146,7 @@ async def run_sweep(
     max_iterations_per_problem: int = 50,
     problems: list[int] | None = None,
     eval_fn: Any | None = None,
+    source: str = "local",
 ) -> SweepResult:
     """Run openkernel on all (or selected) problems in a KernelBench level.
 
@@ -162,6 +163,9 @@ async def run_sweep(
     eval_fn : callable, optional
         Async eval function to pass to ``optimize()``. If ``None``, the
         real Modal eval function is used.
+    source : str
+        Problem source: ``"local"`` loads from the ``kernelbench`` package,
+        ``"mock"`` uses synthetic problems for testing.
 
     Returns
     -------
@@ -171,7 +175,8 @@ async def run_sweep(
     Raises
     ------
     ImportError
-        If the ``kernelbench`` package is not installed.
+        If the ``kernelbench`` package is not installed (when *source* is
+        ``"local"``).
     """
     from openkernel import optimize
 
@@ -183,15 +188,23 @@ async def run_sweep(
         update={"max_iterations": max_iterations_per_problem}
     )
 
+    # Select problem loader based on source.
+    if source == "mock":
+        from tests.mocks import MockProblemLoader
+
+        _load = MockProblemLoader.load
+    else:
+        _load = load_problem
+
     # Load problems.
     if problems is not None:
         problem_list = [
-            load_problem(level, pid) for pid in problems
+            _load(level, pid) for pid in problems
         ]
     else:
         total = get_problem_count(level)
         problem_list = [
-            load_problem(level, pid) for pid in range(total)
+            _load(level, pid) for pid in range(total)
         ]
 
     logger.info(
@@ -241,7 +254,7 @@ async def run_sweep(
                 final_speedup=opt_result.final_speedup,
                 correct=correct,
                 iterations=opt_result.iterations_total,
-                cost=0.0,  # cost tracking added when billing is wired up
+                cost=opt_result.total_cost_usd,
                 time=problem_time,
             )
 

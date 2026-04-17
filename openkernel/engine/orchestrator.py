@@ -25,6 +25,10 @@ from openkernel.engine.world_model_prompts import (
     prompt_prune_decision,
     prompt_update_priorities,
 )
+from openkernel.eval.types import EvalResult, EvalStatus
+from openkernel.traces.capture import TraceCapture
+from openkernel.traces.storage import save_trace
+from openkernel.traces.types import OptimizationTrace
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +47,8 @@ class RefinementResult:
     best_speedup: float  # best speedup achieved (0.0 on failure)
     iterations: int  # number of generate-eval-diagnose iterations used
     critic_feedback: str  # last CriticDiagnosis summary text
+    total_tokens: int = 0  # LLM tokens consumed in this refinement
+    total_cost_usd: float = 0.0  # estimated LLM cost for this refinement
 
 
 @runtime_checkable
@@ -80,6 +86,9 @@ class OptimizationResult:
     intents_succeeded: int = 0
     intents_failed: int = 0
     stagnation_triggered: bool = False
+    trace: OptimizationTrace | None = None  # full trace if capture was enabled
+    total_tokens: int = 0  # total LLM tokens consumed across all refinements
+    total_cost_usd: float = 0.0  # total estimated cost (LLM + compute)
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +132,7 @@ class Orchestrator:
         config: dict,
         llm: LLMCaller | None = None,
         strategy_evolution: StrategyEvolution | None = None,
+        trace_capture: TraceCapture | None = None,
     ) -> None:
         self._inner_loop = inner_loop
         self._config = config
@@ -133,6 +143,7 @@ class Orchestrator:
             )
         self._llm = llm
         self._strategy_evolution = strategy_evolution
+        self._trace_capture = trace_capture
 
         # Defaults from config, with fallbacks
         self._max_iterations: int = config.get("max_iterations", 100)
@@ -154,9 +165,23 @@ class Orchestrator:
         tree = IntentTree(root_description=f"Optimize kernel for {hardware} ({backend})")
         tree_history: list[dict] = [tree.serialize()]
 
+        # Start trace capture if enabled
+        if self._trace_capture is not None:
+            model_id = self._config.get("model_id", "unknown")
+            problem_id = self._config.get("problem_id", "unknown")
+            self._trace_capture.start_session(
+                problem_id=problem_id,
+                hardware=hardware,
+                backend=backend,
+                model_id=model_id,
+            )
+
         best_kernel = ""
         best_speedup = 0.0
         total_iterations = 0
+        total_tokens = 0
+        total_llm_cost = 0.0
+        total_eval_count = 0
         intents_explored = 0
         intents_succeeded = 0
         intents_failed = 0
@@ -221,6 +246,9 @@ class Orchestrator:
                 },
             )
             total_iterations += result.iterations
+            total_tokens += result.total_tokens
+            total_llm_cost += result.total_cost_usd
+            total_eval_count += result.iterations
 
             # Update the tree with results
             if result.status == "succeeded" and result.best_speedup > 0:
@@ -263,6 +291,36 @@ class Orchestrator:
                     )
                     intents_failed += 1
 
+            # Record trace iteration if capture is enabled
+            if self._trace_capture is not None:
+                # Determine the decision string from the result status
+                if result.status == "succeeded" and result.best_speedup > 0:
+                    trace_decision = "keep"
+                elif node.attempts < node.max_attempts:
+                    trace_decision = "retry"
+                else:
+                    trace_decision = "discard"
+
+                # Build a synthetic EvalResult from the available summary data
+                trace_eval = EvalResult(
+                    status=EvalStatus.CORRECT if result.status == "succeeded" else EvalStatus.ERROR,
+                    correct=(result.status == "succeeded"),
+                    speedup=result.best_speedup,
+                )
+
+                self._trace_capture.record_iteration(
+                    iteration=intents_explored,
+                    intent=node.description,
+                    generator_prompt="",  # not available at orchestrator level
+                    generator_response="",  # not available at orchestrator level
+                    kernel_code=result.best_kernel,
+                    eval_result=trace_eval,
+                    critic_diagnosis=None,  # detailed diagnosis not available here
+                    decision=trace_decision,
+                    tokens_used=result.total_tokens,
+                    latency_seconds=0.0,  # per-iteration latency not available
+                )
+
             # Update priorities based on latest result
             self._update_priorities(tree, result)
 
@@ -301,6 +359,37 @@ class Orchestrator:
                 best_speedup,
             )
 
+        # End trace capture and persist if enabled
+        optimization_trace: OptimizationTrace | None = None
+        if self._trace_capture is not None:
+            self._trace_capture.end_session(
+                final_speedup=best_speedup,
+                final_correct=(best_speedup > 0 and best_kernel != ""),
+            )
+            optimization_trace = self._trace_capture.get_trace()
+            traces_dir = self._config.get("traces_dir", "traces/raw")
+            try:
+                trace_path = save_trace(optimization_trace, output_dir=traces_dir)
+                logger.info("Trace saved to %s", trace_path)
+            except Exception as exc:
+                logger.warning("Failed to save trace: %s", exc)
+
+        # Approximate Modal compute cost.
+        # Each eval iteration runs on a GPU; estimate cost from wall time
+        # and GPU hourly rate.
+        _GPU_HOURLY_RATES = {
+            "H100": 3.95,
+            "A100-80GB": 2.50,
+            "A100-40GB": 2.10,
+            "L40S": 2.00,
+        }
+        gpu_rate = _GPU_HOURLY_RATES.get(hardware, 3.95)
+        # Rough estimate: average ~15s per eval, but use actual wall time
+        # divided across evals as a proxy when available.
+        avg_eval_seconds = (wall_time / total_eval_count) if total_eval_count > 0 else 0.0
+        compute_cost = total_eval_count * avg_eval_seconds * (gpu_rate / 3600)
+        total_cost = total_llm_cost + compute_cost
+
         return OptimizationResult(
             final_kernel=best_kernel,
             final_speedup=best_speedup,
@@ -311,6 +400,9 @@ class Orchestrator:
             intents_succeeded=intents_succeeded,
             intents_failed=intents_failed,
             stagnation_triggered=stagnation_triggered,
+            trace=optimization_trace,
+            total_tokens=total_tokens,
+            total_cost_usd=total_cost,
         )
 
     # -- LLM-driven tree operations ------------------------------------------

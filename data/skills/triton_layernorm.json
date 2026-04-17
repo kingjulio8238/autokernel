@@ -1,0 +1,10 @@
+{
+  "id": "triton_fused_layernorm",
+  "name": "Fused LayerNorm (Triton)",
+  "trigger": "LayerNorm, layer_norm, normalization, RMSNorm",
+  "approach": "Single-pass online algorithm: compute mean and variance simultaneously. Fuse normalization + scale + bias into one kernel. Use Welford's algorithm for numerical stability. Vectorized loads for bandwidth.",
+  "backend": "triton",
+  "evidence": [],
+  "code_template": null,
+  "tags": ["layernorm", "rmsnorm", "normalization", "memory_bound", "online_algorithm", "welford"]
+}

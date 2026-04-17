@@ -1,0 +1,10 @@
+{
+  "id": "cuda_conv2d_optimized",
+  "name": "Optimized Conv2D (CUDA)",
+  "trigger": "Conv2D, convolution, image convolution, 2D convolution",
+  "approach": "im2col + GEMM for standard convolutions. Winograd transform for 3x3 filters. Direct convolution for depthwise. Fuse batch norm and activation into conv epilogue.",
+  "backend": "cuda",
+  "evidence": [],
+  "code_template": null,
+  "tags": ["conv2d", "image", "compute_bound", "im2col", "winograd"]
+}

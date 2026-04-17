@@ -1,0 +1,10 @@
+{
+  "id": "triton_batch_matmul",
+  "name": "Batched GEMM (Triton)",
+  "trigger": "Batch matmul, bmm, batched matrix multiplication, grouped GEMM",
+  "approach": "Parallelize across batch dimension in grid. Each thread block handles one (or few) batch elements with standard tiled GEMM. For small batch sizes, use split-K to improve parallelism. For grouped GEMM with different sizes, use padding or dynamic scheduling.",
+  "backend": "triton",
+  "evidence": [],
+  "code_template": null,
+  "tags": ["batch_matmul", "bmm", "grouped_gemm", "compute_bound", "tiling"]
+}

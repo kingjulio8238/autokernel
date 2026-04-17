@@ -1,0 +1,10 @@
+{
+  "id": "cuda_epilogue_fusion",
+  "name": "Epilogue Fusion (CUDA)",
+  "trigger": "GEMM followed by bias add and activation, matmul + relu, conv + bias + activation, epilogue fusion",
+  "approach": "Fuse post-GEMM/Conv operations (bias add, ReLU, GELU, sigmoid, scaling) into the output loop of the main kernel. Eliminates intermediate memory writes. Use CUTLASS epilogue visitor pattern or custom inline epilogue in CUDA.",
+  "backend": "cuda",
+  "evidence": [],
+  "code_template": null,
+  "tags": ["epilogue", "fusion", "bias", "activation", "compute_bound", "memory_savings"]
+}

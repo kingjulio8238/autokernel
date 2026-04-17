@@ -1,0 +1,10 @@
+{
+  "id": "triton_fused_attention",
+  "name": "Fused Attention (Triton)",
+  "trigger": "Attention, self-attention, multi-head attention, QKV, scaled dot-product attention",
+  "approach": "Fuse QK^T, softmax, and V multiplication into single kernel. Use online softmax for numerical stability. Tile along sequence dimension. Use shared memory for K/V cache.",
+  "backend": "triton",
+  "evidence": [],
+  "code_template": null,
+  "tags": ["attention", "transformer", "memory_bound", "fusion", "online_softmax"]
+}
