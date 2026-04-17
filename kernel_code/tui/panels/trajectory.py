@@ -1,9 +1,12 @@
-"""Trajectory panel — optimization speedup chart using SparklineWidget.
+"""Trajectory panel -- optimization speedup chart using SparklineWidget.
 
-Shows speedup progression over iterations with color-coded status markers.
+Shows speedup progression over iterations with color-coded status markers
+and running-best tracking.
 """
 
 from __future__ import annotations
+
+from rich.text import Text
 
 from textual.app import ComposeResult
 from textual.widget import Widget
@@ -18,14 +21,15 @@ class TrajectoryPanel(Widget):
     DEFAULT_CSS = """
     TrajectoryPanel {
         height: auto;
-        min-height: 5;
-        border: solid $accent;
+        min-height: 8;
+        background: #252220;
+        border: solid #3d3835;
         padding: 0;
     }
     TrajectoryPanel > Static {
         height: 1;
-        background: $accent;
-        color: $text;
+        background: #302c28;
+        color: #a09890;
         text-style: bold;
         padding: 0 1;
     }
@@ -36,26 +40,38 @@ class TrajectoryPanel(Widget):
         self._iterations: list[dict] = iterations or []
 
     def compose(self) -> ComposeResult:
-        yield Static("Optimization Trajectory")
-        values, statuses = self._extract_data()
-        yield SparklineWidget(values=values, statuses=statuses, id="trajectory-sparkline")
+        title = Text("OPTIMIZATION TRAJECTORY", style="bold")
+        yield Static(title)
+        values, statuses, running_best = self._extract_data()
+        yield SparklineWidget(
+            values=values,
+            statuses=statuses,
+            running_best=running_best,
+            id="trajectory-sparkline",
+        )
 
     def update_iterations(self, iterations: list[dict]) -> None:
         """Update trajectory with new iteration data."""
         self._iterations = iterations
-        values, statuses = self._extract_data()
+        values, statuses, running_best = self._extract_data()
         try:
             sparkline = self.query_one("#trajectory-sparkline", SparklineWidget)
-            sparkline.update_data(values, statuses)
+            sparkline.update_data(values, statuses, running_best)
         except Exception:
             pass
 
-    def _extract_data(self) -> tuple[list[float], list[str]]:
-        values = []
-        statuses = []
+    def _extract_data(self) -> tuple[list[float], list[str], list[float]]:
+        values: list[float] = []
+        statuses: list[str] = []
+        running_best: list[float] = []
+        best_so_far = 0.0
+
         for it in self._iterations:
             speedup = it.get("speedup", 0.0)
             status = it.get("decision", it.get("status", ""))
             values.append(speedup)
             statuses.append(status)
-        return values, statuses
+            best_so_far = max(best_so_far, speedup)
+            running_best.append(best_so_far)
+
+        return values, statuses, running_best

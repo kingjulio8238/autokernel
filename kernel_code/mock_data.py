@@ -169,6 +169,11 @@ def _make_iteration(
 
     bottleneck = random.choice(_BOTTLENECK_TYPES)
 
+    # Roofline position improves with progress (how close to theoretical ceiling)
+    roofline_pos = min(0.95, _rand(0.3, 0.5) + 0.3 * progress)
+    # Estimated headroom decreases as we approach the ceiling
+    estimated_headroom = max(1.0, round(target_ceiling / max(raw_speedup, 0.5), 1))
+
     intent_idx = min(iteration, len(_INTENTS) - 1)
     snippet_idx = min(iteration % len(_KERNEL_SNIPPETS), len(_KERNEL_SNIPPETS) - 1)
 
@@ -184,6 +189,8 @@ def _make_iteration(
             "cache_efficiency": cache_eff,
             "occupancy": occupancy,
             "bottleneck_type": bottleneck,
+            "roofline_position": roofline_pos,
+            "estimated_headroom": estimated_headroom,
         },
         "kernel_code_snippet": _KERNEL_SNIPPETS[snippet_idx],
         "intent": _INTENTS[intent_idx],

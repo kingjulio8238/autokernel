@@ -2,12 +2,12 @@
 
 Layout (matching docs/kernel-code-design.md):
   ┌─────────────────────┬──────────────────────────────┐
-  │                     │  Optimization Trajectory      │
-  │   Chat / Agent      │  (sparkline)                  │
-  │   Panel             ├──────────────────────────────┤
-  │                     │  Profiling Summary             │
-  │   (placeholder)     │  (4 gauges + bottleneck)      │
-  │                     ├──────────────────────────────┤
+  │  Optimization Feed  │  Optimization Trajectory      │
+  │  - header / summary │  (sparkline)                  │
+  │  - intent & status  ├──────────────────────────────┤
+  │  - critic diagnosis │  Profiling Summary             │
+  │  - best kernel      │  (4 gauges + bottleneck)      │
+  │  - recent activity  ├──────────────────────────────┤
   │                     │  Experiment Log               │
   │                     │  (colored table)              │
   ├─────────────────────┴──────────────────────────────┤
@@ -30,23 +30,10 @@ from textual.widgets import Static
 
 from kernel_code.tui.keybindings import APP_BINDINGS
 from kernel_code.tui.panels.experiment_log import ExperimentLogPanel
+from kernel_code.tui.panels.optimization_feed import OptimizationFeedPanel
 from kernel_code.tui.panels.profiling import ProfilingPanel
 from kernel_code.tui.panels.status_bar import StatusBar
 from kernel_code.tui.panels.trajectory import TrajectoryPanel
-
-
-class ChatPanel(Static):
-    """Placeholder chat/agent panel showing optimization progress."""
-
-    DEFAULT_CSS = """
-    ChatPanel {
-        width: 2fr;
-        height: 1fr;
-        border: solid $primary;
-        padding: 1;
-        overflow-y: auto;
-    }
-    """
 
 
 class KernelCodeApp(App):
@@ -56,13 +43,14 @@ class KernelCodeApp(App):
     CSS = """
     Screen {
         layout: vertical;
+        background: #1a1816;
     }
 
     #main-area {
         height: 1fr;
     }
 
-    #chat-panel {
+    #optimization-feed {
         width: 2fr;
         min-width: 30;
     }
@@ -99,9 +87,10 @@ class KernelCodeApp(App):
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="main-area"):
-            yield ChatPanel(
-                self._render_chat_content(),
-                id="chat-panel",
+            yield OptimizationFeedPanel(
+                session_data=self._session_data,
+                visible_iterations=self._session_data.get("iterations", [])[:self._displayed_iterations],
+                id="optimization-feed",
             )
             with Vertical(id="right-panels"):
                 yield TrajectoryPanel(id="trajectory-panel")
@@ -179,65 +168,23 @@ class KernelCodeApp(App):
         try:
             status = self.query_one("#status-bar", StatusBar)
             cost = self._displayed_iterations * 0.02  # ~$0.02 per iteration
+            max_iter = self._session_data.get("num_iterations")
             status.update_status(
                 iteration=self._displayed_iterations,
                 cost=cost,
                 hardware=self._session_data.get("hardware", "H100"),
                 backend=self._session_data.get("backend", "Triton"),
+                max_iterations=max_iter,
             )
         except Exception:
             pass
 
-        # Update chat panel
+        # Update optimization feed panel
         try:
-            chat = self.query_one("#chat-panel", ChatPanel)
-            chat.update(self._render_chat_content())
+            feed = self.query_one("#optimization-feed", OptimizationFeedPanel)
+            feed.update_feed(self._session_data, visible)
         except Exception:
             pass
-
-    def _render_chat_content(self) -> str:
-        """Render the chat panel content showing optimization progress."""
-        iterations = self._session_data.get("iterations", [])
-        visible = iterations[: self._displayed_iterations]
-
-        lines = [
-            "[bold]kernel code[/bold] v0.1\n",
-            f"Problem: {self._session_data.get('problem', '...')}",
-            f"Backend: {self._session_data.get('backend', '...')}",
-            "",
-        ]
-
-        if not visible:
-            lines.append("[dim]Waiting for first iteration...[/dim]")
-            return "\n".join(lines)
-
-        # Show last few iterations as chat messages
-        for it in visible[-5:]:
-            iteration = it.get("iteration", 0)
-            intent = it.get("intent", "")
-            status = it.get("status", "")
-            speedup = it.get("speedup", 0.0)
-            decision = it.get("decision", status)
-
-            lines.append(f"[bold]> Iter {iteration}:[/bold] {intent}")
-
-            if decision == "keep":
-                lines.append(f"  [green]KEEP[/green] {speedup:.2f}x")
-            elif decision == "error":
-                error = it.get("error", "Unknown error")
-                lines.append(f"  [red]ERROR[/red] {error[:50]}")
-            elif decision == "discard":
-                if status == "incorrect":
-                    lines.append(f"  [yellow]INCORRECT[/yellow] {speedup:.2f}x")
-                else:
-                    lines.append(f"  [red]DISCARD[/red] {speedup:.2f}x")
-            lines.append("")
-
-        # Summary
-        best = max((it.get("speedup", 0.0) for it in visible), default=0.0)
-        lines.append(f"[bold]Best speedup: {best:.2f}x[/bold]")
-
-        return "\n".join(lines)
 
     # --- Actions bound to keybindings ---
 
