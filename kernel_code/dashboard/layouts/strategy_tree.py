@@ -9,16 +9,7 @@ from __future__ import annotations
 import plotly.graph_objects as go
 import pandas as pd
 
-
-_STATUS_COLORS = {
-    "keep": "#22c55e",       # green  - succeeded / kept
-    "discard": "#ef4444",    # red    - discarded / failed
-    "error": "#dc2626",      # red    - error
-    "compile_error": "#dc2626",
-    "incorrect": "#eab308",  # yellow
-    "pending": "#6b7280",    # gray
-    "active": "#3b82f6",     # blue
-}
+from kernel_code.dashboard.theme import STATUS_COLORS, COLORS, FONTS, PLOTLY_THEME
 
 
 def create_strategy_tree_figure(df: pd.DataFrame) -> go.Figure:
@@ -37,7 +28,7 @@ def create_strategy_tree_figure(df: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
 
     if df.empty:
-        fig.update_layout(title="Strategy Tree (no data)", template="plotly_dark")
+        fig.update_layout(title="Strategy Tree (no data)", **PLOTLY_THEME)
         return fig
 
     # Build treemap data: root -> decision group -> individual iteration
@@ -53,7 +44,7 @@ def create_strategy_tree_figure(df: pd.DataFrame) -> go.Figure:
     labels.append(root_label)
     parents.append("")
     values.append(0)
-    colors.append("#1e293b")
+    colors.append(COLORS["bg_muted"])
     hover_texts.append("")
 
     # Group nodes by decision
@@ -66,7 +57,7 @@ def create_strategy_tree_figure(df: pd.DataFrame) -> go.Figure:
         labels.append(f"{group_label} ({group_count})")
         parents.append(root_label)
         values.append(0)
-        colors.append(_STATUS_COLORS.get(group, "#6b7280"))
+        colors.append(STATUS_COLORS.get(group, COLORS["text_dim"]))
         hover_texts.append(f"{group_label}: {group_count} iterations")
 
     # Leaf nodes: individual iterations
@@ -89,7 +80,7 @@ def create_strategy_tree_figure(df: pd.DataFrame) -> go.Figure:
         labels.append(f"#{iteration}: {short_intent}")
         parents.append(parent_id)
         values.append(size_val)
-        colors.append(_STATUS_COLORS.get(decision, "#6b7280"))
+        colors.append(STATUS_COLORS.get(decision, COLORS["text_dim"]))
         hover_texts.append(
             f"<b>Iter {iteration}</b><br>"
             f"Intent: {intent}<br>"
@@ -105,18 +96,22 @@ def create_strategy_tree_figure(df: pd.DataFrame) -> go.Figure:
             values=values,
             marker=dict(
                 colors=colors,
-                line=dict(width=1, color="#0f172a"),
+                line=dict(width=1, color=COLORS["bg_card"]),
             ),
             text=hover_texts,
             hovertemplate="%{text}<extra></extra>",
-            textfont=dict(color="white", size=11),
+            textfont=dict(
+                color=COLORS["bg_card"],
+                size=11,
+                family=FONTS["mono"],
+            ),
             branchvalues="remainder",
         )
     )
 
     fig.update_layout(
         title="Strategy Tree",
-        template="plotly_dark",
+        **PLOTLY_THEME,
         height=400,
         margin=dict(l=10, r=10, t=60, b=10),
     )

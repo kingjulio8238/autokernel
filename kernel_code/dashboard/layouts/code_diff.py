@@ -12,6 +12,8 @@ import html as html_mod
 import pandas as pd
 from dash import dcc, html
 
+from kernel_code.dashboard.theme import COLORS, FONTS
+
 
 def _highlight_line(source: str) -> str:
     """Syntax-highlight a single line of Python/Triton code to HTML.
@@ -23,7 +25,7 @@ def _highlight_line(source: str) -> str:
         from pygments.formatters import HtmlFormatter
         from pygments.lexers import PythonLexer
 
-        formatter = HtmlFormatter(nowrap=True, style="monokai")
+        formatter = HtmlFormatter(nowrap=True, style="friendly")
         return highlight(source, PythonLexer(), formatter)
     except ImportError:
         return html_mod.escape(source)
@@ -36,7 +38,7 @@ def _highlight_block(source: str) -> str:
         from pygments.formatters import HtmlFormatter
         from pygments.lexers import PythonLexer
 
-        formatter = HtmlFormatter(nowrap=True, style="monokai")
+        formatter = HtmlFormatter(nowrap=True, style="friendly")
         return highlight(source, PythonLexer(), formatter)
     except ImportError:
         return html_mod.escape(source)
@@ -85,15 +87,15 @@ def _diff_lines(old_code: str, new_code: str) -> tuple[list[dict], list[dict]]:
 
 
 _STATUS_BG = {
-    "added": "rgba(34,197,94,0.15)",
-    "removed": "rgba(239,68,68,0.15)",
+    "added": COLORS["diff_added_bg"],
+    "removed": COLORS["diff_removed_bg"],
     "unchanged": "transparent",
     "blank": "transparent",
 }
 
 _STATUS_BORDER = {
-    "added": "2px solid rgba(34,197,94,0.4)",
-    "removed": "2px solid rgba(239,68,68,0.4)",
+    "added": f"2px solid {COLORS['green']}",
+    "removed": f"2px solid {COLORS['red']}",
     "unchanged": "none",
     "blank": "none",
 }
@@ -103,8 +105,6 @@ def _render_side(lines: list[dict], header: str) -> html.Div:
     """Render one side of the diff as a Dash html.Div.
 
     Each line is rendered as plain text inside monospace-styled Dash components.
-    Pygments highlighting is applied only when wrapping in dcc.Markdown; for
-    the line-by-line diff we keep plain text to avoid invalid Dash props.
     """
     code_lines = []
     for idx, line in enumerate(lines, 1):
@@ -123,23 +123,23 @@ def _render_side(lines: list[dict], header: str) -> html.Div:
                     html.Span(
                         f"{idx}",
                         style={
-                            "color": "#475569",
+                            "color": COLORS["text_dim"],
                             "width": "35px",
                             "textAlign": "right",
                             "paddingRight": "12px",
                             "userSelect": "none",
                             "flexShrink": "0",
-                            "fontFamily": "monospace",
+                            "fontFamily": FONTS["mono"],
                             "fontSize": "12px",
                         },
                     ),
                     html.Code(
                         display_text,
                         style={
-                            "fontFamily": "monospace",
+                            "fontFamily": FONTS["mono"],
                             "fontSize": "12px",
                             "whiteSpace": "pre",
-                            "color": "#e2e8f0",
+                            "color": COLORS["text"],
                             "background": "none",
                         },
                     ),
@@ -154,18 +154,21 @@ def _render_side(lines: list[dict], header: str) -> html.Div:
                 header,
                 style={
                     "padding": "8px 12px",
-                    "backgroundColor": "#1e293b",
-                    "color": "#94a3b8",
-                    "fontWeight": "bold",
-                    "fontSize": "12px",
-                    "borderBottom": "1px solid #334155",
+                    "backgroundColor": COLORS["bg"],
+                    "color": COLORS["text_dim"],
+                    "fontWeight": "600",
+                    "fontFamily": FONTS["mono"],
+                    "fontSize": "10px",
+                    "textTransform": "uppercase",
+                    "letterSpacing": "1.5px",
+                    "borderBottom": f"1px solid {COLORS['border']}",
                 },
             ),
             html.Div(
                 style={
-                    "fontFamily": "monospace",
+                    "fontFamily": FONTS["mono"],
                     "fontSize": "12px",
-                    "backgroundColor": "#0f172a",
+                    "backgroundColor": COLORS["bg_card"],
                     "maxHeight": "500px",
                     "overflowY": "auto",
                 },
@@ -190,7 +193,11 @@ def create_code_diff_component(df: pd.DataFrame) -> html.Div:
     if df.empty or "kernel_code_snippet" not in df.columns:
         return html.Div(
             "No kernel code available for diff.",
-            style={"color": "#64748b", "padding": "20px"},
+            style={
+                "color": COLORS["text_dim"],
+                "padding": "20px",
+                "fontFamily": FONTS["body"],
+            },
         )
 
     # Find current best and previous iteration
@@ -203,16 +210,22 @@ def create_code_diff_component(df: pd.DataFrame) -> html.Div:
             [
                 html.H4(
                     "Current Kernel (no previous best to diff against)",
-                    style={"color": "#e2e8f0"},
+                    style={
+                        "color": COLORS["text"],
+                        "fontFamily": FONTS["mono"],
+                        "fontSize": "12px",
+                        "textTransform": "uppercase",
+                        "letterSpacing": "1px",
+                    },
                 ),
                 dcc.Markdown(
                     f"```python\n{code}\n```",
                     style={
-                        "backgroundColor": "#0f172a",
+                        "backgroundColor": COLORS["bg_card"],
                         "padding": "16px",
-                        "borderRadius": "6px",
-                        "border": "1px solid #1e293b",
-                        "fontFamily": "monospace",
+                        "borderRadius": "4px",
+                        "border": f"1px solid {COLORS['border']}",
+                        "fontFamily": FONTS["mono"],
                         "fontSize": "12px",
                         "overflowX": "auto",
                         "maxHeight": "500px",
@@ -235,8 +248,8 @@ def create_code_diff_component(df: pd.DataFrame) -> html.Div:
                 style={
                     "display": "flex",
                     "gap": "4px",
-                    "border": "1px solid #1e293b",
-                    "borderRadius": "6px",
+                    "border": f"1px solid {COLORS['border']}",
+                    "borderRadius": "4px",
                     "overflow": "hidden",
                 },
                 children=[

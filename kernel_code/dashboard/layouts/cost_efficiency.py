@@ -10,6 +10,8 @@ from __future__ import annotations
 import plotly.graph_objects as go
 import pandas as pd
 
+from kernel_code.dashboard.theme import COLORS, apply_theme
+
 
 def create_cost_efficiency_figure(df: pd.DataFrame) -> go.Figure:
     """Create the cost efficiency Plotly figure.
@@ -25,7 +27,7 @@ def create_cost_efficiency_figure(df: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
 
     if df.empty:
-        fig.update_layout(title="Cost Efficiency (no data)")
+        apply_theme(fig, title="Cost Efficiency (no data)")
         return fig
 
     df = df.copy()
@@ -47,10 +49,17 @@ def create_cost_efficiency_figure(df: pd.DataFrame) -> go.Figure:
             marker=dict(
                 size=8,
                 color=df["iteration"],
-                colorscale="Viridis",
+                colorscale=[
+                    [0, COLORS["bg_muted"]],
+                    [1, COLORS["accent"]],
+                ],
                 showscale=True,
-                colorbar=dict(title="Iteration"),
-                line=dict(width=0.5, color="white"),
+                colorbar=dict(
+                    title="Iteration",
+                    tickfont=dict(color=COLORS["text_secondary"]),
+                    titlefont=dict(color=COLORS["text_secondary"]),
+                ),
+                line=dict(width=0.5, color=COLORS["border"]),
             ),
             name="All Iterations",
             text=df["iteration"],
@@ -64,18 +73,16 @@ def create_cost_efficiency_figure(df: pd.DataFrame) -> go.Figure:
     )
 
     # --- Cost-performance frontier (Pareto front) ---
-    # Points where cumulative_best improved (i.e., new best found).
     frontier = df[df["cumulative_best"] == df["speedup"]].copy()
     if not frontier.empty:
-        # Sort by cost for proper line drawing.
         frontier = frontier.sort_values("cumulative_cost")
         fig.add_trace(
             go.Scatter(
                 x=frontier["cumulative_cost"],
                 y=frontier["cumulative_best"],
                 mode="lines+markers",
-                line=dict(color="#22c55e", width=2, shape="hv"),
-                marker=dict(size=10, color="#22c55e", symbol="diamond"),
+                line=dict(color=COLORS["green"], width=2, shape="hv"),
+                marker=dict(size=10, color=COLORS["green"], symbol="diamond"),
                 name="Cost-Performance Frontier",
                 hovertemplate=(
                     "<b>New best</b><br>"
@@ -90,16 +97,17 @@ def create_cost_efficiency_figure(df: pd.DataFrame) -> go.Figure:
     fig.add_hline(
         y=1.0,
         line_dash="dash",
-        line_color="gray",
+        line_color=COLORS["baseline"],
         annotation_text="1.0x (baseline)",
         annotation_position="bottom left",
+        annotation_font_color=COLORS["text_dim"],
     )
 
-    fig.update_layout(
+    apply_theme(
+        fig,
         title="Cost Efficiency",
         xaxis_title="Cumulative Cost (USD)",
         yaxis_title="Speedup (x)",
-        template="plotly_dark",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         height=400,
         margin=dict(l=60, r=20, t=60, b=40),

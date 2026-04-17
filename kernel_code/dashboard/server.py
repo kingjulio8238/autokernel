@@ -13,13 +13,34 @@ Serves on localhost:8050 with 10 panels:
   10. Strategy statistics (post-hoc)
 
 Auto-refresh every 5 seconds.
+
+Constellation-inspired interactive features:
+  - Linked selection across all panels (click a trajectory point)
+  - Dual range filters on any numeric metric
+  - Linear/log scale toggles on trajectory and roofline axes
+  - Continuous colormap on landscape (color by any metric)
 """
 
 from __future__ import annotations
 
-from dash import Dash, html, dcc, Input, Output
+from dash import Dash, html, dcc, Input, Output, no_update
 
 from kernel_code.dashboard.data import load_session, load_session_metadata
+from kernel_code.dashboard.theme import (
+    COLORS,
+    FONTS,
+    GOOGLE_FONTS_LINK,
+    apply_theme,
+    card_style,
+    section_header,
+)
+from kernel_code.dashboard.interactions import (
+    apply_filters,
+    create_filter_bar,
+    create_scale_toggle,
+    create_color_by_dropdown,
+    create_interaction_stores,
+)
 from kernel_code.dashboard.layouts.trajectory import create_trajectory_figure
 from kernel_code.dashboard.layouts.experiment_table import create_experiment_table
 from kernel_code.dashboard.layouts.roofline import create_roofline_figure
@@ -58,32 +79,46 @@ def create_dash_app(session_id: str) -> Dash:
 
     hardware = metadata.get("hardware", "H100") or "H100"
 
-    # Reusable section wrapper
+    # Reusable section wrapper with card styling
     def _section(title: str, children: list) -> html.Div:
         return html.Div(
-            style={"marginBottom": "24px"},
+            style=card_style(),
             children=[
-                html.H3(title, style={"color": "#e2e8f0", "marginBottom": "8px"}),
+                section_header(title),
                 *children,
             ],
         )
 
     app.layout = html.Div(
         style={
-            "backgroundColor": "#0f172a",
-            "color": "#e2e8f0",
-            "fontFamily": "monospace",
+            "backgroundColor": COLORS["bg"],
+            "color": COLORS["text"],
+            "fontFamily": FONTS["body"],
             "minHeight": "100vh",
             "padding": "20px",
         },
         children=[
+            # Google Fonts
+            GOOGLE_FONTS_LINK,
             # Header
             html.Div(
-                style={"display": "flex", "justifyContent": "space-between", "marginBottom": "20px"},
+                style={
+                    "display": "flex",
+                    "justifyContent": "space-between",
+                    "alignItems": "center",
+                    "marginBottom": "20px",
+                },
                 children=[
                     html.H1(
-                        "kernel code dashboard",
-                        style={"color": "#3b82f6", "margin": "0"},
+                        "KERNEL CODE DASHBOARD",
+                        style={
+                            "color": COLORS["accent"],
+                            "margin": "0",
+                            "fontFamily": FONTS["mono"],
+                            "fontSize": "20px",
+                            "letterSpacing": "2px",
+                            "textTransform": "uppercase",
+                        },
                     ),
                     html.Div(
                         [
@@ -91,7 +126,12 @@ def create_dash_app(session_id: str) -> Dash:
                                 f"{metadata.get('hardware', '')} | "
                                 f"{metadata.get('backend', '')} | "
                                 f"{metadata.get('problem', '')}",
-                                style={"color": "#94a3b8", "fontSize": "14px"},
+                                style={
+                                    "color": COLORS["text_secondary"],
+                                    "fontSize": "12px",
+                                    "fontFamily": FONTS["mono"],
+                                    "letterSpacing": "1px",
+                                },
                             ),
                         ],
                     ),
@@ -99,22 +139,76 @@ def create_dash_app(session_id: str) -> Dash:
             ),
             # Session info
             html.Div(
-                style={"marginBottom": "15px", "color": "#64748b"},
+                style={
+                    "marginBottom": "15px",
+                    "color": COLORS["text_dim"],
+                    "fontFamily": FONTS["mono"],
+                    "fontSize": "11px",
+                    "letterSpacing": "1px",
+                },
                 children=[
-                    html.Span(f"Session: {session_id}"),
+                    html.Span(f"SESSION: {session_id}"),
                 ],
             ),
+            # --- Filter Bar (Constellation dual-filter pattern) ---
+            create_filter_bar(),
             # --- Row 1: Trajectory + Roofline ---
             html.Div(
                 style={"display": "flex", "gap": "16px", "marginBottom": "16px"},
                 children=[
                     html.Div(
-                        style={"flex": "1", "minWidth": "0"},
-                        children=[dcc.Graph(id="trajectory-chart")],
+                        style={**card_style(), "flex": "1", "minWidth": "0"},
+                        children=[
+                            html.Div(
+                                style={
+                                    "display": "flex",
+                                    "justifyContent": "space-between",
+                                    "alignItems": "center",
+                                    "marginBottom": "4px",
+                                },
+                                children=[
+                                    section_header("Optimization Trajectory"),
+                                    # Scale toggle for trajectory Y axis
+                                    create_scale_toggle(
+                                        "trajectory-y-scale", "Y Scale", "linear"
+                                    ),
+                                ],
+                            ),
+                            dcc.Graph(id="trajectory-chart"),
+                        ],
                     ),
                     html.Div(
-                        style={"flex": "1", "minWidth": "0"},
-                        children=[dcc.Graph(id="roofline-chart")],
+                        style={**card_style(), "flex": "1", "minWidth": "0"},
+                        children=[
+                            html.Div(
+                                style={
+                                    "display": "flex",
+                                    "justifyContent": "space-between",
+                                    "alignItems": "center",
+                                    "flexWrap": "wrap",
+                                    "marginBottom": "4px",
+                                },
+                                children=[
+                                    section_header("Roofline Model"),
+                                    html.Div(
+                                        style={
+                                            "display": "flex",
+                                            "alignItems": "center",
+                                        },
+                                        children=[
+                                            # Scale toggles for roofline axes
+                                            create_scale_toggle(
+                                                "roofline-x-scale", "X Scale", "log"
+                                            ),
+                                            create_scale_toggle(
+                                                "roofline-y-scale", "Y Scale", "log"
+                                            ),
+                                        ],
+                                    ),
+                                ],
+                            ),
+                            dcc.Graph(id="roofline-chart"),
+                        ],
                     ),
                 ],
             ),
@@ -123,12 +217,18 @@ def create_dash_app(session_id: str) -> Dash:
                 style={"display": "flex", "gap": "16px", "marginBottom": "16px"},
                 children=[
                     html.Div(
-                        style={"flex": "1", "minWidth": "0"},
-                        children=[dcc.Graph(id="utilization-chart")],
+                        style={**card_style(), "flex": "1", "minWidth": "0"},
+                        children=[
+                            section_header("Resource Utilization"),
+                            dcc.Graph(id="utilization-chart"),
+                        ],
                     ),
                     html.Div(
-                        style={"flex": "1", "minWidth": "0"},
-                        children=[dcc.Graph(id="strategy-tree-chart")],
+                        style={**card_style(), "flex": "1", "minWidth": "0"},
+                        children=[
+                            section_header("Strategy Tree"),
+                            dcc.Graph(id="strategy-tree-chart"),
+                        ],
                     ),
                 ],
             ),
@@ -138,7 +238,18 @@ def create_dash_app(session_id: str) -> Dash:
             _section(
                 "Optimization Landscape",
                 [
-                    create_landscape_controls(),
+                    html.Div(
+                        style={
+                            "display": "flex",
+                            "flexWrap": "wrap",
+                            "alignItems": "center",
+                        },
+                        children=[
+                            create_landscape_controls(),
+                            # Color-by dropdown (Constellation continuous colormap)
+                            create_color_by_dropdown(),
+                        ],
+                    ),
                     dcc.Graph(id="landscape-chart"),
                 ],
             ),
@@ -149,12 +260,18 @@ def create_dash_app(session_id: str) -> Dash:
                 style={"display": "flex", "gap": "16px", "marginBottom": "16px"},
                 children=[
                     html.Div(
-                        style={"flex": "1", "minWidth": "0"},
-                        children=[dcc.Graph(id="convergence-chart")],
+                        style={**card_style(), "flex": "1", "minWidth": "0"},
+                        children=[
+                            section_header("Convergence Analysis"),
+                            dcc.Graph(id="convergence-chart"),
+                        ],
                     ),
                     html.Div(
-                        style={"flex": "1", "minWidth": "0"},
-                        children=[dcc.Graph(id="cost-efficiency-chart")],
+                        style={**card_style(), "flex": "1", "minWidth": "0"},
+                        children=[
+                            section_header("Cost Efficiency"),
+                            dcc.Graph(id="cost-efficiency-chart"),
+                        ],
                     ),
                 ],
             ),
@@ -165,10 +282,57 @@ def create_dash_app(session_id: str) -> Dash:
             # Stores
             dcc.Store(id="session-id-store", data=session_id),
             dcc.Store(id="hardware-store", data=hardware),
+            # Constellation interaction stores (selected-iteration, filter-state)
+            *create_interaction_stores(),
         ],
     )
 
-    # ---- Callback: refresh all panels ----
+    # ----------------------------------------------------------------
+    # Callback: Linked Selection -- trajectory click -> selected-iteration
+    # ----------------------------------------------------------------
+    @app.callback(
+        Output("selected-iteration", "data"),
+        Input("trajectory-chart", "clickData"),
+        prevent_initial_call=True,
+    )
+    def on_trajectory_click(click_data):
+        """Store the clicked iteration number for cross-panel highlighting."""
+        if click_data and click_data.get("points"):
+            point = click_data["points"][0]
+            iteration = point.get("x")
+            if iteration is not None:
+                return int(iteration)
+        return no_update
+
+    # ----------------------------------------------------------------
+    # Callback: Filter State -- filter inputs -> filter-state store
+    # ----------------------------------------------------------------
+    @app.callback(
+        Output("filter-state", "data"),
+        [
+            Input("filter-metric-1", "value"),
+            Input("filter-min-1", "value"),
+            Input("filter-max-1", "value"),
+            Input("filter-metric-2", "value"),
+            Input("filter-min-2", "value"),
+            Input("filter-max-2", "value"),
+        ],
+    )
+    def update_filter_state(
+        metric1, min1, max1,
+        metric2, min2, max2,
+    ):
+        """Build the filter-state dict from the two filter controls."""
+        filters = []
+        if metric1:
+            filters.append({"metric": metric1, "min": min1, "max": max1})
+        if metric2:
+            filters.append({"metric": metric2, "min": min2, "max": max2})
+        return {"filters": filters}
+
+    # ----------------------------------------------------------------
+    # Callback: Refresh all panels (reads filter + selection state)
+    # ----------------------------------------------------------------
     @app.callback(
         [
             Output("trajectory-chart", "figure"),
@@ -185,32 +349,70 @@ def create_dash_app(session_id: str) -> Dash:
             Input("refresh-interval", "n_intervals"),
             Input("session-id-store", "data"),
             Input("hardware-store", "data"),
+            Input("selected-iteration", "data"),
+            Input("filter-state", "data"),
+            Input("trajectory-y-scale", "value"),
+            Input("roofline-x-scale", "value"),
+            Input("roofline-y-scale", "value"),
         ],
     )
-    def update_dashboard(n_intervals: int, sid: str, hw: str):
-        """Refresh all 10 dashboard panels with latest session data."""
+    def update_dashboard(
+        n_intervals: int,
+        sid: str,
+        hw: str,
+        selected_iter,
+        filter_state,
+        traj_y_scale,
+        roofline_x_scale,
+        roofline_y_scale,
+    ):
+        """Refresh all dashboard panels with latest session data.
+
+        Reads the shared Constellation stores (selected-iteration, filter-state,
+        scale toggles) and passes them through to each panel builder.
+        """
         try:
             df = load_session(sid)
         except FileNotFoundError:
             import plotly.graph_objects as go
 
             empty_fig = go.Figure()
-            empty_fig.update_layout(
-                title="No session data found",
-                template="plotly_dark",
+            apply_theme(empty_fig, title="No session data found")
+            no_data = html.Div(
+                "No data available.",
+                style={"color": COLORS["text_dim"], "padding": "20px"},
             )
-            no_data = html.Div("No data available.", style={"color": "#64748b"})
             return (empty_fig,) * 4 + (no_data, no_data) + (empty_fig,) * 3
 
-        trajectory_fig = create_trajectory_figure(df)
-        roofline_fig = create_roofline_figure(df, hardware=hw)
-        utilization_fig = create_utilization_figure(df)
-        strategy_tree_fig = create_strategy_tree_figure(df)
-        code_diff = create_code_diff_component(df)
-        experiment_table = create_experiment_table(df)
-        convergence_fig = create_convergence_figure(df)
-        cost_efficiency_fig = create_cost_efficiency_figure(df)
-        strategy_stats_fig = create_strategy_stats_figure(df)
+        # Apply range filters (Constellation dual-filter pattern)
+        filtered_df = apply_filters(df, filter_state)
+
+        # Normalize selected iteration
+        sel_iter = int(selected_iter) if selected_iter is not None else None
+
+        # Build panels with interactive state
+        trajectory_fig = create_trajectory_figure(
+            filtered_df,
+            selected_iteration=sel_iter,
+            y_scale=traj_y_scale or "linear",
+        )
+        roofline_fig = create_roofline_figure(
+            filtered_df,
+            hardware=hw,
+            x_scale=roofline_x_scale or "log",
+            y_scale=roofline_y_scale or "log",
+            selected_iteration=sel_iter,
+        )
+        utilization_fig = create_utilization_figure(filtered_df)
+        strategy_tree_fig = create_strategy_tree_figure(filtered_df)
+        code_diff = create_code_diff_component(filtered_df)
+        experiment_table = create_experiment_table(
+            filtered_df,
+            selected_iteration=sel_iter,
+        )
+        convergence_fig = create_convergence_figure(filtered_df)
+        cost_efficiency_fig = create_cost_efficiency_figure(filtered_df)
+        strategy_stats_fig = create_strategy_stats_figure(filtered_df)
 
         return (
             trajectory_fig,
@@ -224,7 +426,9 @@ def create_dash_app(session_id: str) -> Dash:
             strategy_stats_fig,
         )
 
-    # ---- Callback: landscape axis changes ----
+    # ----------------------------------------------------------------
+    # Callback: Landscape (axis + color-by + selection + filters)
+    # ----------------------------------------------------------------
     @app.callback(
         Output("landscape-chart", "figure"),
         [
@@ -233,23 +437,44 @@ def create_dash_app(session_id: str) -> Dash:
             Input("landscape-x", "value"),
             Input("landscape-y", "value"),
             Input("landscape-z", "value"),
+            Input("landscape-color-by", "value"),
+            Input("selected-iteration", "data"),
+            Input("filter-state", "data"),
         ],
     )
-    def update_landscape(n_intervals: int, sid: str, x_col: str, y_col: str, z_col: str):
-        """Rebuild the 3D landscape when axes or data change."""
+    def update_landscape(
+        n_intervals: int,
+        sid: str,
+        x_col: str,
+        y_col: str,
+        z_col: str,
+        color_by: str,
+        selected_iter,
+        filter_state,
+    ):
+        """Rebuild the 3D landscape when axes, color-by, or data change."""
         try:
             df = load_session(sid)
         except FileNotFoundError:
             import plotly.graph_objects as go
 
             empty_fig = go.Figure()
-            empty_fig.update_layout(
-                title="No session data found",
-                template="plotly_dark",
-            )
+            apply_theme(empty_fig, title="No session data found")
             return empty_fig
 
-        return create_landscape_figure(df, x_col=x_col, y_col=y_col, z_col=z_col)
+        # Apply range filters
+        filtered_df = apply_filters(df, filter_state)
+
+        sel_iter = int(selected_iter) if selected_iter is not None else None
+
+        return create_landscape_figure(
+            filtered_df,
+            x_col=x_col,
+            y_col=y_col,
+            z_col=z_col,
+            color_by=color_by or "status",
+            selected_iteration=sel_iter,
+        )
 
     return app
 

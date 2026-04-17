@@ -40,9 +40,7 @@ class ColoredTable(Widget):
     DEFAULT_CSS = """
     ColoredTable {
         height: auto;
-        max-height: 20;
         padding: 0 1;
-        overflow-y: auto;
     }
     """
 

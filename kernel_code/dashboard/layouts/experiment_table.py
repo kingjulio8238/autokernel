@@ -8,20 +8,20 @@ from __future__ import annotations
 import pandas as pd
 from dash import dash_table
 
-
-_DECISION_COLORS = {
-    "keep": {"backgroundColor": "#14532d", "color": "#86efac"},
-    "discard": {"backgroundColor": "#450a0a", "color": "#fca5a5"},
-    "error": {"backgroundColor": "#450a0a", "color": "#fca5a5"},
-}
+from kernel_code.dashboard.theme import COLORS, FONTS
 
 
-def create_experiment_table(df: pd.DataFrame) -> dash_table.DataTable:
+def create_experiment_table(
+    df: pd.DataFrame,
+    selected_iteration: int | None = None,
+) -> dash_table.DataTable:
     """Create the experiment results DataTable.
 
     Args:
         df: DataFrame with columns: iteration, speedup, decision, intent,
             runtime_us, bandwidth_util, bottleneck_type.
+        selected_iteration: If set, highlight the row for this iteration
+            (Constellation linked-selection pattern).
 
     Returns:
         A Dash DataTable component.
@@ -41,14 +41,34 @@ def create_experiment_table(df: pd.DataFrame) -> dash_table.DataTable:
     columns = [c for c in display_columns if c["id"] in available_cols]
 
     # Build conditional styles for row coloring
-    style_data_conditional = []
-    for decision, colors in _DECISION_COLORS.items():
+    style_data_conditional = [
+        # Keep rows: left green border
+        {
+            "if": {"filter_query": '{decision} = "keep"'},
+            "borderLeft": f"3px solid {COLORS['green']}",
+        },
+        # Discard rows: left red border
+        {
+            "if": {"filter_query": '{decision} = "discard"'},
+            "borderLeft": f"3px solid {COLORS['red']}",
+        },
+        # Error rows: left red border
+        {
+            "if": {"filter_query": '{decision} = "error"'},
+            "borderLeft": f"3px solid {COLORS['red']}",
+        },
+    ]
+
+    # Highlight the selected iteration row (linked selection)
+    if selected_iteration is not None:
         style_data_conditional.append(
             {
                 "if": {
-                    "filter_query": f'{{decision}} = "{decision}"',
+                    "filter_query": f"{{iteration}} = {selected_iteration}",
                 },
-                **colors,
+                "backgroundColor": COLORS["bg_muted"],
+                "fontWeight": "600",
+                "borderLeft": f"3px solid {COLORS['accent']}",
             }
         )
 
@@ -61,18 +81,25 @@ def create_experiment_table(df: pd.DataFrame) -> dash_table.DataTable:
         page_size=25,
         style_table={"overflowX": "auto"},
         style_header={
-            "backgroundColor": "#1e293b",
-            "color": "#e2e8f0",
-            "fontWeight": "bold",
-            "borderBottom": "2px solid #475569",
+            "backgroundColor": COLORS["bg"],
+            "color": COLORS["text_dim"],
+            "fontWeight": "600",
+            "fontFamily": FONTS["mono"],
+            "fontSize": "10px",
+            "textTransform": "uppercase",
+            "letterSpacing": "1.5px",
+            "borderBottom": f"1px solid {COLORS['border']}",
+            "padding": "10px 8px",
         },
         style_cell={
-            "backgroundColor": "#0f172a",
-            "color": "#cbd5e1",
-            "border": "1px solid #1e293b",
+            "backgroundColor": COLORS["bg_card"],
+            "color": COLORS["text"],
+            "border": "none",
+            "borderBottom": f"1px solid {COLORS['border']}",
             "padding": "8px",
             "textAlign": "left",
-            "fontFamily": "monospace",
+            "fontFamily": FONTS["body"],
+            "fontSize": "13px",
         },
         style_data_conditional=style_data_conditional,
     )

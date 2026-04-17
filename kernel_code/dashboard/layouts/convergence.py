@@ -11,6 +11,8 @@ from __future__ import annotations
 import plotly.graph_objects as go
 import pandas as pd
 
+from kernel_code.dashboard.theme import COLORS, apply_theme
+
 
 def create_convergence_figure(df: pd.DataFrame) -> go.Figure:
     """Create the convergence analysis Plotly figure.
@@ -26,7 +28,7 @@ def create_convergence_figure(df: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
 
     if df.empty:
-        fig.update_layout(title="Convergence Analysis (no data)")
+        apply_theme(fig, title="Convergence Analysis (no data)")
         return fig
 
     # Ensure cumulative_best exists.
@@ -45,7 +47,7 @@ def create_convergence_figure(df: pd.DataFrame) -> go.Figure:
             x=df["iteration"],
             y=deltas,
             name="Per-Iteration Delta",
-            marker_color="rgba(99, 102, 241, 0.45)",  # indigo, semi-transparent
+            marker_color=f"rgba(26, 26, 26, 0.15)",  # accent at low opacity
             yaxis="y2",
             hovertemplate=(
                 "<b>Iter %{x}</b><br>"
@@ -61,8 +63,8 @@ def create_convergence_figure(df: pd.DataFrame) -> go.Figure:
             x=df["iteration"],
             y=df["cumulative_best"],
             mode="lines+markers",
-            line=dict(color="#22c55e", width=2),
-            marker=dict(size=5, color="#22c55e"),
+            line=dict(color=COLORS["green"], width=2),
+            marker=dict(size=5, color=COLORS["green"]),
             name="Cumulative Best",
             hovertemplate=(
                 "<b>Iter %{x}</b><br>"
@@ -85,17 +87,17 @@ def create_convergence_figure(df: pd.DataFrame) -> go.Figure:
             fig.add_vline(
                 x=iter_90,
                 line_dash="dot",
-                line_color="#eab308",
+                line_color=COLORS["text_secondary"],
                 annotation_text=f"90% of gain (iter {iter_90})",
                 annotation_position="top right",
-                annotation_font_color="#eab308",
+                annotation_font_color=COLORS["text_secondary"],
             )
             fig.add_trace(
                 go.Scatter(
                     x=[iter_90],
                     y=[val_90],
                     mode="markers",
-                    marker=dict(size=12, color="#eab308", symbol="star"),
+                    marker=dict(size=12, color=COLORS["text_secondary"], symbol="star"),
                     name="90% Threshold",
                     hovertemplate=(
                         f"<b>90% of final gain</b><br>"
@@ -109,12 +111,14 @@ def create_convergence_figure(df: pd.DataFrame) -> go.Figure:
     fig.add_hline(
         y=1.0,
         line_dash="dash",
-        line_color="gray",
+        line_color=COLORS["baseline"],
         annotation_text="1.0x (baseline)",
         annotation_position="bottom left",
+        annotation_font_color=COLORS["text_dim"],
     )
 
-    fig.update_layout(
+    apply_theme(
+        fig,
         title="Convergence Analysis",
         xaxis_title="Iteration",
         yaxis_title="Cumulative Best Speedup (x)",
@@ -124,8 +128,9 @@ def create_convergence_figure(df: pd.DataFrame) -> go.Figure:
             side="right",
             showgrid=False,
             rangemode="tozero",
+            tickfont=dict(color=COLORS["text_secondary"]),
+            title_font=dict(color=COLORS["text_secondary"]),
         ),
-        template="plotly_dark",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         height=400,
         margin=dict(l=60, r=60, t=60, b=40),

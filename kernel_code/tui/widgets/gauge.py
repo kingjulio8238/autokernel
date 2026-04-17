@@ -48,13 +48,13 @@ class GaugeWidget(Widget):
         self._bar_width = bar_width
 
     def compose(self) -> ComposeResult:
-        yield Static(self._render_gauge(), id="gauge-content")
+        yield Static(self._render_gauge())
 
     def update_value(self, value: float) -> None:
         """Update the gauge value and re-render."""
         self._value = value
         try:
-            content = self.query_one("#gauge-content", Static)
+            content = self.query_one(Static)
             content.update(self._render_gauge())
         except Exception:
             pass

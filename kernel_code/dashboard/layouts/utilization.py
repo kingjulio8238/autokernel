@@ -1,13 +1,15 @@
 """Resource utilization layout for the Dash dashboard.
 
 Panel 3: Horizontal bar gauges for bandwidth_util, compute_util,
-cache_efficiency, and occupancy.  Color-coded green/yellow/red.
+cache_efficiency, and occupancy.  Color-coded green/amber/red.
 """
 
 from __future__ import annotations
 
 import plotly.graph_objects as go
 import pandas as pd
+
+from kernel_code.dashboard.theme import COLORS, apply_theme
 
 
 _METRICS = [
@@ -19,12 +21,12 @@ _METRICS = [
 
 
 def _gauge_color(value: float) -> str:
-    """Return green / yellow / red based on utilization threshold."""
+    """Return green / amber / red based on utilization threshold."""
     if value >= 0.8:
-        return "#22c55e"  # green
+        return COLORS["green"]
     if value >= 0.5:
-        return "#eab308"  # yellow
-    return "#ef4444"  # red
+        return "#b7791f"  # warm amber
+    return COLORS["red"]
 
 
 def create_utilization_figure(df: pd.DataFrame) -> go.Figure:
@@ -43,7 +45,7 @@ def create_utilization_figure(df: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
 
     if df.empty:
-        fig.update_layout(title="Resource Utilization (no data)", template="plotly_dark")
+        apply_theme(fig, title="Resource Utilization (no data)")
         return fig
 
     # Use the latest iteration
@@ -76,7 +78,7 @@ def create_utilization_figure(df: pd.DataFrame) -> go.Figure:
             marker=dict(color=colors, line=dict(width=0)),
             text=texts,
             textposition="inside",
-            textfont=dict(color="white", size=14),
+            textfont=dict(color=COLORS["bg_card"], size=14),
             name="Utilization",
             hovertemplate="<b>%{y}</b>: %{x:.0%}<extra></extra>",
         )
@@ -89,16 +91,16 @@ def create_utilization_figure(df: pd.DataFrame) -> go.Figure:
             y=labels,
             x=remaining,
             orientation="h",
-            marker=dict(color="rgba(255,255,255,0.05)", line=dict(width=0)),
+            marker=dict(color=COLORS["bg_muted"], line=dict(width=0)),
             showlegend=False,
             hoverinfo="skip",
         )
     )
 
-    fig.update_layout(
+    apply_theme(
+        fig,
         title="Resource Utilization",
         barmode="stack",
-        template="plotly_dark",
         height=280,
         margin=dict(l=120, r=20, t=60, b=20),
         xaxis=dict(
@@ -106,8 +108,15 @@ def create_utilization_figure(df: pd.DataFrame) -> go.Figure:
             tickformat=".0%",
             showgrid=False,
             title="",
+            gridcolor=COLORS["gridline"],
+            linecolor=COLORS["border"],
+            tickfont=dict(color=COLORS["text_secondary"]),
         ),
-        yaxis=dict(showgrid=False, title=""),
+        yaxis=dict(
+            showgrid=False,
+            title="",
+            tickfont=dict(color=COLORS["text_secondary"]),
+        ),
         showlegend=False,
     )
 

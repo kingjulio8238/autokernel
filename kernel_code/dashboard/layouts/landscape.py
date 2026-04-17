@@ -2,6 +2,9 @@
 
 Panel 6: 3D scatter plot (Constellation-inspired) with configurable
 axes mapping any numeric column to X, Y, Z, and color.
+
+Supports continuous colormap mode (Constellation HSV gradient) in
+addition to discrete status-based coloring.
 """
 
 from __future__ import annotations
@@ -10,14 +13,12 @@ import plotly.graph_objects as go
 import pandas as pd
 from dash import html, dcc
 
+from kernel_code.dashboard.theme import STATUS_COLORS, COLORS, FONTS, PLOTLY_THEME
+from kernel_code.dashboard.interactions import (
+    CONSTELLATION_COLORSCALE,
+    CONSTELLATION_COLORSCALE_REVERSED,
+)
 
-_STATUS_COLORS = {
-    "keep": "#22c55e",
-    "discard": "#ef4444",
-    "error": "#dc2626",
-    "incorrect": "#eab308",
-    "compile_error": "#dc2626",
-}
 
 # Columns eligible for axis mapping
 _AXIS_CANDIDATES = [
@@ -40,8 +41,14 @@ def _build_axis_dropdown(axis_id: str, label: str, default: str) -> html.Div:
         style={"display": "inline-block", "marginRight": "16px", "marginBottom": "8px"},
         children=[
             html.Label(
-                label,
-                style={"color": "#94a3b8", "fontSize": "12px", "marginRight": "6px"},
+                label.upper(),
+                style={
+                    "color": COLORS["text_dim"],
+                    "fontSize": "10px",
+                    "fontFamily": FONTS["mono"],
+                    "letterSpacing": "1.5px",
+                    "marginRight": "6px",
+                },
             ),
             dcc.Dropdown(
                 id=axis_id,
@@ -50,9 +57,12 @@ def _build_axis_dropdown(axis_id: str, label: str, default: str) -> html.Div:
                 clearable=False,
                 style={
                     "width": "160px",
-                    "backgroundColor": "#1e293b",
-                    "color": "#e2e8f0",
+                    "backgroundColor": COLORS["bg_card"],
+                    "color": COLORS["text"],
                     "fontSize": "12px",
+                    "fontFamily": FONTS["body"],
+                    "border": f"1px solid {COLORS['border']}",
+                    "borderRadius": "4px",
                 },
             ),
         ],
@@ -80,6 +90,8 @@ def create_landscape_figure(
     x_col: str = "iteration",
     y_col: str = "speedup",
     z_col: str = "cost_estimate",
+    color_by: str = "status",
+    selected_iteration: int | None = None,
 ) -> go.Figure:
     """Create a 3D scatter plot of kernel variants.
 
@@ -88,6 +100,11 @@ def create_landscape_figure(
         x_col: Column for X axis.
         y_col: Column for Y axis.
         z_col: Column for Z axis.
+        color_by: Column to use for marker color. 'status' uses discrete
+            decision-based colors; any numeric column uses the Constellation
+            continuous green-gold-red gradient.
+        selected_iteration: If set, highlight this iteration with a larger
+            marker (Constellation linked-selection pattern).
 
     Returns:
         A Plotly Figure (Scatter3d).
@@ -95,7 +112,10 @@ def create_landscape_figure(
     fig = go.Figure()
 
     if df.empty:
-        fig.update_layout(title="Optimization Landscape (no data)", template="plotly_dark")
+        fig.update_layout(
+            title="Optimization Landscape (no data)",
+            **PLOTLY_THEME,
+        )
         return fig
 
     # Ensure requested columns exist, fallback to defaults
@@ -109,9 +129,6 @@ def create_landscape_figure(
                 else:
                     z_col = fallback
 
-    # Color by decision status
-    colors = df["decision"].map(_STATUS_COLORS).fillna("#6b7280")
-
     # Build hover text
     hover_texts = []
     for _, row in df.iterrows():
@@ -124,18 +141,52 @@ def create_landscape_figure(
             f"Compute Util: {row.get('compute_util', 0):.0%}"
         )
 
+    # Compute per-point sizes -- enlarge the selected iteration
+    sizes = []
+    for _, row in df.iterrows():
+        if (
+            selected_iteration is not None
+            and int(row.get("iteration", -1)) == selected_iteration
+        ):
+            sizes.append(12)  # highlighted
+        else:
+            sizes.append(6)  # default
+
+    # Determine marker coloring
+    marker_kwargs: dict = dict(
+        size=sizes,
+        line=dict(width=1, color=COLORS["border"]),
+        opacity=0.9,
+    )
+
+    if color_by == "status" or color_by not in df.columns:
+        # Discrete coloring by decision status (original behavior)
+        colors = df["decision"].map(STATUS_COLORS).fillna(COLORS["text_dim"])
+        marker_kwargs["color"] = colors.tolist()
+    else:
+        # Continuous coloring by a numeric metric (Constellation pattern)
+        color_values = pd.to_numeric(df[color_by], errors="coerce").fillna(0)
+        # For speedup, use reversed scale (higher = greener)
+        if color_by == "speedup":
+            colorscale = CONSTELLATION_COLORSCALE_REVERSED
+        else:
+            colorscale = CONSTELLATION_COLORSCALE
+        marker_kwargs["color"] = color_values.tolist()
+        marker_kwargs["colorscale"] = colorscale
+        marker_kwargs["showscale"] = True
+        marker_kwargs["colorbar"] = dict(
+            title=color_by.replace("_", " ").title(),
+            tickfont=dict(color=COLORS["text_secondary"], size=10),
+            titlefont=dict(color=COLORS["text_secondary"], size=11),
+        )
+
     fig.add_trace(
         go.Scatter3d(
             x=df[x_col],
             y=df[y_col],
             z=df[z_col],
             mode="markers",
-            marker=dict(
-                size=6,
-                color=colors.tolist(),
-                line=dict(width=1, color="rgba(255,255,255,0.3)"),
-                opacity=0.9,
-            ),
+            marker=marker_kwargs,
             text=hover_texts,
             hovertemplate="%{text}<extra></extra>",
         )
@@ -146,14 +197,29 @@ def create_landscape_figure(
 
     fig.update_layout(
         title="Optimization Landscape",
-        template="plotly_dark",
+        **PLOTLY_THEME,
         height=500,
         margin=dict(l=0, r=0, t=60, b=0),
         scene=dict(
             xaxis_title=_axis_title(x_col),
             yaxis_title=_axis_title(y_col),
             zaxis_title=_axis_title(z_col),
-            bgcolor="#0f172a",
+            bgcolor=COLORS["bg"],
+            xaxis=dict(
+                gridcolor=COLORS["gridline"],
+                backgroundcolor=COLORS["bg"],
+                color=COLORS["text_secondary"],
+            ),
+            yaxis=dict(
+                gridcolor=COLORS["gridline"],
+                backgroundcolor=COLORS["bg"],
+                color=COLORS["text_secondary"],
+            ),
+            zaxis=dict(
+                gridcolor=COLORS["gridline"],
+                backgroundcolor=COLORS["bg"],
+                color=COLORS["text_secondary"],
+            ),
         ),
         showlegend=False,
     )

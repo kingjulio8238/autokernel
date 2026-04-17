@@ -11,6 +11,19 @@ from __future__ import annotations
 import plotly.graph_objects as go
 import pandas as pd
 
+from kernel_code.dashboard.theme import COLORS, apply_theme
+
+
+# Warm, muted palette for problem-type groups (avoids neon)
+_GROUP_COLORS = [
+    COLORS["accent"],       # #1a1a1a
+    COLORS["green"],        # #276749
+    COLORS["red"],          # #c53030
+    "#b7791f",              # warm amber
+    COLORS["text_secondary"],  # #6b6b6b
+    "#5a67d8",              # muted indigo
+]
+
 
 def create_strategy_stats_figure(df: pd.DataFrame) -> go.Figure:
     """Create the strategy effectiveness Plotly figure.
@@ -25,7 +38,7 @@ def create_strategy_stats_figure(df: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
 
     if df.empty:
-        fig.update_layout(title="Strategy Effectiveness (no data)")
+        apply_theme(fig, title="Strategy Effectiveness (no data)")
         return fig
 
     has_problem_type = "problem_type" in df.columns
@@ -33,14 +46,16 @@ def create_strategy_stats_figure(df: pd.DataFrame) -> go.Figure:
     if has_problem_type:
         # Grouped bar: one colour per problem type within each strategy group.
         problem_types = sorted(df["problem_type"].dropna().unique())
-        for ptype in problem_types:
+        for idx, ptype in enumerate(problem_types):
             subset = df[df["problem_type"] == ptype]
             avg_by_strategy = subset.groupby("strategy")["speedup"].mean()
+            color = _GROUP_COLORS[idx % len(_GROUP_COLORS)]
             fig.add_trace(
                 go.Bar(
                     x=avg_by_strategy.index.tolist(),
                     y=avg_by_strategy.values.tolist(),
                     name=str(ptype),
+                    marker_color=color,
                     hovertemplate=(
                         "<b>%{x}</b><br>"
                         f"Type: {ptype}<br>"
@@ -57,7 +72,7 @@ def create_strategy_stats_figure(df: pd.DataFrame) -> go.Figure:
                 x=avg_by_strategy.index.tolist(),
                 y=avg_by_strategy.values.tolist(),
                 name="Avg Speedup",
-                marker_color="#6366f1",
+                marker_color=COLORS["accent"],
                 hovertemplate=(
                     "<b>%{x}</b><br>"
                     "Avg speedup: %{y:.2f}x<br>"
@@ -76,23 +91,24 @@ def create_strategy_stats_figure(df: pd.DataFrame) -> go.Figure:
             text=f"n={count}",
             showarrow=False,
             yshift=12,
-            font=dict(size=10, color="#a1a1aa"),
+            font=dict(size=10, color=COLORS["text_dim"]),
         )
 
     # Baseline at 1.0x
     fig.add_hline(
         y=1.0,
         line_dash="dash",
-        line_color="gray",
+        line_color=COLORS["baseline"],
         annotation_text="1.0x (baseline)",
         annotation_position="bottom left",
+        annotation_font_color=COLORS["text_dim"],
     )
 
-    fig.update_layout(
+    apply_theme(
+        fig,
         title="Strategy Effectiveness",
         xaxis_title="Strategy",
         yaxis_title="Average Speedup (x)",
-        template="plotly_dark",
         barmode="group",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         height=400,
