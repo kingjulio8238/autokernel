@@ -269,8 +269,18 @@ def test_3_single_eval() -> bool:
 
         config = OpenKernelConfig()
         reference = (REPO_ROOT / "reference.py").read_text()
-        # Use reference as kernel (passthrough) — should get ~1.0x
-        kernel = reference
+        # Passthrough kernel — wraps torch.matmul as ModelNew (~1.0x speedup)
+        kernel = '''
+import torch
+import torch.nn as nn
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super(ModelNew, self).__init__()
+
+    def forward(self, A: torch.Tensor, B: torch.Tensor) -> torch.Tensor:
+        return torch.matmul(A, B)
+'''
 
         start = time.time()
         result = evaluate(kernel, reference, config)
