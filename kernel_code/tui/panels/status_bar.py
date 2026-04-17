@@ -2,7 +2,7 @@
 
 Matches the design mockup:
   H100 | Triton | claude-sonnet-4 | L1#23 | Iter 6 | $0.12
-  [d]ashboard [k]diff [r]oofline [s]kills [p]ause [q]uit
+  [d]ashboard [k]diff [r]oofline [q]uit
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ class StatusBar(Widget):
         self._cost = cost
 
     def compose(self) -> ComposeResult:
-        yield Static(self._render(), id="status-info")
+        yield Static(self._format_status(), id="status-info")
 
     def update_status(
         self,
@@ -63,21 +63,26 @@ class StatusBar(Widget):
             self._backend = backend
         try:
             info = self.query_one("#status-info", Static)
-            info.update(self._render())
+            info.update(self._format_status())
         except Exception:
             pass
 
-    def _render(self) -> str:
+    def _format_status(self) -> str:
+        """Format the status bar content."""
         # Shorten model name for display
         model_short = self._model
         if "claude-sonnet" in model_short:
             model_short = "sonnet-4"
         elif "claude-opus" in model_short:
             model_short = "opus-4"
+        elif "MiniMax" in model_short:
+            model_short = "M2.5"
+        elif "llama" in model_short.lower():
+            model_short = "llama-70b"
 
         info_line = (
-            f" {self._hardware} │ {self._backend} │ {model_short} "
-            f"│ {self._problem} │ Iter {self._iteration} │ ${self._cost:.2f}"
+            f" {self._hardware} | {self._backend} | {model_short} "
+            f"| {self._problem} | Iter {self._iteration} | ${self._cost:.2f}"
         )
         keys_line = " [d]ashboard  [k]ernel diff  [r]oofline  [q]uit"
         return f"{info_line}\n{keys_line}"
