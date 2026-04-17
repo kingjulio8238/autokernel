@@ -19,8 +19,9 @@ import sys
 
 def check_modal_auth() -> bool:
     """Verify Modal CLI is authenticated."""
+    # modal v1.x uses 'modal profile list' (v0.x used 'modal token show')
     result = subprocess.run(
-        ["modal", "token", "show"],
+        ["modal", "profile", "list"],
         capture_output=True,
         text=True,
     )
