@@ -49,9 +49,15 @@ class ModelConfig(BaseModel):
 
 
 class ModalConfig(BaseModel):
-    """Modal cloud GPU configuration."""
+    """Modal cloud GPU configuration.
 
-    gpu_type: GpuType = GpuType.H100
+    Default GPU is L40S — matches KernelBench's official evaluation hardware.
+    All published baselines (CudaForge, Kernel-Smith, CUDA Agent, KernelSkill)
+    report on L40S, so we target L40S for comparable results.
+    Use H100 for production optimization (faster but not benchmark-comparable).
+    """
+
+    gpu_type: GpuType = GpuType.L40S
     timeout_seconds: int = 300
     max_concurrency: int = 10
     keep_warm: int = 1  # number of warm containers

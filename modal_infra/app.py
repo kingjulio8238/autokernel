@@ -55,7 +55,7 @@ _GPU_MAP = {
 
 
 @app.function(
-    gpu=modal.gpu.H100(),
+    gpu=modal.gpu.L40S(),
     timeout=600,
     retries=0,
 )
@@ -66,7 +66,7 @@ def eval_kernel_on_gpu(
     correctness_trials: int = 5,
     perf_trials_fast: int = 10,
     perf_trials_thorough: int = 100,
-    gpu_type: str = "H100",
+    gpu_type: str = "L40S",
 ) -> dict[str, Any]:
     """Evaluate a kernel against a reference implementation on a GPU.
 
@@ -418,7 +418,7 @@ class EvalWorker:
         correctness_trials: int = 5,
         perf_trials_fast: int = 10,
         perf_trials_thorough: int = 100,
-        gpu_type: str = "H100",
+        gpu_type: str = "L40S",
     ) -> dict[str, Any]:
         """Delegate to the standalone function."""
         return eval_kernel_on_gpu.local(
@@ -437,7 +437,7 @@ class EvalWorker:
 # ---------------------------------------------------------------------------
 
 
-@app.function(gpu=modal.gpu.H100(), timeout=60)
+@app.function(gpu=modal.gpu.L40S(), timeout=60)
 def health_check() -> dict[str, Any]:
     """Verify the container is functional and GPU is accessible."""
     import torch
