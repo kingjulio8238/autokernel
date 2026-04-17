@@ -43,11 +43,16 @@ def get_default_model() -> ModelConfig:
     The default is read from ``recommended.json``'s ``"default"`` key.  If the
     file is missing or the key is absent, falls back to Claude Sonnet 4.
     """
-    fallback_id = "claude-sonnet-4-20250514"
-    fallback_provider = "anthropic"
+    fallback_id = "minimax/MiniMax-M2.5"
+    fallback_provider = "minimax"
+    fallback_api_base = "https://api.minimax.io/v1"
 
     if not _RECOMMENDED_PATH.exists():
-        return ModelConfig(provider=fallback_provider, model_id=fallback_id)
+        return ModelConfig(
+            provider=fallback_provider,
+            model_id=fallback_id,
+            api_base=fallback_api_base,
+        )
 
     with open(_RECOMMENDED_PATH) as f:
         data = json.load(f)
@@ -57,13 +62,10 @@ def get_default_model() -> ModelConfig:
 
     for m in models:
         if m.get("id") == default_id:
-            return ModelConfig(
-                provider=m.get("provider", fallback_provider),
-                model_id=m["id"],
-            )
+            return _model_config_from_entry(m)
 
     # default key didn't match any model entry — still use it
-    return ModelConfig(provider=fallback_provider, model_id=default_id)
+    return ModelConfig(provider=fallback_provider, model_id=default_id, api_base=fallback_api_base)
 
 
 def get_model_by_id(model_id: str) -> ModelConfig | None:
@@ -75,9 +77,15 @@ def get_model_by_id(model_id: str) -> ModelConfig | None:
 
     for m in models:
         if m.get("id") == model_id:
-            return ModelConfig(
-                provider=m.get("provider", "unknown"),
-                model_id=m["id"],
-            )
+            return _model_config_from_entry(m)
 
     return None
+
+
+def _model_config_from_entry(entry: dict[str, Any]) -> ModelConfig:
+    """Build a ModelConfig from a recommended.json model entry."""
+    return ModelConfig(
+        provider=entry.get("provider", "openai"),
+        model_id=entry["id"],
+        api_base=entry.get("api_base"),
+    )

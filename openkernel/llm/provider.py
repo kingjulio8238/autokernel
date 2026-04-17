@@ -19,11 +19,18 @@ logger = logging.getLogger(__name__)
 # Estimated cost per million tokens (input/output) for common models.
 # litellm has its own cost tracking, but we keep a fallback table.
 _COST_PER_M_TOKENS: dict[str, tuple[float, float]] = {
+    # Default — MiniMax M2.5
+    "minimax/MiniMax-M2.5": (0.30, 1.20),
+    "minimax/MiniMax-M2.7": (0.30, 1.20),
+    # Open-source premium
+    "z-ai/glm-5.1": (1.40, 4.40),
+    "moonshotai/kimi-k2.5": (0.50, 2.80),
+    "qwen3.5-397b": (0.20, 0.80),
+    # Frontier
     "claude-sonnet-4-20250514": (3.0, 15.0),
     "claude-opus-4-20250514": (15.0, 75.0),
     "gpt-4o": (2.5, 10.0),
     "o3": (10.0, 40.0),
-    "gemini-2.5-pro": (1.25, 10.0),
 }
 
 # Suppress litellm's verbose logging by default
@@ -134,6 +141,9 @@ class LLMProvider:
 
         if self._api_key:
             kwargs["api_key"] = self._api_key
+
+        if self._config.api_base:
+            kwargs["api_base"] = self._config.api_base
 
         if response_format is not None:
             kwargs["response_format"] = response_format

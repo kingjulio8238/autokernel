@@ -34,11 +34,16 @@ class GpuType(str, Enum):
 
 
 class ModelConfig(BaseModel):
-    """LLM provider configuration (BYOM)."""
+    """LLM provider configuration (BYOM).
 
-    provider: str = "anthropic"  # anthropic, openai, google, local, etc.
-    model_id: str = "claude-sonnet-4-20250514"
-    api_key: str | None = None  # loaded from env if not set
+    Default: MiniMax M2.5 — best cost/quality/integration ratio for kernel optimization.
+    80.2% SWE-Bench Verified at $0.30/$1.20 per M tokens with native OpenAI-compatible API.
+    """
+
+    provider: str = "minimax"  # minimax, openai, anthropic, google, local, etc.
+    model_id: str = "minimax/MiniMax-M2.5"
+    api_key: str | None = None  # loaded from env if not set (MINIMAX_API_KEY)
+    api_base: str | None = "https://api.minimax.io/v1"  # OpenAI-compatible endpoint
     temperature: float = 0.7
     max_tokens: int = 8192
 
@@ -96,6 +101,7 @@ class OpenKernelConfig(BaseModel):
     # -- Validation -----------------------------------------------------------
 
     _PROVIDER_ENV_VARS: ClassVar[dict[str, str]] = {
+        "minimax": "MINIMAX_API_KEY",
         "anthropic": "ANTHROPIC_API_KEY",
         "openai": "OPENAI_API_KEY",
         "google": "GOOGLE_API_KEY",

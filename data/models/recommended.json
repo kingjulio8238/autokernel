@@ -1,54 +1,126 @@
 {
   "models": [
     {
+      "id": "minimax/MiniMax-M2.5",
+      "provider": "minimax",
+      "name": "MiniMax M2.5",
+      "strengths": [
+        "80.2% SWE-Bench Verified (0.6pts below Claude Opus)",
+        "1M token context window",
+        "Native OpenAI-compatible API",
+        "Day 0 litellm support",
+        "$0.30/$1.20 per M tokens (cheapest competitive model)",
+        "Open weights on HF for self-hosting"
+      ],
+      "cost_tier": "low",
+      "cost_per_m_input": 0.30,
+      "cost_per_m_output": 1.20,
+      "context_window": 1000000,
+      "api_base": "https://api.minimax.io/v1",
+      "env_key": "MINIMAX_API_KEY",
+      "recommended_for": ["default", "general", "triton", "cuda", "sweeps"]
+    },
+    {
+      "id": "minimax/MiniMax-M2.7",
+      "provider": "minimax",
+      "name": "MiniMax M2.7",
+      "strengths": [
+        "Self-evolving (generates own training data)",
+        "56.2% SWE-Pro, 57.0% Terminal Bench 2",
+        "Same pricing as M2.5",
+        "Released Apr 12 2026"
+      ],
+      "cost_tier": "low",
+      "cost_per_m_input": 0.30,
+      "cost_per_m_output": 1.20,
+      "context_window": 205000,
+      "api_base": "https://api.minimax.io/v1",
+      "env_key": "MINIMAX_API_KEY",
+      "recommended_for": ["experimental", "self_evolving"]
+    },
+    {
+      "id": "z-ai/glm-5.1",
+      "provider": "openai",
+      "name": "GLM-5.1",
+      "strengths": [
+        "#1 open-source SWE-Bench Pro (58.4%)",
+        "94.6% of Claude Opus coding performance",
+        "8-hour autonomous operation (600+ iterations)",
+        "MIT license, 754B MoE (40B active)"
+      ],
+      "cost_tier": "medium",
+      "cost_per_m_input": 1.40,
+      "cost_per_m_output": 4.40,
+      "context_window": 200000,
+      "api_base": null,
+      "env_key": null,
+      "recommended_for": ["deep_optimization", "autonomous", "hard_problems"],
+      "providers": ["fireworks", "together", "friendliai", "openrouter"]
+    },
+    {
+      "id": "moonshotai/kimi-k2.5",
+      "provider": "openai",
+      "name": "Kimi K2.5",
+      "strengths": [
+        "85.0 LiveCodeBench (highest open-source)",
+        "76.8% SWE-Bench Verified",
+        "373 tokens/sec on Fireworks (fastest)",
+        "100 parallel sub-agent coordination",
+        "75% context caching discount"
+      ],
+      "cost_tier": "low",
+      "cost_per_m_input": 0.50,
+      "cost_per_m_output": 2.80,
+      "context_window": 262000,
+      "api_base": null,
+      "env_key": null,
+      "recommended_for": ["speed", "coding", "parallel_exploration"],
+      "providers": ["fireworks", "together", "deepinfra", "openrouter"]
+    },
+    {
       "id": "claude-sonnet-4-20250514",
       "provider": "anthropic",
       "name": "Claude Sonnet 4",
-      "strengths": ["Strong at Triton + CUDA generation", "Good structured output", "Fast inference"],
-      "cost_tier": "medium",
-      "recommended_for": ["general", "triton", "cuda"]
-    },
-    {
-      "id": "claude-opus-4-20250514",
-      "provider": "anthropic",
-      "name": "Claude Opus 4",
-      "strengths": ["Best reasoning for complex optimization strategies", "Excellent at world model search"],
+      "strengths": [
+        "Strong structured output",
+        "Reliable tool calling",
+        "CudaForge-validated for kernel gen"
+      ],
       "cost_tier": "high",
-      "recommended_for": ["complex_kernels", "strategy_reasoning"]
+      "cost_per_m_input": 3.00,
+      "cost_per_m_output": 15.00,
+      "context_window": 200000,
+      "api_base": null,
+      "env_key": "ANTHROPIC_API_KEY",
+      "recommended_for": ["frontier_fallback", "structured_output"]
     },
     {
-      "id": "gpt-4o",
+      "id": "qwen3.5-397b",
       "provider": "openai",
-      "name": "GPT-4o",
-      "strengths": ["Good code generation", "Fast", "Multi-modal"],
-      "cost_tier": "medium",
-      "recommended_for": ["general", "triton", "cuda"]
-    },
-    {
-      "id": "o3",
-      "provider": "openai",
-      "name": "o3",
-      "strengths": ["Strong reasoning", "Good at complex optimization paths"],
-      "cost_tier": "high",
-      "recommended_for": ["complex_kernels", "strategy_reasoning"]
-    },
-    {
-      "id": "gemini-2.5-pro",
-      "provider": "google",
-      "name": "Gemini 2.5 Pro",
-      "strengths": ["Large context window", "Good code generation"],
-      "cost_tier": "medium",
-      "recommended_for": ["general", "triton"]
-    },
-    {
-      "id": "qwen3-32b",
-      "provider": "local",
-      "name": "Qwen3-32B",
-      "strengths": ["Open source", "No API cost", "Good kernel generation"],
-      "cost_tier": "free",
-      "recommended_for": ["cost_sensitive", "local_inference"]
+      "name": "Qwen3.5 397B",
+      "strengths": [
+        "84.9 LiveCodeBench (reasoning mode)",
+        "Most broadly recommended open-source family",
+        "17B active MoE params (very efficient)",
+        "Apache 2.0 license"
+      ],
+      "cost_tier": "low",
+      "cost_per_m_input": 0.20,
+      "cost_per_m_output": 0.80,
+      "context_window": 131000,
+      "api_base": null,
+      "env_key": null,
+      "recommended_for": ["budget", "local_inference"],
+      "providers": ["together", "fireworks", "openrouter"]
     }
   ],
-  "default": "claude-sonnet-4-20250514",
-  "notes": "This list is updated based on internal benchmarking. Run scripts/benchmark_models.py to re-evaluate."
+  "default": "minimax/MiniMax-M2.5",
+  "tiers": {
+    "default": "minimax/MiniMax-M2.5",
+    "premium": "z-ai/glm-5.1",
+    "speed": "moonshotai/kimi-k2.5",
+    "budget": "qwen3.5-397b",
+    "frontier": "claude-sonnet-4-20250514"
+  },
+  "notes": "Default is MiniMax M2.5 — best cost/quality/integration ratio. 80.2% SWE-Bench at $0.30/$1.20/M tokens with native OpenAI API and 1M context. GLM-5.1 for hard problems needing deep autonomous reasoning. Kimi K2.5 when speed matters. Updated April 2026."
 }
