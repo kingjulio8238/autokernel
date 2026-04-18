@@ -90,6 +90,8 @@ from kernel_code.settings import (
     _FIELD_TYPES,
 )
 from kernel_code.skill_trigger import suggest_skills, format_skill_suggestions
+from kernel_code.iteration_formatter import format_iteration_line, format_optimization_header
+from kernel_code.summary_card import render_optimization_summary
 from kernel_code.template_evolution import TemplateEvolver
 
 # Project root -- cache lives at repo root
@@ -1636,19 +1638,27 @@ class KernelCodeShell:
 
     def _run_mock_optimization(self, iterations: int = 20) -> None:
         """Run optimization with mock data."""
+        import time as _time
+
         from kernel_code.mock_data import generate_mock_session
 
-        # Fire pre_optimize hooks
+        start_time = _time.time()
+
+        # Fire pre_optimize hooks (silently -- we print our own header)
+        self._console.quiet = True
         self._hooks.fire(
             HookRegistry.PRE_OPTIMIZE,
             config={"backend": "mock", "hardware": "mock"},
             iterations=iterations,
         )
+        self._console.quiet = False
 
-        self._console.print(
-            "[bold]Running optimization (mock mode)...[/bold]"
-        )
-        self._console.print()
+        # Print compact header
+        estimated_cost = estimate_cost(iterations)
+        self._console.print(format_optimization_header(
+            iterations, backend="mock", hardware="mock",
+            estimated_cost=estimated_cost,
+        ))
 
         session_path = generate_mock_session(
             num_iterations=iterations, session_id=self._session_id
@@ -1667,7 +1677,6 @@ class KernelCodeShell:
         run_num = len(self._cost_tracker._runs) + 1
         gpu_type = self._settings.default_gpu
         avg_eval_seconds = 15.0
-        gpu_seconds = len(iters) * avg_eval_seconds
         llm_cost_est = len(iters) * 0.003
         gpu_cost_est = run_cost - llm_cost_est
         self._cost_tracker.record_run_cost(
@@ -1680,102 +1689,101 @@ class KernelCodeShell:
         for _ in range(len(iters)):
             self._cost_tracker.record_gpu_eval(gpu_type, avg_eval_seconds)
 
-        # Find the best run and fire per-iteration hooks with progress reporting
+        # --- Compact iteration loop ---
+        # One line per iteration; hooks fire silently for state tracking.
         best = None
         best_speedup = 0.0
+        best_iter_num = 0
+        last_bottleneck = ""
+        last_profile: dict | None = None
+        suggestions: list[dict] | None = None
+
         for it in iters:
-            self._opt_progress.start_iteration(
-                it["iteration"], it.get("intent", "")
+            speedup = it.get("speedup", 0)
+            status = it.get("decision", it.get("status", ""))
+            intent = it.get("intent", "")
+            iter_num = it.get("iteration", 0)
+
+            is_new_best = status == "keep" and (
+                best is None or speedup > best_speedup
             )
-            if it["status"] == "keep":
-                is_new_best = (
-                    best is None or it["speedup"] > best["speedup"]
-                )
-                if is_new_best:
-                    best = it
-                    best_speedup = it["speedup"]
-                self._opt_progress.kept(
-                    it["speedup"], is_new_best=is_new_best
-                )
+            if is_new_best:
+                best = it
+                best_speedup = speedup
+                best_iter_num = iter_num
+
+            # Print compact one-liner
+            self._console.print(format_iteration_line(
+                iter_num, speedup, status, intent, is_new_best,
+            ))
+
+            # Track conversation events (silent)
+            if status == "keep":
                 self._conversation.add_optimization_event(
-                    "kept",
-                    speedup=it["speedup"],
-                    iteration=it["iteration"],
+                    "kept", speedup=speedup, iteration=iter_num,
                 )
-                self._hooks.fire(
-                    HookRegistry.POST_KEEP,
-                    speedup=it["speedup"],
-                    iteration=it["iteration"],
-                    intent=it.get("intent", ""),
-                )
-            elif it["status"] == "discard":
-                self._opt_progress.discarded(
-                    it["speedup"], best_speedup
-                )
+            elif status == "discard":
                 self._conversation.add_optimization_event(
-                    "discarded",
-                    speedup=it["speedup"],
-                    iteration=it["iteration"],
+                    "discarded", speedup=speedup, iteration=iter_num,
                 )
-                self._hooks.fire(
-                    HookRegistry.POST_DISCARD,
-                    speedup=it["speedup"],
-                    best_speedup=best_speedup,
-                    intent=it.get("intent", ""),
-                )
-            elif it["status"] in ("compile_error", "error"):
-                self._opt_progress.error(
-                    it["status"], it.get("error", "unknown error")
-                )
+            elif status in ("compile_error", "error", "incorrect"):
                 self._conversation.add_optimization_event(
                     "error",
-                    error=it.get("error", "unknown"),
-                    iteration=it["iteration"],
+                    error=it.get("error", status),
+                    iteration=iter_num,
                 )
-            elif it["status"] == "incorrect":
-                self._opt_progress.error(
-                    "incorrect", "correctness check failed"
-                )
-                self._conversation.add_optimization_event(
-                    "error",
-                    error="correctness check failed",
-                    iteration=it["iteration"],
-                )
-            # Suggest skills based on bottleneck (every 5th iteration to avoid noise)
+
+            # Track bottleneck / profile for summary card
             profile = it.get("profile", {})
             bn = profile.get("bottleneck_type", "")
-            if bn and bn != "unknown" and it["iteration"] % 5 == 0:
-                skill_suggestions = suggest_skills(
-                    bottleneck_type=bn,
-                    problem_description=it.get("intent", ""),
-                    skill_library=self._skill_library,
-                    top_k=2,
-                )
-                if skill_suggestions:
-                    self._console.print(
-                        f"[dim]{format_skill_suggestions(skill_suggestions, bn)}[/dim]"
-                    )
+            if bn and bn != "unknown":
+                last_bottleneck = bn
+                last_profile = profile
 
+            # Fire hooks silently (state tracking: advisor, evolution, etc.)
+            self._console.quiet = True
+            if status == "keep":
+                self._hooks.fire(
+                    HookRegistry.POST_KEEP,
+                    speedup=speedup,
+                    iteration=iter_num,
+                    intent=intent,
+                )
+            elif status == "discard":
+                self._hooks.fire(
+                    HookRegistry.POST_DISCARD,
+                    speedup=speedup,
+                    best_speedup=best_speedup,
+                    intent=intent,
+                )
             self._hooks.fire(
                 HookRegistry.POST_ITERATE,
-                iteration=it["iteration"],
-                speedup=it["speedup"],
-                status=it["status"],
-                intent=it.get("intent", ""),
+                iteration=iter_num,
+                speedup=speedup,
+                status=status,
+                intent=intent,
             )
-        self._best_run = best
+            self._console.quiet = False
 
+        self._best_run = best
         kept = sum(1 for it in iters if it["status"] == "keep")
 
-        # Report completion
-        self._opt_progress.complete(
-            best_speedup=self._session_data.get("best_speedup", 0.0),
-            iterations=len(iters),
-            kept=kept,
-            cost=self._total_cost,
-        )
+        # Compute final skill suggestions (once, for summary card)
+        if best:
+            final_profile = best.get("profile", {})
+            final_bn = final_profile.get("bottleneck_type", "")
+            if final_bn and final_bn != "unknown":
+                last_bottleneck = final_bn
+                last_profile = final_profile
+                suggestions = suggest_skills(
+                    bottleneck_type=final_bn,
+                    problem_description=best.get("intent", ""),
+                    skill_library=self._skill_library,
+                    top_k=3,
+                )
 
         # Launch TUI for visualization
+        self._console.print()
         self._console.print("[dim]Launching TUI...[/dim]")
         self._console.print()
 
@@ -1792,7 +1800,8 @@ class KernelCodeShell:
         # Persist cost tracker data into session
         self._persist_cost_data()
 
-        # Fire post_optimize hooks
+        # Fire post_optimize hooks silently (state tracking only)
+        self._console.quiet = True
         self._hooks.fire(
             HookRegistry.POST_OPTIMIZE,
             best_speedup=self._session_data.get("best_speedup", 0.0),
@@ -1801,34 +1810,25 @@ class KernelCodeShell:
             cost=self._total_cost,
             cache_session_id=self._session_id,
         )
+        self._console.quiet = False
 
-        # Post-optimization summary
-        self._print_post_optimization_summary(
-            best_speedup=self._session_data.get("best_speedup", 0.0),
-            kept=kept,
-            total=len(iters),
-            cost=self._total_cost,
-            session_total=self._budget.total_spent,
+        # Single summary card — replaces all scattered post-optimization output
+        elapsed = _time.time() - start_time
+        render_optimization_summary(
+            iterations=iters,
+            best_speedup=best_speedup,
+            best_iteration=best_iter_num,
+            kept_count=kept,
+            total_count=len(iters),
+            cost_summary=self._cost_tracker.format_summary(),
+            elapsed_seconds=elapsed,
+            bottleneck_type=last_bottleneck,
+            bottleneck_metrics=last_profile,
+            skill_suggestions=suggestions,
+            dashboard_url=f"http://localhost:8050/session/{self._session_id}",
+            saved_path="",
+            console=self._console,
         )
-
-        # Skill suggestions based on final bottleneck state
-        if best:
-            final_profile = best.get("profile", {})
-            final_bn = final_profile.get("bottleneck_type", "")
-            if final_bn and final_bn != "unknown":
-                final_suggestions = suggest_skills(
-                    bottleneck_type=final_bn,
-                    problem_description=best.get("intent", ""),
-                    skill_library=self._skill_library,
-                    top_k=3,
-                )
-                if final_suggestions:
-                    self._console.print(
-                        format_skill_suggestions(
-                            final_suggestions, final_bn
-                        )
-                    )
-                    self._console.print()
 
     def _run_live_optimization(
         self,
