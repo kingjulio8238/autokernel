@@ -118,6 +118,7 @@ class KernelCodeApp(App):
 
         The JSON cache file may be updated by the live engine bridge between
         ticks.  Re-loading ensures we pick up new iterations as they appear.
+        Auto-exits when all iterations have been displayed.
         """
         if self._paused:
             return
@@ -132,6 +133,16 @@ class KernelCodeApp(App):
             # Show one more iteration each tick (simulates live optimization)
             self._displayed_iterations += 1
             self._update_all_panels()
+        elif total > 0 and self._displayed_iterations >= total:
+            # All iterations displayed — auto-exit after a brief pause
+            # so the user can see the final state
+            if not hasattr(self, "_exit_scheduled"):
+                self._exit_scheduled = True
+                self.set_timer(3.0, self._auto_exit)
+
+    def _auto_exit(self) -> None:
+        """Exit the TUI after all iterations are displayed."""
+        self.exit()
 
     def _update_all_panels(self) -> None:
         """Update all panels with current iteration data."""
