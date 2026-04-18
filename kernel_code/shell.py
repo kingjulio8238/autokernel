@@ -1411,12 +1411,8 @@ class KernelCodeShell:
     def _cmd_context(self, _args_str: str) -> None:
         """Show context window breakdown."""
         from kernel_code.compaction import estimate_tokens
+        from kernel_code.context_viz import render_context_breakdown
         from kernel_code.kernel_config import inject_config_context
-
-        table = Table(title="Context Breakdown", show_header=True)
-        table.add_column("Component", style="bold")
-        table.add_column("Tokens", justify="right")
-        table.add_column("", justify="right")  # percentage
 
         # Estimate each component
         system_prompt = 800  # rough estimate
@@ -1446,40 +1442,34 @@ class KernelCodeShell:
             else 0
         )
 
-        total = (
-            system_prompt
-            + kernel_md
-            + active_skill
-            + conversation
-            + session_iters
-            + best_kernel
-        )
         budget = 4096  # default, adjust based on model
 
-        # Add rows with percentage bars
-        for name, tokens in [
+        components = [
             ("System prompt", system_prompt),
             ("KERNEL.md", kernel_md),
             ("Active skill", active_skill),
             ("Conversation", conversation),
             ("Session history", session_iters),
             ("Best kernel", best_kernel),
-        ]:
-            pct = (tokens / budget * 100) if budget > 0 else 0
-            bar = "\u2588" * int(pct / 5) + "\u2591" * (
-                20 - int(pct / 5)
-            )
-            table.add_row(name, f"{tokens:,}", f"{pct:.0f}% {bar}")
+        ]
 
-        table.add_section()
-        total_pct = (total / budget * 100) if budget > 0 else 0
-        table.add_row(
-            "[bold]Total[/bold]",
-            f"[bold]{total:,}[/bold]",
-            f"[bold]{total_pct:.0f}%[/bold] of {budget:,}",
+        # Detect whether conversation has been compacted (summary msg present)
+        compacted = (
+            self._conversation is not None
+            and self._conversation.message_count > 0
+            and any(
+                (m.content or "").lower().startswith("compacted")
+                for m in self._conversation.get_messages()
+                if m.role == "system"
+            )
         )
 
-        self._console.print(table)
+        render_context_breakdown(
+            components=components,
+            budget=budget,
+            compacted=compacted,
+            console=self._console,
+        )
 
     def _cmd_diff(self, _args_str: str) -> None:
         """Show diff between reference and best optimized kernel."""

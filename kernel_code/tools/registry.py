@@ -77,6 +77,7 @@ def create_default_registry() -> ToolRegistry:
         write_file,
         edit_kernel,
     )
+    from kernel_code.heatmap import render_iteration_heatmap
 
     registry = ToolRegistry()
 
@@ -179,6 +180,15 @@ def create_default_registry() -> ToolRegistry:
         category="optimization",
     ))
 
+    registry.register(KernelTool(
+        name="show_heatmap",
+        description="Show a compact visual heatmap of all iteration results, colored by speedup",
+        parameters={"show_legend": "bool (optional) - whether to show the legend; defaults to true"},
+        execute=_show_heatmap,
+        permission="auto",
+        category="analysis",
+    ))
+
     # ------------------------------------------------------------------
     # Backward-compatible aliases for the old tool names
     # ------------------------------------------------------------------
@@ -227,6 +237,16 @@ def create_default_registry() -> ToolRegistry:
 # ------------------------------------------------------------------
 # Compat helpers for old tool names
 # ------------------------------------------------------------------
+
+def _show_heatmap(session_context: dict, **kwargs: Any) -> str:
+    """Execute handler for the show_heatmap tool."""
+    from kernel_code.heatmap import render_iteration_heatmap
+
+    iterations = session_context.get("iterations", [])
+    show_legend = kwargs.get("show_legend", True)
+    text = render_iteration_heatmap(iterations, show_legend=show_legend)
+    return text.plain
+
 
 def _show_results_compat(session_context: dict, **kwargs: Any) -> str:
     """Backward-compatible show_results (no separate module needed)."""

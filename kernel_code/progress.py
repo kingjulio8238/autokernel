@@ -1,7 +1,9 @@
 """Per-step progress reporting for optimization and agent loops.
 
 Replaces generic "Thinking..." spinners with specific step indicators
-so users always know *what* the system is doing.
+so users always know *what* the system is doing.  Spinners are
+stall-aware: they escalate colour and messaging when an operation takes
+longer than expected (yellow after 10 s, red after 30 s).
 
 Usage::
 
@@ -17,32 +19,112 @@ Usage::
 
 from __future__ import annotations
 
+import threading
+import time
+
 from rich.console import Console
 from rich.status import Status
 
 
+# ---------------------------------------------------------------------------
+# Stall-aware spinner
+# ---------------------------------------------------------------------------
+
+class StallAwareSpinner:
+    """Spinner that escalates colour when operations take too long.
+
+    Behaves like :class:`rich.status.Status` — supports both context-manager
+    usage (``with spinner: ...``) and explicit ``start()``/``stop()`` calls.
+    """
+
+    def __init__(self, message: str, console: Console) -> None:
+        self._console = console
+        self._base_message = message
+        self._start: float = 0.0
+        self._status: Status = console.status(message, spinner="dots")
+        self._timer: threading.Timer | None = None
+        self._stopped = True  # not yet started
+
+    # -- public interface (mirrors Status) -----------------------------------
+
+    def start(self) -> None:
+        self._start = time.monotonic()
+        self._stopped = False
+        self._status.start()
+        self._schedule_update()
+
+    def stop(self) -> None:
+        self._stopped = True
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+        self._status.stop()
+
+    def update(self, msg: str) -> None:  # pragma: no cover – passthrough
+        self._status.update(msg)
+
+    def __enter__(self) -> "StallAwareSpinner":
+        self.start()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.stop()
+
+    # -- internal ------------------------------------------------------------
+
+    def _schedule_update(self) -> None:
+        if self._stopped:
+            return
+        elapsed = time.monotonic() - self._start
+        if elapsed > 30:
+            msg = (
+                f"[red]{self._base_message} ({elapsed:.0f}s) "
+                f"— possible stall, press Ctrl+C[/red]"
+            )
+        elif elapsed > 10:
+            msg = (
+                f"[yellow]{self._base_message} ({elapsed:.0f}s) "
+                f"— taking longer than usual[/yellow]"
+            )
+        else:
+            msg = f"[dim]{self._base_message} ({elapsed:.1f}s)[/dim]"
+        self._status.update(msg)
+        self._timer = threading.Timer(1.0, self._schedule_update)
+        self._timer.daemon = True
+        self._timer.start()
+
+
+# ---------------------------------------------------------------------------
+# Optimization progress
+# ---------------------------------------------------------------------------
+
 class OptimizationProgress:
-    """Reports per-step progress during optimization."""
+    """Reports per-step progress during optimization.
+
+    Each step gets its own :class:`StallAwareSpinner` so the user can see
+    elapsed time and get a visual cue if a step is taking unusually long.
+    """
 
     def __init__(self, console: Console | None = None) -> None:
         self._console = console or Console()
-        self._current_status: Status | None = None
+        self._current_spinner: StallAwareSpinner | None = None
 
     def _update_status(self, message: str) -> None:
-        """Update or create the live spinner with a new message."""
-        if self._current_status is not None:
-            self._current_status.update(f"[dim]{message}[/dim]")
-        else:
-            self._current_status = self._console.status(
-                f"[dim]{message}[/dim]", spinner="dots"
-            )
-            self._current_status.start()
+        """Start a new stall-aware spinner for *message*.
+
+        If a spinner is already active it is stopped first so each step
+        gets its own independent elapsed-time counter.
+        """
+        if self._current_spinner is not None:
+            self._current_spinner.stop()
+        self._current_spinner = StallAwareSpinner(message, self._console)
+        self._current_spinner.start()
 
     def _stop_status(self) -> None:
         """Stop the spinner if one is active."""
-        if self._current_status is not None:
-            self._current_status.stop()
-            self._current_status = None
+        if self._current_spinner is not None:
+            self._current_spinner.stop()
+            self._current_spinner = None
 
     def start_iteration(self, iteration: int, intent: str) -> None:
         """Called at the start of each optimization iteration."""
@@ -102,19 +184,25 @@ class OptimizationProgress:
         )
 
 
+# ---------------------------------------------------------------------------
+# Agent progress
+# ---------------------------------------------------------------------------
+
 class AgentProgress:
     """Reports progress during agentic loop turns."""
 
     def __init__(self, console: Console | None = None) -> None:
         self._console = console or Console()
 
-    def thinking(self) -> Status:
+    def thinking(self) -> StallAwareSpinner:
         """Show while LLM is generating response.
 
-        Returns a Status context manager / object that the caller can
-        start/stop around the LLM call.
+        Returns a :class:`StallAwareSpinner` that supports both
+        context-manager usage (``with progress.thinking(): ...``) and
+        explicit ``start()``/``stop()`` calls — a drop-in replacement for
+        :class:`rich.status.Status`.
         """
-        return self._console.status("[dim]Thinking...[/dim]", spinner="dots")
+        return StallAwareSpinner("Thinking...", self._console)
 
     def calling_tool(self, tool_name: str, args: str = "") -> None:
         """Show when a tool is being called."""
