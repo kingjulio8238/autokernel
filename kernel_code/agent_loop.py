@@ -21,6 +21,7 @@ from openkernel.config import ModelConfig
 from openkernel.llm.provider import LLMProvider
 
 from kernel_code.compaction import compact_session, should_compact
+from kernel_code.messages import ConversationHistory
 from kernel_code.progress import AgentProgress
 from kernel_code.shell_ai import format_session_context
 from kernel_code.tools.registry import ToolRegistry, create_default_registry
@@ -155,6 +156,7 @@ class AgentLoop:
         model_config: ModelConfig | None = None,
         console: Console | None = None,
         registry: ToolRegistry | None = None,
+        conversation: ConversationHistory | None = None,
     ) -> None:
         if model_config is None:
             model_config = ModelConfig()
@@ -163,6 +165,7 @@ class AgentLoop:
         self._registry = registry if registry is not None else create_default_registry()
         self._system_prompt = _build_system_prompt(self._registry)
         self._progress = AgentProgress(console=console)
+        self._conversation = conversation
 
     @property
     def provider(self) -> LLMProvider:
@@ -193,14 +196,23 @@ class AgentLoop:
         else:
             context_str = format_session_context(self._session_context)
 
-        # Build the initial prompt
+        # Build the initial prompt, including recent conversation context
         prompt_parts = [
             self._system_prompt,
             "--- SESSION DATA ---",
             context_str,
+        ]
+
+        # Include recent conversation history for multi-turn awareness
+        if self._conversation and self._conversation.message_count > 0:
+            conv_context = self._conversation.get_context_for_llm(max_tokens=1500)
+            if conv_context:
+                prompt_parts.append(conv_context)
+
+        prompt_parts.extend([
             "--- USER ---",
             user_input,
-        ]
+        ])
 
         tool_calls_made = 0
 
@@ -223,6 +235,9 @@ class AgentLoop:
 
             if tool_call is None:
                 # Plain text answer — we're done.
+                # Record the assistant response in conversation history
+                if self._conversation:
+                    self._conversation.add_assistant(response)
                 return response
 
             if tool_calls_made >= _MAX_TOOL_CALLS:
@@ -243,6 +258,14 @@ class AgentLoop:
                 tool_name, tool_args, self._session_context, self._registry
             )
             tool_calls_made += 1
+
+            # Record tool result in conversation history
+            if self._conversation:
+                self._conversation.add_tool_result(
+                    tool_name=tool_name,
+                    result=tool_result[:500],  # truncate for history
+                    args=tool_args,
+                )
 
             # Show a brief preview of the result
             result_first_line = tool_result.split("\n", 1)[0] if tool_result else "(empty)"
@@ -274,14 +297,23 @@ class AgentLoop:
         else:
             context_str = format_session_context(self._session_context)
 
-        # Build the initial prompt
+        # Build the initial prompt, including recent conversation context
         prompt_parts = [
             self._system_prompt,
             "--- SESSION DATA ---",
             context_str,
+        ]
+
+        # Include recent conversation history for multi-turn awareness
+        if self._conversation and self._conversation.message_count > 0:
+            conv_context = self._conversation.get_context_for_llm(max_tokens=1500)
+            if conv_context:
+                prompt_parts.append(conv_context)
+
+        prompt_parts.extend([
             "--- USER ---",
             user_input,
-        ]
+        ])
 
         tool_calls_made = 0
 
@@ -316,6 +348,9 @@ class AgentLoop:
 
             if tool_call is None:
                 # Plain text answer on a non-final round.
+                # Record in conversation history before streaming
+                if self._conversation:
+                    self._conversation.add_assistant(response)
                 # Re-do this as a streaming call for the nice UX.
                 async for token in self._provider.generate_stream(prompt):
                     yield token
@@ -334,6 +369,14 @@ class AgentLoop:
                 tool_name, tool_args, self._session_context, self._registry
             )
             tool_calls_made += 1
+
+            # Record tool result in conversation history
+            if self._conversation:
+                self._conversation.add_tool_result(
+                    tool_name=tool_name,
+                    result=tool_result[:500],
+                    args=tool_args,
+                )
 
             # Show a brief preview of the result
             result_first_line = tool_result.split("\n", 1)[0] if tool_result else "(empty)"

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from kernel_code.file_cache import FileStateCache
     from kernel_code.hooks import HookRegistry
     from kernel_code.progress import OptimizationProgress
 
@@ -204,6 +205,7 @@ class OpenKernelBridge:
         backend: str = "triton",
         hooks: "HookRegistry | None" = None,
         progress: "OptimizationProgress | None" = None,
+        file_cache: "FileStateCache | None" = None,
     ) -> None:
         self._config = config
         self._session_id = session_id or uuid.uuid4().hex[:12]
@@ -212,6 +214,7 @@ class OpenKernelBridge:
         self._backend = backend
         self._hooks = hooks
         self._progress = progress
+        self._file_cache = file_cache
 
         # Where the TUI looks for data
         _SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
@@ -263,7 +266,7 @@ class OpenKernelBridge:
         critic = Critic(llm)
 
         inner_loop = InnerLoop(generator, critic, self._config)
-        eval_fn = create_eval_fn(self._config)
+        eval_fn = create_eval_fn(self._config, file_cache=self._file_cache)
         adapter = InnerLoopAdapter(inner_loop, eval_fn, critic)
 
         orch_config = {

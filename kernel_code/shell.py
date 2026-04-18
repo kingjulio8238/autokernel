@@ -46,6 +46,8 @@ except ImportError:  # pragma: no cover
 
 from kernel_code.agent_loop import AgentLoop
 from kernel_code.cost_dashboard import CostTracker
+from kernel_code.file_cache import FileStateCache
+from kernel_code.messages import ConversationHistory
 from kernel_code.errors import format_error
 from kernel_code.hooks import HookRegistry, create_default_hooks
 from kernel_code.progress import AgentProgress, OptimizationProgress
@@ -58,6 +60,7 @@ from kernel_code.settings import (
     settings_to_config,
     _FIELD_TYPES,
 )
+from kernel_code.skill_trigger import suggest_skills, format_skill_suggestions
 from kernel_code.template_evolution import TemplateEvolver
 
 # Project root -- cache lives at repo root
@@ -150,6 +153,11 @@ class KernelCodeShell:
         self._active_skill: dict | None = None
         self._skill_library: list[dict] = self._load_skills()
 
+        # File-state cache -- avoids redundant GPU evals and file re-parsing
+        self._file_cache = FileStateCache(
+            cache_dir=_PROJECT_ROOT / ".kernel-code" / "cache"
+        )
+
         # Template evolution — tracks winning kernels for flywheel feedback
         self._template_evolver = TemplateEvolver(
             evolution_dir=_PROJECT_ROOT / ".kernel-code" / "evolution"
@@ -157,6 +165,7 @@ class KernelCodeShell:
 
         self._hooks: HookRegistry = create_default_hooks(
             template_evolver=self._template_evolver,
+            file_cache=self._file_cache,
             console=self._console,
         )
 
@@ -175,6 +184,9 @@ class KernelCodeShell:
         # Progress reporters
         self._opt_progress = OptimizationProgress(console=self._console)
         self._agent_progress = AgentProgress(console=self._console)
+
+        # Typed conversation history for multi-turn context
+        self._conversation = ConversationHistory()
 
         # Agentic loop for natural language (lazy-init on first NL input)
         self._agent_loop: AgentLoop | None = None
@@ -263,6 +275,9 @@ class KernelCodeShell:
         stripped = user_input.strip()
         if not stripped:
             return
+
+        # Record user message in conversation history
+        self._conversation.add_user(stripped)
 
         try:
             if stripped.startswith("/"):
@@ -927,7 +942,9 @@ class KernelCodeShell:
         # provider when actually needed.
         if self._agent_loop is None:
             self._agent_loop = AgentLoop(
-                session_context=self._session_data, console=self._console
+                session_context=self._session_data,
+                console=self._console,
+                conversation=self._conversation,
             )
         else:
             # Keep context in sync after new optimization runs
@@ -935,6 +952,7 @@ class KernelCodeShell:
 
         self._console.print()
 
+        answer: str | None = None
         try:
             asyncio.run(self._stream_response(text))
         except Exception:
@@ -942,6 +960,10 @@ class KernelCodeShell:
             with self._agent_progress.thinking():
                 answer = asyncio.run(self._agent_loop.run(text))
             self._console.print(escape(answer))
+
+        # Record assistant response in conversation history
+        if answer:
+            self._conversation.add_assistant(answer)
 
         # Sync LLM cost from provider after each turn
         self._sync_llm_cost()
@@ -1053,6 +1075,9 @@ class KernelCodeShell:
                     best = it
                     best_speedup = it["speedup"]
                 self._opt_progress.kept(it["speedup"], is_new_best=is_new_best)
+                self._conversation.add_optimization_event(
+                    "kept", speedup=it["speedup"], iteration=it["iteration"],
+                )
                 self._hooks.fire(
                     HookRegistry.POST_KEEP,
                     speedup=it["speedup"],
@@ -1061,6 +1086,9 @@ class KernelCodeShell:
                 )
             elif it["status"] == "discard":
                 self._opt_progress.discarded(it["speedup"], best_speedup)
+                self._conversation.add_optimization_event(
+                    "discarded", speedup=it["speedup"], iteration=it["iteration"],
+                )
                 self._hooks.fire(
                     HookRegistry.POST_DISCARD,
                     speedup=it["speedup"],
@@ -1071,8 +1099,29 @@ class KernelCodeShell:
                 self._opt_progress.error(
                     it["status"], it.get("error", "unknown error")
                 )
+                self._conversation.add_optimization_event(
+                    "error", error=it.get("error", "unknown"), iteration=it["iteration"],
+                )
             elif it["status"] == "incorrect":
                 self._opt_progress.error("incorrect", "correctness check failed")
+                self._conversation.add_optimization_event(
+                    "error", error="correctness check failed", iteration=it["iteration"],
+                )
+            # Suggest skills based on bottleneck (every 5th iteration to avoid noise)
+            profile = it.get("profile", {})
+            bn = profile.get("bottleneck_type", "")
+            if bn and bn != "unknown" and it["iteration"] % 5 == 0:
+                skill_suggestions = suggest_skills(
+                    bottleneck_type=bn,
+                    problem_description=it.get("intent", ""),
+                    skill_library=self._skill_library,
+                    top_k=2,
+                )
+                if skill_suggestions:
+                    self._console.print(
+                        f"[dim]{format_skill_suggestions(skill_suggestions, bn)}[/dim]"
+                    )
+
             self._hooks.fire(
                 HookRegistry.POST_ITERATE,
                 iteration=it["iteration"],
@@ -1126,6 +1175,23 @@ class KernelCodeShell:
             session_total=self._budget.total_spent,
         )
 
+        # Skill suggestions based on final bottleneck state
+        if best:
+            final_profile = best.get("profile", {})
+            final_bn = final_profile.get("bottleneck_type", "")
+            if final_bn and final_bn != "unknown":
+                final_suggestions = suggest_skills(
+                    bottleneck_type=final_bn,
+                    problem_description=best.get("intent", ""),
+                    skill_library=self._skill_library,
+                    top_k=3,
+                )
+                if final_suggestions:
+                    self._console.print(
+                        format_skill_suggestions(final_suggestions, final_bn)
+                    )
+                    self._console.print()
+
     def _run_live_optimization(
         self,
         reference: str,
@@ -1145,6 +1211,16 @@ class KernelCodeShell:
 
         reference_source = ref_path.read_text()
 
+        # Check if reference file changed since last optimization
+        ref_changed = self._file_cache.has_file_changed(ref_path)
+        if not ref_changed:
+            self._console.print(
+                "[dim]Reference file unchanged since last run -- "
+                "cached eval results will be reused where possible.[/dim]"
+            )
+        # Track current state regardless
+        self._file_cache.track_file(ref_path)
+
         # Fire pre_optimize hooks
         self._hooks.fire(
             HookRegistry.PRE_OPTIMIZE,
@@ -1156,6 +1232,10 @@ class KernelCodeShell:
         self._console.print(f"  Reference: {escape(reference)}")
         self._console.print(f"  Backend:   {backend}")
         self._console.print(f"  Iterations: {iterations}")
+        if self._file_cache.eval_cache_size > 0:
+            self._console.print(
+                f"  Eval cache: {self._file_cache.eval_cache_size} entries"
+            )
         self._console.print()
 
         from openkernel.config import (
@@ -1187,6 +1267,7 @@ class KernelCodeShell:
             backend=backend,
             hooks=self._hooks,
             progress=self._opt_progress,
+            file_cache=self._file_cache,
         )
 
         self._console.print(f"  Session:   {bridge.session_id}")

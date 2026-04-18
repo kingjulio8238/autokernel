@@ -23,9 +23,9 @@
 
 ---
 
-## Tier 1: Highest ROI (Build Next)
+## Tier 1: Highest ROI — DONE
 
-### 1.1 Formal Tool Registry System
+### 1.1 Formal Tool Registry System ✅ DONE
 **What CC does**: `Tool.ts` defines a `ToolUseContext` with 43 tools, each having: name, description, input schema (JSON Schema), execute function, permission requirements, result formatting, progress reporting, spinner mode.
 
 **What kernel code should do**: Create `kernel_code/tools/` directory with formal tool definitions:
@@ -52,7 +52,7 @@ Kernel-specific tools to add:
 
 **ROI**: High. Makes the agentic loop much more capable — LLM can call specific kernel tools, not just generic Q&A functions.
 
-### 1.2 Command History (Up/Down Arrow)
+### 1.2 Command History (Up/Down Arrow) ✅ DONE
 **What CC does**: `history.ts` — 100-item command history persisted to disk, up/down arrow navigation, paste content handling with hash-based dedup.
 
 **What kernel code should do**: Use `prompt_toolkit` instead of `input()` for the REPL. This gives: up/down history, line editing, multi-line input, tab completion for commands, syntax highlighting.
@@ -70,7 +70,7 @@ user_input = session.prompt('kernel-code > ')
 
 **ROI**: Very high. Single biggest UX improvement for daily use. Every KE uses up-arrow constantly.
 
-### 1.3 Proper Error Formatting
+### 1.3 Proper Error Formatting ✅ DONE
 **What CC does**: Errors are caught, formatted with actionable messages, and displayed in styled panels. Never shows raw tracebacks to users.
 
 **What kernel code should do**: Create `kernel_code/errors.py`:
@@ -90,7 +90,7 @@ Wrap all shell command handlers with error formatting. Never show raw Python tra
 
 **ROI**: High. Professional feel. KEs shouldn't see `litellm.RateLimitError: RateLimitError: GroqException - {"error":...}`.
 
-### 1.4 Query Engine (Proper Agentic Loop)
+### 1.4 Query Engine (Proper Agentic Loop) ✅ DONE
 **What CC does**: `QueryEngine.ts` + `query.ts` — dedicated engine that handles: streaming API calls, tool dispatch from streamed chunks, auto-compaction when context fills, token budget enforcement, turn-level budgets, fallback on errors.
 
 **What kernel code should do**: Upgrade `agent_loop.py` into a proper `QueryEngine`:
@@ -102,7 +102,7 @@ Wrap all shell command handlers with error formatting. Never show raw Python tra
 
 **ROI**: High. Makes the shell feel responsive and handles long sessions properly.
 
-### 1.5 Cost Tracking Dashboard
+### 1.5 Cost Tracking Dashboard ✅ DONE
 **What CC does**: `cost-tracker.ts` tracks per-model usage, cache read/write tokens, total cost, API duration, tool duration, lines changed. Displays with `/cost` command.
 
 **What kernel code should do**: Upgrade `permissions.py` BudgetTracker into a full cost tracker:
@@ -116,9 +116,9 @@ Wrap all shell command handlers with error formatting. Never show raw Python tra
 
 ---
 
-## Tier 2: High ROI (Build After Tier 1)
+## Tier 2: High ROI — DONE
 
-### 2.1 Auto-Triggering Skills
+### 2.1 Auto-Triggering Skills ✅ DONE
 **What CC does**: `bundledSkills.ts` — skills have `whenToUse` field that triggers automatically when the LLM determines the skill is relevant. Not just slash commands.
 
 **What kernel code should do**: When the LLM generates a kernel and the Critic identifies a bottleneck, automatically search skills and suggest relevant ones:
@@ -129,7 +129,7 @@ Critic: memory_bound, L2 hit rate 45%
 
 Add `auto_trigger` field to skill JSON: condition under which the skill is automatically loaded.
 
-### 2.2 Progress Reporting Per Tool
+### 2.2 Progress Reporting Per Tool ✅ DONE (built in Tier 1)
 **What CC does**: Each tool has a `ToolProgressData` type — spinners show what the tool is doing (e.g., "Reading file...", "Running command..."). Different spinner modes per tool.
 
 **What kernel code should do**: During optimization, show per-iteration progress:
@@ -142,7 +142,7 @@ Add `auto_trigger` field to skill JSON: condition under which the skill is autom
 
 Not just "Thinking..." — show what's happening at each stage.
 
-### 2.3 Tab Completion
+### 2.3 Tab Completion ✅ DONE (built in Tier 1)
 **What CC does**: Has typeahead/autocomplete for commands and file paths.
 
 **What kernel code should do**: With `prompt_toolkit`, add completers:
@@ -152,7 +152,7 @@ Not just "Thinking..." — show what's happening at each stage.
 - `/optimize --` → `--reference`, `--backend`, `--config`, `--parallel`
 - File paths for `--reference`
 
-### 2.4 Conversation Message Types
+### 2.4 Conversation Message Types ✅ DONE
 **What CC does**: 7+ message types: UserMessage, AssistantMessage, SystemMessage, ToolUseSummaryMessage, AttachmentMessage, TombstoneMessage, ProgressMessage. Each renders differently.
 
 **What kernel code should do**: Type the conversation history properly:
@@ -167,7 +167,7 @@ class KernelMessage:
 
 This enables: proper context assembly, smart compaction (summarize tool_results, keep user messages), replay/resume.
 
-### 2.5 File State Cache
+### 2.5 File State Cache ✅ DONE
 **What CC does**: `fileStateCache.ts` tracks which files have been read, their line counts, and modification times. Prevents re-reading unchanged files.
 
 **What kernel code should do**: Cache kernel files and profiler outputs:

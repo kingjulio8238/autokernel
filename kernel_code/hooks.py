@@ -287,6 +287,64 @@ def _make_post_optimize_dashboard_link(console: Console) -> Callable:
     return _hook
 
 
+def _make_post_optimize_cache_save(file_cache: Any, console: Console) -> Callable:
+    """Save reference file hash to cache after optimization completes."""
+
+    def _hook(
+        *,
+        reference_path: str = "",
+        **_kw: Any,
+    ) -> None:
+        if file_cache is None or not reference_path:
+            return
+        from pathlib import Path
+
+        ref = Path(reference_path)
+        if ref.exists():
+            file_cache.track_file(ref)
+            logger.info(
+                "Cached reference file state: %s (%d eval entries)",
+                reference_path,
+                file_cache.eval_cache_size,
+            )
+
+    return _hook
+
+
+def _make_pre_optimize_cache_check(file_cache: Any, console: Console) -> Callable:
+    """On resume: check if reference file changed since last session."""
+
+    def _hook(
+        *,
+        config: dict,
+        iterations: int,
+        reference_path: str = "",
+        **_kw: Any,
+    ) -> None:
+        if file_cache is None or not reference_path:
+            return
+        from pathlib import Path
+
+        ref = Path(reference_path)
+        if not ref.exists():
+            return
+
+        if file_cache.has_file_changed(ref):
+            console.print(
+                "[yellow]Reference file changed since last session -- "
+                "eval cache invalidated for new content.[/yellow]"
+            )
+        else:
+            cached_evals = file_cache.eval_cache_size
+            if cached_evals > 0:
+                console.print(
+                    f"[dim]Using cached eval (identical kernel) -- "
+                    f"{cached_evals} cached result(s) available.[/dim]"
+                )
+
+    return _hook
+
+
 # ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
@@ -296,6 +354,7 @@ def create_default_hooks(
     session_mod: Any = None,
     skill_library: Any = None,
     template_evolver: Any = None,
+    file_cache: Any = None,
     console: Console | None = None,
 ) -> HookRegistry:
     """Create a HookRegistry with sensible default hooks.
@@ -309,6 +368,9 @@ def create_default_hooks(
         template_evolver: A :class:`~kernel_code.template_evolution.TemplateEvolver`
             instance.  If provided, winning kernels are recorded for template
             evolution (flywheel feedback).
+        file_cache: A :class:`~kernel_code.file_cache.FileStateCache` instance.
+            If provided, reference file state is tracked and eval results
+            are cached across sessions to save GPU costs.
         console: Rich Console to use for output.  Defaults to a new Console.
 
     Returns:
@@ -320,6 +382,8 @@ def create_default_hooks(
     # -- pre_optimize -------------------------------------------------------
     hooks.register(HookRegistry.PRE_OPTIMIZE, _make_pre_optimize_log(con))
     hooks.register(HookRegistry.PRE_OPTIMIZE, _make_pre_optimize_cost_confirm(con))
+    if file_cache is not None:
+        hooks.register(HookRegistry.PRE_OPTIMIZE, _make_pre_optimize_cache_check(file_cache, con))
 
     # -- post_keep ----------------------------------------------------------
     hooks.register(HookRegistry.POST_KEEP, _make_post_keep_log(con))
@@ -336,5 +400,7 @@ def create_default_hooks(
         hooks.register(HookRegistry.POST_OPTIMIZE, _make_post_optimize_save(session_mod))
     hooks.register(HookRegistry.POST_OPTIMIZE, _make_post_optimize_summary(con))
     hooks.register(HookRegistry.POST_OPTIMIZE, _make_post_optimize_dashboard_link(con))
+    if file_cache is not None:
+        hooks.register(HookRegistry.POST_OPTIMIZE, _make_post_optimize_cache_save(file_cache, con))
 
     return hooks

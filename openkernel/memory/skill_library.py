@@ -49,10 +49,13 @@ class SkillLibrary:
         """Load all .json files from *skills_dir* into memory."""
         if not self._skills_dir.exists():
             return
+        # Known dataclass fields -- filter out extra keys (e.g. auto_trigger)
+        _known_fields = {f.name for f in OptimizationSkill.__dataclass_fields__.values()}
         for path in sorted(self._skills_dir.glob("*.json")):
             with open(path) as f:
                 data = json.load(f)
-            skill = OptimizationSkill(**data)
+            filtered = {k: v for k, v in data.items() if k in _known_fields}
+            skill = OptimizationSkill(**filtered)
             self._skills[skill.id] = skill
 
     def save(self, skills_dir: str | Path | None = None) -> None:

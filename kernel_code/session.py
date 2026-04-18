@@ -62,6 +62,7 @@ class Session:
     runs: list[SessionRun] = field(default_factory=list)
     current_reference: str | None = None
     current_backend: str = "triton"
+    conversation_history: list[dict] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +107,7 @@ def load_session(session_id: str) -> Session:
         runs=runs,
         current_reference=data.get("current_reference"),
         current_backend=data.get("current_backend", "triton"),
+        conversation_history=data.get("conversation_history", []),
     )
 
 

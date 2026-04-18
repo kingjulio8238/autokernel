@@ -77,4 +77,23 @@ def execute(session_context: dict, **kwargs: Any) -> str:
     for i, s in enumerate(suggestions[:3], 1):
         lines.append(f"  {i}. {s}")
 
+    # --- Skill suggestions based on bottleneck ---
+    from kernel_code.skill_trigger import suggest_skills, format_skill_suggestions
+
+    # Map short bottleneck names used here to the _BOTTLENECK_SKILL_MAP keys
+    _bn_map = {
+        "memory": "memory_bound",
+        "compute": "compute_bound",
+        "latency": "latency_bound",
+    }
+    mapped_bottleneck = _bn_map.get(bottleneck, bottleneck)
+    skill_suggestions = suggest_skills(
+        bottleneck_type=mapped_bottleneck,
+        problem_description=latest_iter.get("intent", ""),
+        top_k=3,
+    )
+    if skill_suggestions:
+        lines.append("")
+        lines.append(format_skill_suggestions(skill_suggestions, mapped_bottleneck))
+
     return "\n".join(lines)
