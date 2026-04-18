@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from kernel_code.hooks import HookRegistry
+    from kernel_code.progress import OptimizationProgress
 
 from openkernel.config import OpenKernelConfig
 from openkernel.engine.factory import create_engine
@@ -202,6 +203,7 @@ class OpenKernelBridge:
         hardware: str = "H100",
         backend: str = "triton",
         hooks: "HookRegistry | None" = None,
+        progress: "OptimizationProgress | None" = None,
     ) -> None:
         self._config = config
         self._session_id = session_id or uuid.uuid4().hex[:12]
@@ -209,6 +211,7 @@ class OpenKernelBridge:
         self._hardware = hardware
         self._backend = backend
         self._hooks = hooks
+        self._progress = progress
 
         # Where the TUI looks for data
         _SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
@@ -304,6 +307,10 @@ class OpenKernelBridge:
         best_kernel: str,
     ) -> None:
         """Called after each orchestrator iteration to update the cache."""
+        # Report per-step progress if a progress reporter is configured
+        if self._progress is not None:
+            self._progress.start_iteration(iteration, node.description)
+
         # Map orchestrator result -> TUI iteration schema (matches mock_data.py)
         if result.status == "failed" or result.status == "error":
             status = "compile_error" if "compile" in result.critic_feedback.lower() else "error"
@@ -318,6 +325,16 @@ class OpenKernelBridge:
             status = "discard"
             decision = "discard"
             speedup = result.best_speedup
+
+        # Report outcome via progress reporter
+        if self._progress is not None:
+            if decision == "keep":
+                self._progress.kept(speedup, is_new_best=(speedup == self._best_speedup))
+            elif decision == "discard":
+                self._progress.discarded(speedup, self._best_speedup)
+            elif decision == "error":
+                error_msg = result.critic_feedback[:80] if result.critic_feedback else "unknown"
+                self._progress.error(status, error_msg)
 
         iteration_data = {
             "iteration": iteration,

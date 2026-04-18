@@ -32,8 +32,23 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
+# prompt_toolkit — optional dependency for polished input with history & completion.
+# Falls back to bare input() if not installed.
+try:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.history import FileHistory
+    from prompt_toolkit.completion import Completer, Completion
+    from prompt_toolkit.formatted_text import HTML
+
+    _HAS_PROMPT_TOOLKIT = True
+except ImportError:  # pragma: no cover
+    _HAS_PROMPT_TOOLKIT = False
+
 from kernel_code.agent_loop import AgentLoop
+from kernel_code.cost_dashboard import CostTracker
+from kernel_code.errors import format_error
 from kernel_code.hooks import HookRegistry, create_default_hooks
+from kernel_code.progress import AgentProgress, OptimizationProgress
 from kernel_code.onboarding import needs_onboarding, run_onboarding
 from kernel_code.permissions import BudgetTracker, confirm_cost, estimate_cost
 from kernel_code.settings import (
@@ -49,6 +64,76 @@ from kernel_code.template_evolution import TemplateEvolver
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _SESSIONS_DIR = _PROJECT_ROOT / "cache" / "sessions"
 
+# History file for prompt_toolkit (lives alongside other dot-files)
+_HISTORY_PATH = _PROJECT_ROOT / ".kernel-code" / "history.txt"
+
+
+# ------------------------------------------------------------------
+# Tab completer (prompt_toolkit)
+# ------------------------------------------------------------------
+
+if _HAS_PROMPT_TOOLKIT:
+
+    class KernelCodeCompleter(Completer):
+        """Tab completion for kernel-code slash commands and flags."""
+
+        def __init__(self, shell: "KernelCodeShell") -> None:
+            self._shell = shell
+
+        def get_completions(self, document, complete_event):
+            text = document.text_before_cursor
+
+            # Complete slash commands
+            if text.startswith("/"):
+                commands = [
+                    "/optimize",
+                    "/show",
+                    "/skills",
+                    "/skill:",
+                    "/compare",
+                    "/dashboard",
+                    "/history",
+                    "/config",
+                    "/evolve",
+                    "/cost",
+                    "/setup",
+                    "/help",
+                    "/quit",
+                    "/exit",
+                ]
+                for cmd in commands:
+                    if cmd.startswith(text):
+                        yield Completion(cmd, start_position=-len(text))
+
+            # Complete after /show
+            if text.startswith("/show "):
+                for sub in ["best", "results", "run"]:
+                    full = f"/show {sub}"
+                    if full.startswith(text):
+                        yield Completion(full, start_position=-len(text))
+
+            # Complete after /skill:
+            if text.startswith("/skill:"):
+                prefix = text[7:]
+                for skill in self._shell._skill_library:
+                    sid = skill.get("id", "")
+                    if sid.startswith(prefix):
+                        yield Completion(f"/skill:{sid}", start_position=-len(text))
+
+            # Complete --flags after /optimize
+            if "/optimize" in text and text.endswith("--"):
+                for flag in [
+                    "--reference",
+                    "--backend",
+                    "--config",
+                    "--parallel",
+                    "--mock",
+                    "--no-mock",
+                    "--iterations",
+                    "--gpu",
+                ]:
+                    yield Completion(flag, start_position=-2)
+
 
 class KernelCodeShell:
     """Interactive kernel optimization shell."""
@@ -61,6 +146,7 @@ class KernelCodeShell:
         self._session_data: dict = {}
         self._total_cost: float = 0.0
         self._budget = BudgetTracker()
+        self._cost_tracker = CostTracker()
         self._active_skill: dict | None = None
         self._skill_library: list[dict] = self._load_skills()
 
@@ -86,8 +172,21 @@ class KernelCodeShell:
 
         self._kernel_config: KernelConfig | None = discover_kernel_config()
 
+        # Progress reporters
+        self._opt_progress = OptimizationProgress(console=self._console)
+        self._agent_progress = AgentProgress(console=self._console)
+
         # Agentic loop for natural language (lazy-init on first NL input)
         self._agent_loop: AgentLoop | None = None
+
+        # prompt_toolkit session (history + completion + styled prompt)
+        self._prompt_session: PromptSession | None = None  # type: ignore[type-arg]
+        if _HAS_PROMPT_TOOLKIT:
+            _HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+            self._prompt_session = PromptSession(
+                history=FileHistory(str(_HISTORY_PATH)),
+                completer=KernelCodeCompleter(self),
+            )
 
         # Command dispatch table
         self._commands: dict[str, Callable[[str], None]] = {
@@ -96,6 +195,7 @@ class KernelCodeShell:
             "/compare": self._cmd_compare,
             "/dashboard": self._cmd_dashboard,
             "/history": self._cmd_history,
+            "/cost": self._cmd_cost,
             "/skills": self._cmd_skills,
             "/config": self._cmd_config,
             "/setup": self._cmd_setup,
@@ -130,7 +230,25 @@ class KernelCodeShell:
             self._handle_input(user_input)
 
     def _prompt(self) -> str | None:
-        """Display the prompt and read user input. Returns None on EOF."""
+        """Display the prompt and read user input. Returns None on EOF.
+
+        Uses prompt_toolkit when available (gives persistent history, tab
+        completion, and styled prompt).  Falls back to Rich console.input()
+        if prompt_toolkit is not installed.
+        """
+        if self._prompt_session is not None:
+            try:
+                text = self._prompt_session.prompt(
+                    HTML("<green>kernel-code</green> <gray>&gt;</gray> ")
+                )
+                return text
+            except EOFError:
+                return None
+            except KeyboardInterrupt:
+                self._console.print()
+                return ""
+
+        # Fallback: bare Rich input
         try:
             text = self._console.input("[bold cyan]kernel-code[/bold cyan] [dim]>[/dim] ")
             return text
@@ -146,10 +264,15 @@ class KernelCodeShell:
         if not stripped:
             return
 
-        if stripped.startswith("/"):
-            self._dispatch_command(stripped)
-        else:
-            self._handle_natural_language(stripped)
+        try:
+            if stripped.startswith("/"):
+                self._dispatch_command(stripped)
+            else:
+                self._handle_natural_language(stripped)
+        except SystemExit:
+            raise
+        except Exception as exc:
+            format_error(exc, context=f"Input: {stripped}", console=self._console)
 
     # ------------------------------------------------------------------
     # Command dispatch
@@ -164,12 +287,7 @@ class KernelCodeShell:
         # Handle /skill:NAME prefix
         if cmd.startswith("/skill:"):
             skill_name = cmd[len("/skill:"):]
-            try:
-                self._cmd_skill_load(skill_name)
-            except SystemExit:
-                raise
-            except Exception as exc:
-                self._console.print(f"[red]Error:[/red] {escape(str(exc))}")
+            self._cmd_skill_load(skill_name)
             return
 
         handler = self._commands.get(cmd)
@@ -180,12 +298,7 @@ class KernelCodeShell:
             )
             return
 
-        try:
-            handler(args_str)
-        except SystemExit:
-            raise
-        except Exception as exc:
-            self._console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        handler(args_str)
 
     # ------------------------------------------------------------------
     # Commands
@@ -339,22 +452,20 @@ class KernelCodeShell:
         url = f"http://localhost:8050/session/{self._session_id}"
         self._console.print(f"[cyan]Opening dashboard:[/cyan] {url}")
 
-        try:
-            from kernel_code.mock_data import generate_mock_session
+        from kernel_code.mock_data import generate_mock_session
 
-            # Ensure session data exists on disk for the dashboard to read
-            session_path = _SESSIONS_DIR / f"{self._session_id}.json"
-            if not session_path.exists() and self._session_data:
-                session_path.parent.mkdir(parents=True, exist_ok=True)
-                session_path.write_text(json.dumps(self._session_data, indent=2))
+        # Ensure session data exists on disk for the dashboard to read
+        session_path = _SESSIONS_DIR / f"{self._session_id}.json"
+        if not session_path.exists() and self._session_data:
+            session_path.parent.mkdir(parents=True, exist_ok=True)
+            self._persist_cost_data()
+            session_path.write_text(json.dumps(self._session_data, indent=2))
 
-            webbrowser.open(url)
-            self._console.print(
-                "[dim]Dashboard server needs to be running separately:[/dim] "
-                "[bold]kernel-code dashboard[/bold]"
-            )
-        except Exception as exc:
-            self._console.print(f"[red]Error opening dashboard:[/red] {escape(str(exc))}")
+        webbrowser.open(url)
+        self._console.print(
+            "[dim]Dashboard server needs to be running separately:[/dim] "
+            "[bold]kernel-code dashboard[/bold]"
+        )
 
     def _cmd_history(self, _args_str: str) -> None:
         """/history -- list all runs in current session."""
@@ -427,6 +538,7 @@ class KernelCodeShell:
             ("/compare", "Compare current best to baseline (side-by-side)"),
             ("/dashboard", "Open browser dashboard for current session"),
             ("/history", "List all runs in current session"),
+            ("/cost", "Show full cost breakdown (LLM + GPU + per-run)"),
             ("/config", "Show resolved settings (with source files)"),
             ("/config set KEY VALUE", "Update a project setting"),
             ("/skills", "List all available optimization skills"),
@@ -614,11 +726,7 @@ class KernelCodeShell:
             )
             return
 
-        try:
-            path = save_project_setting(key, raw_value)
-        except Exception as exc:
-            self._console.print(f"[red]Error saving setting:[/red] {escape(str(exc))}")
-            return
+        path = save_project_setting(key, raw_value)
 
         # Reload settings so the change takes effect immediately
         self._settings = load_settings()
@@ -742,30 +850,26 @@ class KernelCodeShell:
 
         self._console.print(f"[dim]Generating evolved template for {escape(skill_id)}...[/dim]")
 
-        try:
-            from openkernel.config import ModelConfig
-            from openkernel.llm.provider import LLMProvider
+        from openkernel.config import ModelConfig
+        from openkernel.llm.provider import LLMProvider
 
-            provider = LLMProvider(ModelConfig())
-            evolved = asyncio.run(
-                self._template_evolver.propose_evolution(
-                    skill_id, llm_provider=provider, original_template=original_template
-                )
+        provider = LLMProvider(ModelConfig())
+        evolved = asyncio.run(
+            self._template_evolver.propose_evolution(
+                skill_id, llm_provider=provider, original_template=original_template
             )
+        )
 
-            self._console.print()
-            self._console.print(f"[bold green]Proposed evolution for {escape(skill_id)}:[/bold green]")
-            self._console.print()
-            syntax = Syntax(evolved, "python", theme="monokai", line_numbers=True, padding=1)
-            self._console.print(syntax)
-            self._console.print()
-            self._console.print(
-                f"[dim]Run [bold]/evolve approve {escape(skill_id)}[/bold] to apply this template.[/dim]"
-            )
-            self._console.print()
-
-        except Exception as exc:
-            self._console.print(f"[red]Evolution failed:[/red] {escape(str(exc))}")
+        self._console.print()
+        self._console.print(f"[bold green]Proposed evolution for {escape(skill_id)}:[/bold green]")
+        self._console.print()
+        syntax = Syntax(evolved, "python", theme="monokai", line_numbers=True, padding=1)
+        self._console.print(syntax)
+        self._console.print()
+        self._console.print(
+            f"[dim]Run [bold]/evolve approve {escape(skill_id)}[/bold] to apply this template.[/dim]"
+        )
+        self._console.print()
 
     def _approve_evolution(self, skill_id: str) -> None:
         """Approve and apply an evolved template to the skill library."""
@@ -796,6 +900,10 @@ class KernelCodeShell:
                 f"[red]Failed to apply evolution for {escape(skill_id)}.[/red]"
             )
 
+    def _cmd_cost(self, _args_str: str) -> None:
+        """/cost -- show full cost breakdown dashboard."""
+        self._cost_tracker.format_dashboard(console=self._console)
+
     def _cmd_quit(self, _args_str: str) -> None:
         """/quit or /exit -- exit the shell."""
         self._console.print("[dim]Goodbye.[/dim]")
@@ -818,7 +926,9 @@ class KernelCodeShell:
         # Lazy-initialise the agent loop so we only create the LLM
         # provider when actually needed.
         if self._agent_loop is None:
-            self._agent_loop = AgentLoop(session_context=self._session_data)
+            self._agent_loop = AgentLoop(
+                session_context=self._session_data, console=self._console
+            )
         else:
             # Keep context in sync after new optimization runs
             self._agent_loop.update_context(self._session_data)
@@ -829,27 +939,44 @@ class KernelCodeShell:
             asyncio.run(self._stream_response(text))
         except Exception:
             # Fall back to non-streaming if streaming fails
-            with self._console.status("[dim]Thinking...[/dim]", spinner="dots"):
-                try:
-                    answer = asyncio.run(self._agent_loop.run(text))
-                except Exception as exc:
-                    self._console.print(
-                        f"[red]Agent error:[/red] {escape(str(exc))}"
-                    )
-                    return
+            with self._agent_progress.thinking():
+                answer = asyncio.run(self._agent_loop.run(text))
             self._console.print(escape(answer))
 
+        # Sync LLM cost from provider after each turn
+        self._sync_llm_cost()
+
         self._console.print()
+
+    def _sync_llm_cost(self) -> None:
+        """Sync cumulative LLM cost from the agent loop's provider into the cost tracker."""
+        if self._agent_loop is not None:
+            provider = self._agent_loop.provider
+            self._cost_tracker.sync_from_provider(
+                model_id=provider._config.model_id,
+                provider_tokens=provider.tokens_used,
+                provider_cost=provider.cost_usd,
+            )
+
+    def _persist_cost_data(self) -> None:
+        """Embed cost tracker state into session_data for persistence."""
+        self._session_data["_cost_tracker"] = self._cost_tracker.to_dict()
+
+    def _restore_cost_data(self) -> None:
+        """Restore cost tracker state from session_data after resume."""
+        cost_data = self._session_data.get("_cost_tracker")
+        if cost_data:
+            self._cost_tracker = CostTracker.from_dict(cost_data)
 
     async def _stream_response(self, text: str) -> None:
         """Run the agent loop with streaming and print tokens as they arrive.
 
-        Shows a "Thinking..." spinner while tool calls are being processed.
+        Shows a spinner while tool calls are being processed.
         Once the final response starts streaming, the spinner is removed and
         tokens are printed directly.
         """
         got_first_token = False
-        status = self._console.status("[dim]Thinking...[/dim]", spinner="dots")
+        status = self._agent_progress.thinking()
         status.start()
         try:
             async for token in self._agent_loop.run_stream(text):
@@ -889,20 +1016,43 @@ class KernelCodeShell:
 
         # Load the generated session data
         self._session_data = json.loads(session_path.read_text())
+        self._restore_cost_data()
         iters = self._session_data.get("iterations", [])
         self._runs = iters
         run_cost = estimate_cost(len(iters))
         self._total_cost += run_cost
         self._budget.record(run_cost)
 
-        # Find the best run and fire per-iteration hooks
+        # Record cost in the cost tracker
+        run_num = len(self._cost_tracker._runs) + 1
+        gpu_type = self._settings.default_gpu
+        avg_eval_seconds = 15.0
+        gpu_seconds = len(iters) * avg_eval_seconds
+        llm_cost_est = len(iters) * 0.003
+        gpu_cost_est = run_cost - llm_cost_est
+        self._cost_tracker.record_run_cost(
+            run_id=f"#{run_num}",
+            llm_cost=llm_cost_est,
+            gpu_cost=gpu_cost_est,
+            iterations=len(iters),
+        )
+        # Record GPU usage
+        for _ in range(len(iters)):
+            self._cost_tracker.record_gpu_eval(gpu_type, avg_eval_seconds)
+
+        # Find the best run and fire per-iteration hooks with progress reporting
         best = None
         best_speedup = 0.0
         for it in iters:
+            self._opt_progress.start_iteration(
+                it["iteration"], it.get("intent", "")
+            )
             if it["status"] == "keep":
-                if best is None or it["speedup"] > best["speedup"]:
+                is_new_best = best is None or it["speedup"] > best["speedup"]
+                if is_new_best:
                     best = it
                     best_speedup = it["speedup"]
+                self._opt_progress.kept(it["speedup"], is_new_best=is_new_best)
                 self._hooks.fire(
                     HookRegistry.POST_KEEP,
                     speedup=it["speedup"],
@@ -910,12 +1060,19 @@ class KernelCodeShell:
                     intent=it.get("intent", ""),
                 )
             elif it["status"] == "discard":
+                self._opt_progress.discarded(it["speedup"], best_speedup)
                 self._hooks.fire(
                     HookRegistry.POST_DISCARD,
                     speedup=it["speedup"],
                     best_speedup=best_speedup,
                     intent=it.get("intent", ""),
                 )
+            elif it["status"] in ("compile_error", "error"):
+                self._opt_progress.error(
+                    it["status"], it.get("error", "unknown error")
+                )
+            elif it["status"] == "incorrect":
+                self._opt_progress.error("incorrect", "correctness check failed")
             self._hooks.fire(
                 HookRegistry.POST_ITERATE,
                 iteration=it["iteration"],
@@ -926,6 +1083,14 @@ class KernelCodeShell:
         self._best_run = best
 
         kept = sum(1 for it in iters if it["status"] == "keep")
+
+        # Report completion
+        self._opt_progress.complete(
+            best_speedup=self._session_data.get("best_speedup", 0.0),
+            iterations=len(iters),
+            kept=kept,
+            cost=self._total_cost,
+        )
 
         # Launch TUI for visualization
         self._console.print("[dim]Launching TUI...[/dim]")
@@ -938,6 +1103,9 @@ class KernelCodeShell:
             app.run()
         except Exception as exc:
             self._console.print(f"[yellow]TUI exited:[/yellow] {escape(str(exc))}")
+
+        # Persist cost tracker data into session
+        self._persist_cost_data()
 
         # Fire post_optimize hooks
         self._hooks.fire(
@@ -990,95 +1158,113 @@ class KernelCodeShell:
         self._console.print(f"  Iterations: {iterations}")
         self._console.print()
 
+        from openkernel.config import (
+            Backend as _Backend,
+            OpenKernelConfig,
+            ModalConfig,
+            GpuType,
+        )
+
+        # Build config from settings hierarchy, then layer CLI overrides
+        settings_kwargs = settings_to_config(self._settings)
+        config = OpenKernelConfig(
+            **settings_kwargs,
+            max_iterations=iterations,
+        )
+        # CLI --backend overrides settings
+        config.backend = _Backend.CUDA if backend == "cuda" else _Backend.TRITON
+        if config_path:
+            config = OpenKernelConfig.from_yaml(config_path)
+
+        from kernel_code.integration import OpenKernelBridge
+
+        problem_label = f"L{level}#{problem}"
+        bridge = OpenKernelBridge(
+            config=config,
+            session_id=self._session_id,
+            problem_label=problem_label,
+            hardware="H100",
+            backend=backend,
+            hooks=self._hooks,
+            progress=self._opt_progress,
+        )
+
+        self._console.print(f"  Session:   {bridge.session_id}")
+        self._console.print(f"  Cache:     {bridge.cache_path}")
+        self._console.print()
+
+        result = bridge.run_optimization(reference_source)
+
+        # Load the final session data from cache
+        if bridge.cache_path.exists():
+            self._session_data = json.loads(bridge.cache_path.read_text())
+            self._runs = self._session_data.get("iterations", [])
+            gpu_type = config.modal.gpu_type.value
+            run_cost = estimate_cost(len(self._runs), gpu_type=gpu_type)
+            self._total_cost += run_cost
+            self._budget.record(run_cost)
+
+            # Record in cost tracker
+            run_num = len(self._cost_tracker._runs) + 1
+            avg_eval_seconds = 15.0
+            llm_cost_est = len(self._runs) * 0.003
+            gpu_cost_est = run_cost - llm_cost_est
+            self._cost_tracker.record_run_cost(
+                run_id=f"#{run_num}",
+                llm_cost=llm_cost_est,
+                gpu_cost=gpu_cost_est,
+                iterations=len(self._runs),
+            )
+            for _ in range(len(self._runs)):
+                self._cost_tracker.record_gpu_eval(gpu_type, avg_eval_seconds)
+
+            best = None
+            for it in self._runs:
+                if it["status"] == "keep":
+                    if best is None or it["speedup"] > best["speedup"]:
+                        best = it
+            self._best_run = best
+
+        kept = sum(1 for it in self._runs if it["status"] == "keep")
+
+        # Launch TUI for review
+        self._console.print("[dim]Launching TUI for review...[/dim]")
         try:
-            from openkernel.config import Backend as _Backend, OpenKernelConfig, ModalConfig, GpuType
+            from kernel_code.tui.app import KernelCodeApp
 
-            # Build config from settings hierarchy, then layer CLI overrides
-            settings_kwargs = settings_to_config(self._settings)
-            config = OpenKernelConfig(
-                **settings_kwargs,
-                max_iterations=iterations,
-            )
-            # CLI --backend overrides settings
-            config.backend = _Backend.CUDA if backend == "cuda" else _Backend.TRITON
-            if config_path:
-                config = OpenKernelConfig.from_yaml(config_path)
-
-            from kernel_code.integration import OpenKernelBridge
-
-            problem_label = f"L{level}#{problem}"
-            bridge = OpenKernelBridge(
-                config=config,
-                session_id=self._session_id,
-                problem_label=problem_label,
-                hardware="H100",
-                backend=backend,
-                hooks=self._hooks,
-            )
-
-            self._console.print(f"  Session:   {bridge.session_id}")
-            self._console.print(f"  Cache:     {bridge.cache_path}")
-            self._console.print()
-
-            result = bridge.run_optimization(reference_source)
-
-            # Load the final session data from cache
-            if bridge.cache_path.exists():
-                self._session_data = json.loads(bridge.cache_path.read_text())
-                self._runs = self._session_data.get("iterations", [])
-                run_cost = estimate_cost(len(self._runs), gpu_type=config.modal.gpu_type.value)
-                self._total_cost += run_cost
-                self._budget.record(run_cost)
-
-                best = None
-                for it in self._runs:
-                    if it["status"] == "keep":
-                        if best is None or it["speedup"] > best["speedup"]:
-                            best = it
-                self._best_run = best
-
-            kept = sum(1 for it in self._runs if it["status"] == "keep")
-
-            # Launch TUI for review
-            self._console.print("[dim]Launching TUI for review...[/dim]")
-            try:
-                from kernel_code.tui.app import KernelCodeApp
-
-                app = KernelCodeApp(session_path=bridge.cache_path)
-                app.run()
-            except Exception as exc:
-                self._console.print(f"[yellow]TUI exited:[/yellow] {escape(str(exc))}")
-
-            # Fire post_optimize hooks
-            self._hooks.fire(
-                HookRegistry.POST_OPTIMIZE,
-                best_speedup=result.final_speedup,
-                iterations_kept=kept,
-                iterations_total=len(self._runs),
-                cost=self._total_cost,
-                cache_session_id=bridge.session_id,
-            )
-
-            # Post-optimization summary
-            self._print_post_optimization_summary(
-                best_speedup=result.final_speedup,
-                kept=kept,
-                total=len(self._runs),
-                cost=self._total_cost,
-                session_total=self._budget.total_spent,
-            )
-
-            # Save best kernel to file
-            if result.final_kernel:
-                out_name = f"{ref_path.stem}_optimized.py"
-                out_path = _Path.cwd() / out_name
-                out_path.write_text(result.final_kernel)
-                self._console.print(
-                    f"[green]Best kernel saved:[/green] {out_name}"
-                )
-
+            app = KernelCodeApp(session_path=bridge.cache_path)
+            app.run()
         except Exception as exc:
-            self._console.print(f"[red]Optimization failed:[/red] {escape(str(exc))}")
+            self._console.print(f"[yellow]TUI exited:[/yellow] {escape(str(exc))}")
+
+        # Persist cost tracker data into session
+        self._persist_cost_data()
+
+        # Fire post_optimize hooks
+        self._hooks.fire(
+            HookRegistry.POST_OPTIMIZE,
+            best_speedup=result.final_speedup,
+            iterations_kept=kept,
+            iterations_total=len(self._runs),
+            cost=self._total_cost,
+            cache_session_id=bridge.session_id,
+        )
+
+        # Post-optimization summary
+        self._print_post_optimization_summary(
+            best_speedup=result.final_speedup,
+            kept=kept,
+            total=len(self._runs),
+            cost=self._total_cost,
+            session_total=self._budget.total_spent,
+        )
+
+        # Save best kernel to file
+        if result.final_kernel:
+            out_name = f"{ref_path.stem}_optimized.py"
+            out_path = _Path.cwd() / out_name
+            out_path.write_text(result.final_kernel)
+            self._console.print(f"[green]Best kernel saved:[/green] {out_name}")
 
     def _run_parallel_optimization(
         self,
@@ -1131,6 +1317,21 @@ class KernelCodeShell:
         run_cost = estimate_cost(iterations) * 2
         self._total_cost += run_cost
         self._budget.record(run_cost)
+
+        # Record in cost tracker (parallel = 2 backends)
+        gpu_type = self._settings.default_gpu
+        avg_eval_seconds = 15.0
+        llm_cost_est = iterations * 2 * 0.003
+        gpu_cost_est = run_cost - llm_cost_est
+        run_num = len(self._cost_tracker._runs) + 1
+        self._cost_tracker.record_run_cost(
+            run_id=f"#{run_num}",
+            llm_cost=llm_cost_est,
+            gpu_cost=gpu_cost_est,
+            iterations=iterations * 2,
+        )
+        for _ in range(iterations * 2):
+            self._cost_tracker.record_gpu_eval(gpu_type, avg_eval_seconds)
 
         # Load the winner's session data into the shell state
         winner_session = results.get("winner_session", {})
@@ -1197,9 +1398,7 @@ class KernelCodeShell:
         summary.append(" | ", style="dim")
         summary.append(f"{kept}/{total} kept", style="dim")
         summary.append(" | ", style="dim")
-        summary.append(f"${cost:.2f}", style="dim")
-        if session_total is not None and session_total != cost:
-            summary.append(f" (session: ${session_total:.2f})", style="dim")
+        summary.append(self._cost_tracker.format_summary(), style="dim")
         self._console.print(summary)
 
         # Dashboard link

@@ -16,11 +16,14 @@ import re
 from collections.abc import AsyncIterator
 from typing import Any
 
+from rich.console import Console
 from openkernel.config import ModelConfig
 from openkernel.llm.provider import LLMProvider
 
 from kernel_code.compaction import compact_session, should_compact
+from kernel_code.progress import AgentProgress
 from kernel_code.shell_ai import format_session_context
+from kernel_code.tools.registry import ToolRegistry, create_default_registry
 
 logger = logging.getLogger(__name__)
 
@@ -28,50 +31,12 @@ logger = logging.getLogger(__name__)
 _MAX_TOOL_CALLS = 3
 
 # ------------------------------------------------------------------
-# Tool definitions (sent to the LLM so it knows what it can call)
-# ------------------------------------------------------------------
-
-TOOLS = [
-    {
-        "name": "show_best_kernel",
-        "description": "Display the current best optimized kernel with syntax highlighting",
-    },
-    {
-        "name": "show_results",
-        "description": "Show summary of optimization results (iterations, speedup, cost)",
-    },
-    {
-        "name": "explain_iteration",
-        "description": "Explain what a specific iteration did and why it succeeded/failed",
-        "parameters": {"iteration": "int - the iteration number to explain"},
-    },
-    {
-        "name": "suggest_next",
-        "description": (
-            "Suggest the next optimization technique to try based on current "
-            "bottleneck and profiling data"
-        ),
-    },
-    {
-        "name": "search_skills",
-        "description": "Search the optimization skill library for relevant patterns",
-        "parameters": {"query": "str - what to search for"},
-    },
-    {
-        "name": "compare_iterations",
-        "description": "Compare two iterations side by side",
-        "parameters": {"iter_a": "int", "iter_b": "int"},
-    },
-]
-
-
-# ------------------------------------------------------------------
 # System prompt
 # ------------------------------------------------------------------
 
-def _build_system_prompt() -> str:
-    """Build the system prompt including tool descriptions."""
-    tool_block = json.dumps(TOOLS, indent=2)
+def _build_system_prompt(registry: ToolRegistry) -> str:
+    """Build the system prompt including tool descriptions from the registry."""
+    tool_block = registry.tools_for_llm_prompt()
     return f"""\
 You are an expert GPU kernel optimization assistant embedded in an interactive
 shell.  The user has run (or is running) an optimization session and is asking
@@ -107,337 +72,20 @@ GUIDELINES
 """
 
 
-# ------------------------------------------------------------------
-# Tool implementations
-# ------------------------------------------------------------------
-
-def _tool_show_best_kernel(session_context: dict) -> str:
-    """Return the best kernel's code and metadata as a string."""
-    iterations = session_context.get("iterations", [])
-    best_speedup = session_context.get("best_speedup", 0.0)
-
-    best = None
-    for it in iterations:
-        if it.get("status") == "keep":
-            sp = it.get("speedup", 0.0)
-            if sp >= best_speedup or (best is None and sp > 0):
-                best = it
-                best_speedup = sp
-
-    if best is None:
-        return "No best kernel found. Run /optimize first."
-
-    code = best.get("kernel_code_snippet", "(code not available)")
-    return (
-        f"Best kernel — iteration #{best.get('iteration')}, "
-        f"speedup {best.get('speedup', 0):.2f}x, "
-        f"intent: {best.get('intent', 'unknown')}\n\n{code}"
-    )
-
-
-def _tool_show_results(session_context: dict) -> str:
-    """Return a concise results summary."""
-    iterations = session_context.get("iterations", [])
-    if not iterations:
-        return "No optimization results yet. Run /optimize first."
-
-    kept = [it for it in iterations if it.get("status") == "keep"]
-    discarded = [it for it in iterations if it.get("status") == "discard"]
-    errors = [it for it in iterations if it.get("status") in ("compile_error", "error", "incorrect")]
-    best_speedup = session_context.get("best_speedup", 0.0)
-    for it in iterations:
-        sp = it.get("speedup", 0.0)
-        if sp > best_speedup:
-            best_speedup = sp
-
-    lines = [
-        f"Total iterations: {len(iterations)}",
-        f"Kept: {len(kept)}  |  Discarded: {len(discarded)}  |  Errors: {len(errors)}",
-        f"Best speedup: {best_speedup:.2f}x",
-        f"Estimated cost: ${len(iterations) * 0.02:.2f}",
-    ]
-
-    if kept:
-        sorted_kept = sorted(kept, key=lambda it: it.get("speedup", 0.0), reverse=True)
-        lines.append("\nTop kept iterations:")
-        for it in sorted_kept[:5]:
-            lines.append(
-                f"  #{it.get('iteration')}: {it.get('speedup', 0):.2f}x — {it.get('intent', '')}"
-            )
-
-    return "\n".join(lines)
-
-
-def _tool_explain_iteration(session_context: dict, iteration: int) -> str:
-    """Explain what a specific iteration did."""
-    iterations = session_context.get("iterations", [])
-    target = None
-    for it in iterations:
-        if it.get("iteration") == iteration:
-            target = it
-            break
-
-    if target is None:
-        return (
-            f"Iteration #{iteration} not found. "
-            f"Available iterations: 1-{len(iterations)}"
-        )
-
-    lines = [
-        f"Iteration #{iteration}",
-        f"  Status:  {target.get('status', 'unknown')}",
-        f"  Speedup: {target.get('speedup', 0):.2f}x",
-        f"  Intent:  {target.get('intent', 'unknown')}",
-    ]
-
-    if target.get("runtime_us"):
-        lines.append(f"  Runtime: {target['runtime_us']:.1f} us")
-    if target.get("ref_runtime_us"):
-        lines.append(f"  Ref runtime: {target['ref_runtime_us']:.1f} us")
-
-    profile = target.get("profile", {})
-    if profile:
-        lines.append("  Profile:")
-        lines.append(f"    Bottleneck:    {profile.get('bottleneck_type', 'unknown')}")
-        lines.append(f"    Bandwidth:     {profile.get('bandwidth_util', 0):.0%}")
-        lines.append(f"    Compute:       {profile.get('compute_util', 0):.0%}")
-        lines.append(f"    Cache eff.:    {profile.get('cache_efficiency', 0):.0%}")
-        lines.append(f"    Occupancy:     {profile.get('occupancy', 0):.2f}")
-        stalls = profile.get("top_stalls")
-        if stalls:
-            lines.append(f"    Top stalls:    {', '.join(stalls[:3])}")
-
-    if target.get("error"):
-        err = target["error"]
-        if len(err) > 200:
-            err = err[:200] + "..."
-        lines.append(f"  Error: {err}")
-
-    code = target.get("kernel_code_snippet", "")
-    if code:
-        code_lines = code.strip().splitlines()[:10]
-        lines.append("  Code (first 10 lines):")
-        for cl in code_lines:
-            lines.append(f"    {cl}")
-
-    return "\n".join(lines)
-
-
-def _tool_suggest_next(session_context: dict) -> str:
-    """Suggest the next optimization based on profiling data."""
-    iterations = session_context.get("iterations", [])
-    if not iterations:
-        return "No optimization data yet. Run /optimize first."
-
-    # Find the latest valid profile
-    latest_profile = None
-    latest_iter = None
-    for it in reversed(iterations):
-        profile = it.get("profile")
-        if profile and it.get("status") not in ("compile_error", "error"):
-            latest_profile = profile
-            latest_iter = it
-            break
-
-    if latest_profile is None:
-        return "No profiling data available to make a suggestion."
-
-    bottleneck = latest_profile.get("bottleneck_type", "unknown")
-    bw = latest_profile.get("bandwidth_util", 0)
-    cu = latest_profile.get("compute_util", 0)
-    ce = latest_profile.get("cache_efficiency", 0)
-    occ = latest_profile.get("occupancy", 0)
-    headroom = latest_profile.get("estimated_headroom", "unknown")
-
-    lines = [
-        f"Analysis based on iteration #{latest_iter.get('iteration')} profile:",
-        f"  Bottleneck: {bottleneck}",
-        f"  Bandwidth util: {bw:.0%}  |  Compute util: {cu:.0%}",
-        f"  Cache efficiency: {ce:.0%}  |  Occupancy: {occ:.2f}",
-        f"  Estimated headroom: {headroom}",
-        "",
-    ]
-
-    # Bottleneck-specific suggestions
-    if bottleneck == "memory":
-        suggestions = [
-            "Try memory coalescing — ensure threads in a warp access consecutive addresses.",
-            "Increase shared memory usage to reduce global memory traffic.",
-            "If bandwidth utilization is low, look for redundant loads/stores.",
-        ]
-    elif bottleneck == "compute":
-        suggestions = [
-            "Try instruction-level parallelism — unroll inner loops.",
-            "Consider using tensor cores / warp-level matrix ops if applicable.",
-            "Reduce register pressure to improve occupancy.",
-        ]
-    elif bottleneck == "latency":
-        suggestions = [
-            "Increase occupancy to hide latency — reduce register/shared memory usage.",
-            "Try prefetching data into shared memory.",
-            "Check for warp divergence in conditional branches.",
-        ]
-    else:
-        suggestions = [
-            "Review the top stall reasons and address them directly.",
-            "Try a different tiling strategy.",
-            "Consider fusing adjacent operations.",
-        ]
-
-    if ce < 0.6:
-        suggestions.insert(0, f"Cache efficiency is low ({ce:.0%}) — consider tiling or blocking.")
-    if occ < 0.5:
-        suggestions.insert(0, f"Occupancy is low ({occ:.2f}) — reduce register/smem usage.")
-
-    lines.append("Suggestions:")
-    for i, s in enumerate(suggestions[:3], 1):
-        lines.append(f"  {i}. {s}")
-
-    return "\n".join(lines)
-
-
-def _tool_search_skills(session_context: dict, query: str) -> str:
-    """Search the optimization skill library for relevant patterns.
-
-    Currently a simple keyword match against iteration intents and known
-    optimization categories.  A real implementation would query a vector
-    store or the HF Hub skill-library repo.
-    """
-    iterations = session_context.get("iterations", [])
-    query_lower = query.lower()
-
-    # Keyword categories
-    _SKILL_CATEGORIES = {
-        "tiling": "Block/tile the computation to improve cache locality. Common tile sizes: 32x32, 64x64, 128x128.",
-        "vectorization": "Use vector loads (float4, int4) to increase memory throughput per instruction.",
-        "coalescing": "Ensure threads in a warp access consecutive memory addresses for maximum bandwidth.",
-        "shared memory": "Stage data in shared memory to reduce global memory traffic. Use __syncthreads().",
-        "loop unrolling": "Unroll inner loops with #pragma unroll to increase ILP and reduce branch overhead.",
-        "fusion": "Fuse multiple operations into a single kernel to eliminate intermediate global memory writes.",
-        "register blocking": "Keep working data in registers to avoid shared memory bank conflicts.",
-        "occupancy": "Tune block size and resource usage to maximize the number of active warps.",
-        "tensor cores": "Use wmma or mma.sync instructions for matrix operations on Tensor Core hardware.",
-        "prefetching": "Use double-buffering or software pipelining to overlap compute with memory loads.",
-    }
-
-    matches = []
-
-    # Search skill categories
-    for cat, desc in _SKILL_CATEGORIES.items():
-        if query_lower in cat or cat in query_lower:
-            matches.append(f"[{cat}] {desc}")
-
-    # Search iteration intents
-    intent_matches = []
-    for it in iterations:
-        intent = it.get("intent", "").lower()
-        if query_lower in intent:
-            intent_matches.append(
-                f"  Iter #{it.get('iteration')}: {it.get('intent')} "
-                f"(status={it.get('status')}, speedup={it.get('speedup', 0):.2f}x)"
-            )
-
-    if not matches and not intent_matches:
-        return f"No skills found matching '{query}'. Try: tiling, vectorization, coalescing, fusion, shared memory, loop unrolling."
-
-    lines = []
-    if matches:
-        lines.append("Matching skill patterns:")
-        for m in matches:
-            lines.append(f"  {m}")
-    if intent_matches:
-        lines.append("\nPast iterations using similar techniques:")
-        lines.extend(intent_matches)
-
-    return "\n".join(lines)
-
-
-def _tool_compare_iterations(session_context: dict, iter_a: int, iter_b: int) -> str:
-    """Compare two iterations side by side."""
-    iterations = session_context.get("iterations", [])
-
-    a = b = None
-    for it in iterations:
-        num = it.get("iteration")
-        if num == iter_a:
-            a = it
-        if num == iter_b:
-            b = it
-
-    missing = []
-    if a is None:
-        missing.append(str(iter_a))
-    if b is None:
-        missing.append(str(iter_b))
-    if missing:
-        return (
-            f"Iteration(s) #{', #'.join(missing)} not found. "
-            f"Available: 1-{len(iterations)}"
-        )
-
-    def _fmt(it: dict) -> list[str]:
-        lines = [
-            f"  Status:    {it.get('status', 'unknown')}",
-            f"  Speedup:   {it.get('speedup', 0):.2f}x",
-            f"  Intent:    {it.get('intent', 'unknown')}",
-        ]
-        if it.get("runtime_us"):
-            lines.append(f"  Runtime:   {it['runtime_us']:.1f} us")
-        profile = it.get("profile", {})
-        if profile:
-            lines.append(f"  Bottleneck: {profile.get('bottleneck_type', 'unknown')}")
-            lines.append(f"  Bandwidth:  {profile.get('bandwidth_util', 0):.0%}")
-            lines.append(f"  Compute:    {profile.get('compute_util', 0):.0%}")
-            lines.append(f"  Cache eff.: {profile.get('cache_efficiency', 0):.0%}")
-            lines.append(f"  Occupancy:  {profile.get('occupancy', 0):.2f}")
-        return lines
-
-    lines = [f"=== Iteration #{iter_a} vs #{iter_b} ===", ""]
-    lines.append(f"--- #{iter_a} ---")
-    lines.extend(_fmt(a))
-    lines.append("")
-    lines.append(f"--- #{iter_b} ---")
-    lines.extend(_fmt(b))
-
-    # Deltas
-    sp_a = a.get("speedup", 0)
-    sp_b = b.get("speedup", 0)
-    delta = sp_b - sp_a
-    lines.append("")
-    lines.append(
-        f"Delta: #{iter_b} is {'+' if delta >= 0 else ''}{delta:.2f}x "
-        f"{'faster' if delta > 0 else 'slower' if delta < 0 else 'same'} than #{iter_a}"
-    )
-
-    return "\n".join(lines)
-
-
-# Dispatch table: tool name -> (function, list of parameter names)
-_TOOL_DISPATCH: dict[str, tuple[Any, list[str]]] = {
-    "show_best_kernel": (_tool_show_best_kernel, []),
-    "show_results": (_tool_show_results, []),
-    "explain_iteration": (_tool_explain_iteration, ["iteration"]),
-    "suggest_next": (_tool_suggest_next, []),
-    "search_skills": (_tool_search_skills, ["query"]),
-    "compare_iterations": (_tool_compare_iterations, ["iter_a", "iter_b"]),
-}
-
-
-def _execute_tool(name: str, args: dict[str, Any], session_context: dict) -> str:
-    """Execute a tool by name and return its string result."""
-    entry = _TOOL_DISPATCH.get(name)
-    if entry is None:
-        return f"Unknown tool: {name}. Available: {', '.join(_TOOL_DISPATCH)}"
-
-    func, param_names = entry
-    kwargs: dict[str, Any] = {}
-    for p in param_names:
-        if p not in args:
-            return f"Missing required parameter '{p}' for tool '{name}'."
-        kwargs[p] = args[p]
+def _execute_tool(
+    name: str,
+    args: dict[str, Any],
+    session_context: dict,
+    registry: ToolRegistry,
+) -> str:
+    """Execute a registered tool by name and return its string result."""
+    tool = registry.get_tool(name)
+    if tool is None:
+        available = ", ".join(t.name for t in registry.list_tools())
+        return f"Unknown tool: {name}. Available: {available}"
 
     try:
-        return func(session_context, **kwargs)
+        return tool.execute(session_context, **args)
     except Exception as exc:
         logger.error("Tool %s raised: %s", name, exc)
         return f"Tool error: {exc}"
@@ -505,12 +153,16 @@ class AgentLoop:
         self,
         session_context: dict,
         model_config: ModelConfig | None = None,
+        console: Console | None = None,
+        registry: ToolRegistry | None = None,
     ) -> None:
         if model_config is None:
             model_config = ModelConfig()
         self._provider = LLMProvider(model_config)
         self._session_context = session_context
-        self._system_prompt = _build_system_prompt()
+        self._registry = registry if registry is not None else create_default_registry()
+        self._system_prompt = _build_system_prompt(self._registry)
+        self._progress = AgentProgress(console=console)
 
     @property
     def provider(self) -> LLMProvider:
@@ -583,10 +235,18 @@ class AgentLoop:
 
             logger.info("AgentLoop: calling tool %s(%s)", tool_name, tool_args)
 
+            # Show which tool is being called
+            args_preview = ", ".join(f"{k}={v}" for k, v in tool_args.items()) if tool_args else ""
+            self._progress.calling_tool(tool_name, args_preview)
+
             tool_result = _execute_tool(
-                tool_name, tool_args, self._session_context
+                tool_name, tool_args, self._session_context, self._registry
             )
             tool_calls_made += 1
+
+            # Show a brief preview of the result
+            result_first_line = tool_result.split("\n", 1)[0] if tool_result else "(empty)"
+            self._progress.tool_result(tool_name, result_first_line)
 
             # Append the tool interaction to the conversation
             prompt_parts.append(f"--- TOOL CALL ---\n{json.dumps(tool_call)}")
@@ -666,10 +326,18 @@ class AgentLoop:
 
             logger.info("AgentLoop: calling tool %s(%s)", tool_name, tool_args)
 
+            # Show which tool is being called
+            args_preview = ", ".join(f"{k}={v}" for k, v in tool_args.items()) if tool_args else ""
+            self._progress.calling_tool(tool_name, args_preview)
+
             tool_result = _execute_tool(
-                tool_name, tool_args, self._session_context
+                tool_name, tool_args, self._session_context, self._registry
             )
             tool_calls_made += 1
+
+            # Show a brief preview of the result
+            result_first_line = tool_result.split("\n", 1)[0] if tool_result else "(empty)"
+            self._progress.tool_result(tool_name, result_first_line)
 
             # Append the tool interaction to the conversation
             prompt_parts.append(f"--- TOOL CALL ---\n{json.dumps(tool_call)}")
