@@ -253,7 +253,7 @@ kernel-code > /doctor
 
 ---
 
-## Tier 4: Nice to Have (Future)
+## Tier 4: Nice to Have — DONE
 
 ### 4.1 MCP Server Integration
 Expose kernel code tools as MCP servers so other AI tools can call them.
