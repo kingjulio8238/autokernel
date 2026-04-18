@@ -22,7 +22,8 @@ class _ShellDefaultGroup(click.Group):
     """
 
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
-        # If no args at all, invoke the shell
+        # Handle --resume and --continue before subcommand resolution.
+        # These are top-level flags that route to the shell with a session.
         if not args:
             args = ["shell"]
         return super().parse_args(ctx, args)
@@ -37,15 +38,49 @@ class _ShellDefaultGroup(click.Group):
 
 @click.group(cls=_ShellDefaultGroup)
 @click.version_option(version="0.1.0", prog_name="kernel-code")
-def main() -> None:
+@click.option("--resume", is_flag=True, default=False, help="Resume the most recent session.")
+@click.option("--continue", "continue_session", type=str, default=None, help="Resume a specific session by ID.")
+@click.pass_context
+def main(ctx: click.Context, resume: bool, continue_session: str | None) -> None:
     """kernel code -- terminal-native GPU kernel optimization tool."""
+    ctx.ensure_object(dict)
+
+    if resume or continue_session:
+        # --resume or --continue: resolve the session and pass to the shell
+        from kernel_code.session import load_latest_session, load_session
+
+        session_id: str | None = None
+
+        if continue_session:
+            # --continue SESSION_ID: validate the session exists
+            try:
+                session = load_session(continue_session)
+                session_id = session.session_id
+            except FileNotFoundError:
+                click.echo(f"Error: session '{continue_session}' not found.", err=True)
+                raise SystemExit(1)
+        else:
+            # --resume: load the latest session
+            latest = load_latest_session()
+            if latest is not None:
+                session_id = latest.session_id
+            else:
+                click.echo("No previous sessions found. Starting fresh.")
+
+        # Store the resolved session_id so the shell command can pick it up
+        ctx.obj["resume_session_id"] = session_id
 
 
 @main.command()
 @click.option("--session", type=str, default=None, help="Resume a specific session ID.")
-def shell(session: str | None) -> None:
+@click.pass_context
+def shell(ctx: click.Context, session: str | None) -> None:
     """Launch the interactive kernel optimization shell (default)."""
     from kernel_code.shell import KernelCodeShell
+
+    # Allow --resume/--continue from the main group to pass through
+    if session is None and ctx.obj:
+        session = ctx.obj.get("resume_session_id")
 
     s = KernelCodeShell(session_id=session)
     try:
@@ -187,6 +222,30 @@ def optimize(
         # Now launch TUI to review the results
         app = KernelCodeApp(session_path=bridge.cache_path)
         app.run()
+
+
+@main.command("run-scheduled")
+def run_scheduled() -> None:
+    """Execute all due scheduled optimization runs."""
+    from kernel_code.scheduler import RunScheduler
+
+    scheduler = RunScheduler()
+    due = scheduler.get_due_runs()
+    if not due:
+        click.echo("No scheduled runs are due.")
+        return
+    click.echo(f"Running {len(due)} scheduled optimization(s)...")
+    for run in due:
+        scheduler.mark_running(run.id)
+        try:
+            # TODO: wire up real optimization engine here
+            # For now, mark as done with placeholder results
+            scheduler.mark_done(run.id, speedup=0.0, cost=0.0)
+            click.echo(f"  [{run.id}] {run.reference_path} -- done")
+        except Exception as exc:
+            scheduler.mark_failed(run.id, str(exc))
+            click.echo(f"  [{run.id}] {run.reference_path} -- FAILED: {exc}")
+    click.echo("All scheduled runs complete.")
 
 
 @main.command()

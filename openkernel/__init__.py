@@ -35,8 +35,21 @@ __all__ = [
     "GenerationError",
     "ProfilingError",
     "KernelBenchError",
+    "sdk",
     "__version__",
 ]
+
+
+def __getattr__(name: str):  # noqa: ANN001
+    """Lazy-load the SDK sub-module on first access.
+
+    Preferred usage: ``import openkernel.sdk as ok``
+    """
+    if name == "sdk":
+        from openkernel import sdk
+
+        return sdk
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 async def optimize(

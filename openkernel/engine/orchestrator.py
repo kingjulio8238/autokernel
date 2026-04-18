@@ -89,6 +89,7 @@ class OptimizationResult:
     trace: OptimizationTrace | None = None  # full trace if capture was enabled
     total_tokens: int = 0  # total LLM tokens consumed across all refinements
     total_cost_usd: float = 0.0  # total estimated cost (LLM + compute)
+    budget_exceeded: bool = False  # True if optimization stopped early due to budget
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +150,7 @@ class Orchestrator:
         self._max_iterations: int = config.get("max_iterations", 100)
         self._stagnation_threshold: int = config.get("stagnation_threshold", 7)
         self._max_retries_per_intent: int = config.get("max_retries_per_intent", 5)
+        self._max_budget_usd: float | None = config.get("max_budget_usd")
 
     def optimize(
         self,
@@ -186,6 +188,7 @@ class Orchestrator:
         intents_succeeded = 0
         intents_failed = 0
         stagnation_triggered = False
+        budget_exceeded = False
 
         # Track which strategies were used (for post-optimization updates)
         active_strategy_ids: list[str] = []
@@ -338,6 +341,28 @@ class Orchestrator:
                     logger.info("No pending intents after stagnation handling — stopping.")
                     break
 
+            # Check budget — estimate cumulative cost so far and stop if exceeded
+            if self._max_budget_usd is not None:
+                _GPU_RATES_CHECK = {
+                    "H100": 3.95,
+                    "A100-80GB": 2.50,
+                    "A100-40GB": 2.10,
+                    "L40S": 2.00,
+                }
+                elapsed = time.monotonic() - start_time
+                gpu_rate_check = _GPU_RATES_CHECK.get(hardware, 3.95)
+                avg_eval_s = (elapsed / total_eval_count) if total_eval_count > 0 else 0.0
+                running_compute = total_eval_count * avg_eval_s * (gpu_rate_check / 3600)
+                running_total = total_llm_cost + running_compute
+                if running_total > self._max_budget_usd:
+                    logger.warning(
+                        "Budget exceeded: $%.2f spent of $%.2f limit — stopping early.",
+                        running_total,
+                        self._max_budget_usd,
+                    )
+                    budget_exceeded = True
+                    break
+
             tree_history.append(tree.serialize())
 
         wall_time = time.monotonic() - start_time
@@ -403,6 +428,7 @@ class Orchestrator:
             trace=optimization_trace,
             total_tokens=total_tokens,
             total_cost_usd=total_cost,
+            budget_exceeded=budget_exceeded,
         )
 
     # -- LLM-driven tree operations ------------------------------------------

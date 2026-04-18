@@ -229,13 +229,15 @@ def create_engine(
         trace_capture = TraceCapture(config=config)
 
     # 8. Orchestrator config dict (the Orchestrator still expects a plain dict)
-    orch_config = {
+    orch_config: dict = {
         "max_iterations": config.max_iterations,
         "stagnation_threshold": config.stagnation_threshold,
         "max_retries_per_intent": config.max_retries_per_intent,
         "model_id": model_config.model_id,
         "traces_dir": f"{config.traces_dir}/raw",
     }
+    if config.max_budget_usd is not None:
+        orch_config["max_budget_usd"] = config.max_budget_usd
 
     # 9. Assemble — pass the real LLM provider for tree operations
     orchestrator = Orchestrator(

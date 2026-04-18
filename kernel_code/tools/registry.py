@@ -73,6 +73,9 @@ def create_default_registry() -> ToolRegistry:
         show_roofline,
         suggest_optimization,
         explain_iteration,
+        read_file,
+        write_file,
+        edit_kernel,
     )
 
     registry = ToolRegistry()
@@ -147,6 +150,33 @@ def create_default_registry() -> ToolRegistry:
         execute=explain_iteration.execute,
         permission="auto",
         category="analysis",
+    ))
+
+    registry.register(KernelTool(
+        name="read_file",
+        description="Read a file and return its contents. Restricted to .py, .json, .yaml, .md, .toml files. Max 200 lines.",
+        parameters={"path": "str - path to the file to read"},
+        execute=read_file.execute,
+        permission="auto",
+        category="management",
+    ))
+
+    registry.register(KernelTool(
+        name="write_file",
+        description="Write content to a file. Restricted to *_optimized.py, *_results.md, or files inside .kernel-code/.",
+        parameters={"path": "str - destination file path", "content": "str - content to write"},
+        execute=write_file.execute,
+        permission="ask",
+        category="management",
+    ))
+
+    registry.register(KernelTool(
+        name="edit_kernel",
+        description="Apply a find/replace edit to the current best kernel code. Useful for making targeted modifications to the optimization.",
+        parameters={"find": "str - exact substring to find in the kernel code", "replace": "str - replacement string"},
+        execute=edit_kernel.execute,
+        permission="ask",
+        category="optimization",
     ))
 
     # ------------------------------------------------------------------

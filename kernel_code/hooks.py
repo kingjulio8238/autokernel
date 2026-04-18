@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 from typing import Any, Callable
 
 from rich.console import Console
@@ -311,6 +312,93 @@ def _make_post_optimize_cache_save(file_cache: Any, console: Console) -> Callabl
     return _hook
 
 
+def _make_post_keep_git(console: Console) -> Callable:
+    """Commit the kept kernel variant to git on the current optimization branch.
+
+    Writes the best kernel code to a temporary file and commits it with a
+    message that includes the iteration number, speedup, and intent.
+    """
+    from kernel_code.git_integration import commit_kept_variant
+
+    def _hook(
+        *,
+        speedup: float,
+        iteration: int,
+        intent: str,
+        kernel_code: str = "",
+        kernel_path: str = "",
+        **_kw: Any,
+    ) -> None:
+        if not kernel_code and not kernel_path:
+            return
+
+        # Determine the file to commit
+        if kernel_path:
+            target = Path(kernel_path)
+        else:
+            # Write kernel code to a predictable file so git tracks it
+            target = Path.cwd() / "kernel.py"
+            target.write_text(kernel_code)
+
+        ok = commit_kept_variant(
+            iteration=iteration,
+            speedup=speedup,
+            intent=intent,
+            kernel_path=target,
+        )
+        if ok:
+            console.print(
+                f"  [cyan]Git:[/cyan] committed iter {iteration} ({speedup:.2f}x)"
+            )
+        else:
+            logger.warning("Git commit failed for iter %d", iteration)
+
+    return _hook
+
+
+def _make_post_iterate_advisor(
+    advisor: Any, console: Console
+) -> Callable:
+    """Update the advisor state after each iteration and print advice when stuck.
+
+    The *advisor* parameter should be an :class:`~kernel_code.advisor.AdvisorState`
+    instance.  When :func:`~kernel_code.advisor.should_advise` returns ``True``,
+    the generated advice is printed in yellow.
+    """
+    from kernel_code.advisor import should_advise as _should_advise
+    from kernel_code.advisor import get_advice as _get_advice
+
+    def _hook(
+        *,
+        iteration: int,
+        speedup: float,
+        status: str,
+        intent: str = "",
+        bottleneck: str = "",
+        **_kw: Any,
+    ) -> str | None:
+        advisor.record_iteration(
+            speedup=speedup,
+            decision=status,
+            intent=intent,
+            bottleneck=bottleneck,
+        )
+        if _should_advise(advisor):
+            advice = _get_advice(advisor)
+            from rich.markup import escape as _escape
+
+            console.print()
+            console.print(
+                f"[bold yellow]Advisor:[/bold yellow] "
+                f"[yellow]{_escape(advice)}[/yellow]"
+            )
+            console.print()
+            return advice
+        return None
+
+    return _hook
+
+
 def _make_pre_optimize_cache_check(file_cache: Any, console: Console) -> Callable:
     """On resume: check if reference file changed since last session."""
 
@@ -356,6 +444,8 @@ def create_default_hooks(
     template_evolver: Any = None,
     file_cache: Any = None,
     console: Console | None = None,
+    git_enabled: bool = False,
+    advisor: Any = None,
 ) -> HookRegistry:
     """Create a HookRegistry with sensible default hooks.
 
@@ -372,6 +462,16 @@ def create_default_hooks(
             If provided, reference file state is tracked and eval results
             are cached across sessions to save GPU costs.
         console: Rich Console to use for output.  Defaults to a new Console.
+        git_enabled: If ``True``, register a ``post_keep`` hook that commits
+            each kept variant to the current git branch.  The caller is
+            responsible for ensuring we are on an ``openkernel/*`` branch
+            before enabling this.  ``revert_discarded`` is **not** registered
+            by default (destructive in shared repos) -- enable it explicitly
+            if needed.
+        advisor: An :class:`~kernel_code.advisor.AdvisorState` instance.  If
+            provided, a ``post_iterate`` hook is registered that tracks
+            optimization progress and prints proactive advice when the
+            optimizer is stuck.
 
     Returns:
         A fully-wired :class:`HookRegistry`.
@@ -385,12 +485,18 @@ def create_default_hooks(
     if file_cache is not None:
         hooks.register(HookRegistry.PRE_OPTIMIZE, _make_pre_optimize_cache_check(file_cache, con))
 
+    # -- post_iterate -------------------------------------------------------
+    if advisor is not None:
+        hooks.register(HookRegistry.POST_ITERATE, _make_post_iterate_advisor(advisor, con))
+
     # -- post_keep ----------------------------------------------------------
     hooks.register(HookRegistry.POST_KEEP, _make_post_keep_log(con))
     if skill_library is not None:
         hooks.register(HookRegistry.POST_KEEP, _make_post_keep_skill_evidence(skill_library))
     if template_evolver is not None:
         hooks.register(HookRegistry.POST_KEEP, _make_post_keep_evolution(template_evolver))
+    if git_enabled:
+        hooks.register(HookRegistry.POST_KEEP, _make_post_keep_git(con))
 
     # -- post_discard -------------------------------------------------------
     hooks.register(HookRegistry.POST_DISCARD, _make_post_discard_log(con))

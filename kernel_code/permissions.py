@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from rich.console import Console
 
+from openkernel.exceptions import BudgetExceededError
+
 # GPU hourly rates (same as orchestrator.py)
 _GPU_RATES: dict[str, float] = {
     "H100": 3.95,
@@ -84,6 +86,17 @@ class BudgetTracker:
     @property
     def total_spent(self) -> float:
         return self._total
+
+    def enforce(self, estimated_additional: float = 0.0) -> None:
+        """Raise BudgetExceededError if budget would be exceeded."""
+        if self._max_budget is not None:
+            projected = self._total_spent + estimated_additional
+            if projected > self._max_budget:
+                raise BudgetExceededError(
+                    budget=self._max_budget,
+                    spent=self._total_spent,
+                    message=f"Would exceed budget: ${projected:.2f} > ${self._max_budget:.2f} limit",
+                )
 
     @property
     def remaining(self) -> float | None:

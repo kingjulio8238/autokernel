@@ -103,6 +103,9 @@ class OpenKernelConfig(BaseModel):
     capture_traces: bool = True
     traces_dir: str = "traces"
 
+    # Budget
+    max_budget_usd: float | None = None  # hard cost cap; None = unlimited
+
     # Profiling
     enable_deep_profiling: bool = False  # RunPod NCU tier (more expensive)
     analytical_prescreen: bool = True  # roofline pre-screening before GPU eval
