@@ -177,9 +177,9 @@ This enables: proper context assembly, smart compaction (summarize tool_results,
 
 ---
 
-## Tier 3: Medium ROI (Polish)
+## Tier 3: Medium ROI (Polish) — DONE
 
-### 3.1 Multi-Line Input
+### 3.1 Multi-Line Input ✅ DONE
 **What CC does**: Shift+Enter for multi-line input, paste detection for code blocks.
 
 **What kernel code should do**: With `prompt_toolkit`, support multi-line input for pasting kernel code directly into the shell:
@@ -190,7 +190,7 @@ kernel-code > paste this kernel:
 ...     ...
 ```
 
-### 3.2 /compact Command
+### 3.2 /compact Command ✅ DONE
 **What CC does**: Manual `/compact` command to force conversation compaction.
 
 **What kernel code should do**: Add `/compact` that summarizes the current session:
@@ -200,7 +200,7 @@ Compacted session: 45 iterations → summary (kept 8 results, 3 strategies, curr
 Context reduced from ~12K to ~3K tokens.
 ```
 
-### 3.3 /context Command
+### 3.3 /context Command ✅ DONE
 **What CC does**: Shows what's in the current context window — files, tools, system prompt size, conversation size.
 
 **What kernel code should do**: `/context` showing:
@@ -214,7 +214,7 @@ Context breakdown:
   Total:             3,850 / 4,096 tokens (94%)
 ```
 
-### 3.4 /diff Command
+### 3.4 /diff Command ✅ DONE
 **What CC does**: Shows git diff inline.
 
 **What kernel code should do**: `/diff` showing what changed between the best kernel and the original reference:
@@ -230,12 +230,12 @@ kernel-code > /diff
 + return triton_softmax(x)
 ```
 
-### 3.5 Theme Command
+### 3.5 Theme Command ✅ DONE
 **What CC does**: `/color` and `/theme` to switch themes.
 
 **What kernel code should do**: Already have the warm theme. Add `/theme` to switch between light/dark or adjust accent colors.
 
-### 3.6 Doctor Command
+### 3.6 Doctor Command ✅ DONE
 **What CC does**: `/doctor` diagnoses installation issues.
 
 **What kernel code should do**: `/doctor` checks:

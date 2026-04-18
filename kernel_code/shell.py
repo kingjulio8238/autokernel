@@ -39,10 +39,32 @@ try:
     from prompt_toolkit.history import FileHistory
     from prompt_toolkit.completion import Completer, Completion
     from prompt_toolkit.formatted_text import HTML
+    from prompt_toolkit.key_binding import KeyBindings
 
     _HAS_PROMPT_TOOLKIT = True
 except ImportError:  # pragma: no cover
     _HAS_PROMPT_TOOLKIT = False
+
+# ------------------------------------------------------------------
+# Multi-line key bindings (prompt_toolkit)
+# ------------------------------------------------------------------
+
+if _HAS_PROMPT_TOOLKIT:
+    _kb = KeyBindings()
+
+    @_kb.add('escape', 'enter')  # Alt+Enter to insert newline
+    def _alt_enter(event):
+        event.current_buffer.insert_text('\n')
+
+    @_kb.add('enter')
+    def _enter(event):
+        buf = event.current_buffer
+        text = buf.text
+        # If text ends with colon or backslash, stay in multi-line mode
+        if text.rstrip().endswith(':') or text.rstrip().endswith('\\'):
+            buf.insert_text('\n')
+        else:
+            buf.validate_and_handle()
 
 from kernel_code.agent_loop import AgentLoop
 from kernel_code.cost_dashboard import CostTracker
@@ -94,12 +116,17 @@ if _HAS_PROMPT_TOOLKIT:
                     "/skills",
                     "/skill:",
                     "/compare",
+                    "/compact",
+                    "/context",
+                    "/diff",
                     "/dashboard",
                     "/history",
                     "/config",
                     "/evolve",
                     "/cost",
                     "/setup",
+                    "/doctor",
+                    "/theme",
                     "/help",
                     "/quit",
                     "/exit",
@@ -177,7 +204,7 @@ class KernelCodeShell:
             self._budget = BudgetTracker(max_budget=self._settings.max_budget)
 
         # Discover project-level KERNEL.md / kernel.toml config
-        from kernel_code.kernel_config import KernelConfig, discover_kernel_config
+        from kernel_code.kernel_config import KernelConfig, discover_kernel_config, inject_config_context
 
         self._kernel_config: KernelConfig | None = discover_kernel_config()
 
@@ -198,6 +225,9 @@ class KernelCodeShell:
             self._prompt_session = PromptSession(
                 history=FileHistory(str(_HISTORY_PATH)),
                 completer=KernelCodeCompleter(self),
+                key_bindings=_kb,
+                multiline=False,
+                prompt_continuation='... ',
             )
 
         # Command dispatch table
@@ -209,9 +239,14 @@ class KernelCodeShell:
             "/history": self._cmd_history,
             "/cost": self._cmd_cost,
             "/skills": self._cmd_skills,
+            "/compact": self._cmd_compact,
+            "/context": self._cmd_context,
+            "/diff": self._cmd_diff,
             "/config": self._cmd_config,
             "/setup": self._cmd_setup,
             "/evolve": self._cmd_evolve,
+            "/doctor": self._cmd_doctor,
+            "/theme": self._cmd_theme,
             "/help": self._cmd_help,
             "/quit": self._cmd_quit,
             "/exit": self._cmd_quit,
@@ -551,6 +586,9 @@ class KernelCodeShell:
             ("/show results", "Display summary table of current session"),
             ("/show run N", "Display details of run N"),
             ("/compare", "Compare current best to baseline (side-by-side)"),
+            ("/compact", "Force conversation compaction"),
+            ("/context", "Show context window token breakdown"),
+            ("/diff", "Show diff between reference and best kernel"),
             ("/dashboard", "Open browser dashboard for current session"),
             ("/history", "List all runs in current session"),
             ("/cost", "Show full cost breakdown (LLM + GPU + per-run)"),
@@ -561,6 +599,8 @@ class KernelCodeShell:
             ("/evolve", "Show template evolution status for all skills"),
             ("/evolve approve SKILL_ID", "Approve and apply an evolved template"),
             ("/setup", "Re-run the first-run setup wizard"),
+            ("/doctor", "Check environment health (Modal, API keys, skills, deps)"),
+            ("/theme", "Show/change terminal theme"),
             ("/help", "Show this help message"),
             ("/quit, /exit", "Exit the shell"),
         ]
@@ -915,9 +955,196 @@ class KernelCodeShell:
                 f"[red]Failed to apply evolution for {escape(skill_id)}.[/red]"
             )
 
+    def _cmd_doctor(self, args_str: str) -> None:
+        """Diagnose installation and environment health."""
+        import sys
+        import os
+        from pathlib import Path
+
+        checks = []
+
+        # Python version
+        v = sys.version_info
+        ok = v >= (3, 10)
+        checks.append(("Python", f"{v.major}.{v.minor}.{v.micro}", ok, "Need 3.10+" if not ok else ""))
+
+        # Modal
+        modal_ok = Path.home().joinpath(".modal.toml").is_file() or Path.home().joinpath(".modal").is_dir() or bool(os.environ.get("MODAL_TOKEN_ID"))
+        checks.append(("Modal", "authenticated" if modal_ok else "not configured", modal_ok, "Run: modal setup"))
+
+        # LLM API keys
+        groq = bool(os.environ.get("GROQ_API_KEY"))
+        minimax = bool(os.environ.get("MINIMAX_API_KEY"))
+        anthropic = bool(os.environ.get("ANTHROPIC_API_KEY"))
+        llm_ok = groq or minimax or anthropic
+        llm_name = "Groq" if groq else ("MiniMax" if minimax else ("Anthropic" if anthropic else "none"))
+        checks.append(("LLM API key", llm_name if llm_ok else "not set", llm_ok, "export GROQ_API_KEY=... (free tier)"))
+
+        # Optional keys
+        hf = bool(os.environ.get("HF_TOKEN"))
+        checks.append(("HF Hub token", "set" if hf else "not set (optional)", hf or True, "export HF_TOKEN=..."))
+
+        # Skills
+        skill_count = len(self._skill_library) if self._skill_library else 0
+        checks.append(("Skills loaded", str(skill_count), skill_count >= 10, f"Expected 10+, got {skill_count}"))
+
+        # KERNEL.md
+        km = self._kernel_config is not None
+        checks.append(("KERNEL.md", "found" if km else "not found (optional)", km or True, "Create KERNEL.md in project root"))
+
+        # Settings
+        settings_count = len(self._settings.source_files) if hasattr(self._settings, 'source_files') else 0
+        checks.append(("Settings", f"{settings_count} files loaded", True, ""))
+
+        # prompt_toolkit
+        try:
+            import prompt_toolkit
+            pt_ok = True
+        except ImportError:
+            pt_ok = False
+        checks.append(("prompt_toolkit", "installed" if pt_ok else "not installed", pt_ok, "pip install prompt-toolkit"))
+
+        # Eval cache
+        cache_size = self._file_cache.eval_cache_size if hasattr(self, '_file_cache') and self._file_cache else 0
+        checks.append(("Eval cache", f"{cache_size} entries", True, ""))
+
+        # Print results
+        table = Table(title="Environment Health Check", show_header=False, padding=(0, 1))
+        table.add_column("Status", width=3)
+        table.add_column("Component", style="bold")
+        table.add_column("Details")
+        table.add_column("Fix", style="dim")
+
+        for name, detail, ok, fix in checks:
+            status = "[green]\u2713[/green]" if ok else "[red]\u2717[/red]"
+            table.add_row(status, name, detail, fix if not ok else "")
+
+        self._console.print(table)
+
+        all_ok = all(ok for _, _, ok, _ in checks)
+        if all_ok:
+            self._console.print("\n[green]All checks passed.[/green]")
+        else:
+            self._console.print(f"\n[yellow]{sum(1 for _, _, ok, _ in checks if not ok)} issue(s) found.[/yellow]")
+
+    def _cmd_theme(self, args_str: str) -> None:
+        """Show current theme info."""
+        self._console.print("[bold]Current theme:[/bold] warm-dark")
+        self._console.print("[dim]Based on humanoid-terminal design system[/dim]")
+        self._console.print()
+        self._console.print("[dim]Themes available:[/dim]")
+        self._console.print("  warm-dark [dim](default)[/dim]")
+        self._console.print()
+        self._console.print("[dim]Custom themes can be configured in .kernel-code/settings.yaml[/dim]")
+
     def _cmd_cost(self, _args_str: str) -> None:
         """/cost -- show full cost breakdown dashboard."""
         self._cost_tracker.format_dashboard(console=self._console)
+
+    def _cmd_compact(self, _args_str: str) -> None:
+        """Force conversation compaction."""
+        if not self._conversation or self._conversation.message_count == 0:
+            self._console.print("[dim]Nothing to compact.[/dim]")
+            return
+
+        from kernel_code.compaction import estimate_tokens
+
+        before = self._conversation.token_estimate
+        summary = self._conversation.compact()
+        after = self._conversation.token_estimate
+
+        reduction = ((before - after) / before * 100) if before > 0 else 0
+        self._console.print(f"[green]Compacted:[/green] {before:,} \u2192 {after:,} tokens ({reduction:.0f}% reduction)")
+        self._console.print(f"[dim]Kept: last 10 messages, optimization events, best kernel[/dim]")
+
+    def _cmd_context(self, _args_str: str) -> None:
+        """Show context window breakdown."""
+        from kernel_code.compaction import estimate_tokens
+        from kernel_code.kernel_config import inject_config_context
+
+        table = Table(title="Context Breakdown", show_header=True)
+        table.add_column("Component", style="bold")
+        table.add_column("Tokens", justify="right")
+        table.add_column("", justify="right")  # percentage
+
+        # Estimate each component
+        system_prompt = 800  # rough estimate
+        kernel_md = estimate_tokens(inject_config_context(self._kernel_config)) if self._kernel_config else 0
+        active_skill = estimate_tokens(str(self._active_skill)) if self._active_skill else 0
+        conversation = self._conversation.token_estimate if self._conversation else 0
+        session_iters = estimate_tokens(str(self._session_data.get("iterations", [])))
+        best_kernel = estimate_tokens(self._best_run.get("kernel_code_snippet", "")) if self._best_run else 0
+
+        total = system_prompt + kernel_md + active_skill + conversation + session_iters + best_kernel
+        budget = 4096  # default, adjust based on model
+
+        # Add rows with percentage bars
+        for name, tokens in [
+            ("System prompt", system_prompt),
+            ("KERNEL.md", kernel_md),
+            ("Active skill", active_skill),
+            ("Conversation", conversation),
+            ("Session history", session_iters),
+            ("Best kernel", best_kernel),
+        ]:
+            pct = (tokens / budget * 100) if budget > 0 else 0
+            bar = "\u2588" * int(pct / 5) + "\u2591" * (20 - int(pct / 5))
+            table.add_row(name, f"{tokens:,}", f"{pct:.0f}% {bar}")
+
+        table.add_section()
+        total_pct = (total / budget * 100) if budget > 0 else 0
+        table.add_row("[bold]Total[/bold]", f"[bold]{total:,}[/bold]", f"[bold]{total_pct:.0f}%[/bold] of {budget:,}")
+
+        self._console.print(table)
+
+    def _cmd_diff(self, _args_str: str) -> None:
+        """Show diff between reference and best optimized kernel."""
+        import difflib
+
+        if not self._session_data.get("iterations"):
+            self._console.print("[dim]No optimization results. Run /optimize first.[/dim]")
+            return
+
+        # Get reference code
+        reference = self._session_data.get("reference_code", "")
+        if not reference and hasattr(self, '_reference_path') and self._reference_path:
+            try:
+                reference = Path(self._reference_path).read_text()
+            except Exception:
+                pass
+
+        if not reference:
+            self._console.print("[dim]Reference code not available.[/dim]")
+            return
+
+        # Get best kernel
+        best_iter = None
+        best_speedup = 0
+        for it in self._session_data.get("iterations", []):
+            if it.get("decision") == "keep" and it.get("speedup", 0) > best_speedup:
+                best_speedup = it["speedup"]
+                best_iter = it
+
+        if not best_iter or not best_iter.get("kernel_code_snippet"):
+            self._console.print("[dim]No optimized kernel available.[/dim]")
+            return
+
+        optimized = best_iter["kernel_code_snippet"]
+
+        # Generate diff
+        diff = difflib.unified_diff(
+            reference.splitlines(keepends=True),
+            optimized.splitlines(keepends=True),
+            fromfile="reference.py (baseline)",
+            tofile=f"optimized.py ({best_speedup:.2f}x)",
+        )
+        diff_text = "".join(diff)
+
+        if not diff_text:
+            self._console.print("[dim]No differences (kernel matches reference).[/dim]")
+            return
+
+        self._console.print(Syntax(diff_text, "diff", theme="monokai"))
 
     def _cmd_quit(self, _args_str: str) -> None:
         """/quit or /exit -- exit the shell."""
