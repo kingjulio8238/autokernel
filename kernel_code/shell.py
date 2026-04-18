@@ -1047,8 +1047,6 @@ class KernelCodeShell:
             self._console.print("[dim]Nothing to compact.[/dim]")
             return
 
-        from kernel_code.compaction import estimate_tokens
-
         before = self._conversation.token_estimate
         summary = self._conversation.compact()
         after = self._conversation.token_estimate
