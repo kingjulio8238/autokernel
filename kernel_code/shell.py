@@ -34,6 +34,7 @@ from rich.text import Text
 
 from kernel_code.agent_loop import AgentLoop
 from kernel_code.hooks import HookRegistry, create_default_hooks
+from kernel_code.onboarding import needs_onboarding, run_onboarding
 from kernel_code.permissions import BudgetTracker, confirm_cost, estimate_cost
 from kernel_code.settings import (
     KernelCodeSettings,
@@ -42,6 +43,7 @@ from kernel_code.settings import (
     settings_to_config,
     _FIELD_TYPES,
 )
+from kernel_code.template_evolution import TemplateEvolver
 
 # Project root -- cache lives at repo root
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -59,9 +61,18 @@ class KernelCodeShell:
         self._session_data: dict = {}
         self._total_cost: float = 0.0
         self._budget = BudgetTracker()
-        self._hooks: HookRegistry = create_default_hooks(console=self._console)
         self._active_skill: dict | None = None
         self._skill_library: list[dict] = self._load_skills()
+
+        # Template evolution — tracks winning kernels for flywheel feedback
+        self._template_evolver = TemplateEvolver(
+            evolution_dir=_PROJECT_ROOT / ".kernel-code" / "evolution"
+        )
+
+        self._hooks: HookRegistry = create_default_hooks(
+            template_evolver=self._template_evolver,
+            console=self._console,
+        )
 
         # Load hierarchical settings (global -> project -> local)
         self._settings: KernelCodeSettings = load_settings()
@@ -87,6 +98,8 @@ class KernelCodeShell:
             "/history": self._cmd_history,
             "/skills": self._cmd_skills,
             "/config": self._cmd_config,
+            "/setup": self._cmd_setup,
+            "/evolve": self._cmd_evolve,
             "/help": self._cmd_help,
             "/quit": self._cmd_quit,
             "/exit": self._cmd_quit,
@@ -98,6 +111,16 @@ class KernelCodeShell:
 
     def run(self) -> None:
         """Main REPL loop."""
+        if needs_onboarding():
+            run_onboarding(console=self._console)
+            # Reload settings after onboarding creates them
+            self._settings = load_settings()
+            if self._settings.max_budget is not None:
+                self._budget = BudgetTracker(max_budget=self._settings.max_budget)
+            # Re-discover kernel config in case KERNEL.md was created
+            from kernel_code.kernel_config import discover_kernel_config
+            self._kernel_config = discover_kernel_config()
+
         self._print_welcome()
         while True:
             user_input = self._prompt()
@@ -408,6 +431,9 @@ class KernelCodeShell:
             ("/config set KEY VALUE", "Update a project setting"),
             ("/skills", "List all available optimization skills"),
             ("/skill:NAME", "Load a skill as seed for next /optimize"),
+            ("/evolve", "Show template evolution status for all skills"),
+            ("/evolve approve SKILL_ID", "Approve and apply an evolved template"),
+            ("/setup", "Re-run the first-run setup wizard"),
             ("/help", "Show this help message"),
             ("/quit, /exit", "Exit the shell"),
         ]
@@ -604,6 +630,171 @@ class KernelCodeShell:
             f"[green]Updated:[/green] {key} = {new_value}  "
             f"[dim](saved to {path})[/dim]"
         )
+
+    def _cmd_setup(self, _args_str: str) -> None:
+        """/setup -- re-run the first-run onboarding wizard."""
+        run_onboarding(console=self._console)
+        # Reload settings after onboarding
+        self._settings = load_settings()
+        if self._settings.max_budget is not None:
+            self._budget = BudgetTracker(max_budget=self._settings.max_budget)
+        from kernel_code.kernel_config import discover_kernel_config
+        self._kernel_config = discover_kernel_config()
+
+    def _cmd_evolve(self, args_str: str) -> None:
+        """/evolve -- show evolution status.  /evolve approve SKILL_ID -- apply evolved template."""
+        tokens = args_str.strip().split()
+
+        if not tokens:
+            self._show_evolution_status()
+            return
+
+        if tokens[0].lower() == "approve" and len(tokens) >= 2:
+            skill_id = tokens[1]
+            self._approve_evolution(skill_id)
+            return
+
+        if tokens[0].lower() == "propose" and len(tokens) >= 2:
+            skill_id = tokens[1]
+            self._propose_evolution(skill_id)
+            return
+
+        self._console.print(
+            "[dim]Usage:[/dim] /evolve  |  /evolve approve SKILL_ID  |  /evolve propose SKILL_ID"
+        )
+
+    def _show_evolution_status(self) -> None:
+        """Display template evolution status for all tracked skills."""
+        status = self._template_evolver.get_evolution_status()
+
+        if not status:
+            self._console.print(
+                "[dim]No evolution data yet. Winning kernels are recorded "
+                "automatically during /optimize runs.[/dim]"
+            )
+            return
+
+        self._console.print()
+        self._console.print("[bold]Template Evolution Status[/bold]")
+        self._console.print()
+
+        table = Table(
+            show_header=True,
+            header_style="bold",
+            border_style="dim",
+            pad_edge=False,
+        )
+        table.add_column("Skill ID", style="cyan", width=26)
+        table.add_column("Wins", width=6, justify="right")
+        table.add_column("Avg Speedup", width=12, justify="right")
+        table.add_column("Status", width=14)
+        table.add_column("Top Patterns", ratio=1)
+
+        for entry in status:
+            wins = str(entry["wins"])
+            avg_spd = f"{entry['avg_speedup']:.2f}x"
+            patterns = ", ".join(entry["top_patterns"][:3]) if entry["top_patterns"] else "[dim]--[/dim]"
+
+            if entry["approved"]:
+                status_str = "[green]applied[/green]"
+            elif entry["has_proposal"]:
+                status_str = "[yellow]pending approval[/yellow]"
+            elif entry["ready_to_evolve"]:
+                status_str = "[bold cyan]ready[/bold cyan]"
+            else:
+                remaining = 5 - entry["wins"]
+                status_str = f"[dim]{remaining} more win{'s' if remaining != 1 else ''}[/dim]"
+
+            table.add_row(entry["skill_id"], wins, avg_spd, status_str, patterns)
+
+        self._console.print(table)
+        self._console.print()
+
+        # Hint for actionable skills
+        ready = [e for e in status if e["ready_to_evolve"] and not e["approved"]]
+        if ready:
+            if any(e["has_proposal"] for e in ready):
+                self._console.print(
+                    "[dim]Use [bold]/evolve approve SKILL_ID[/bold] to apply a pending proposal.[/dim]"
+                )
+            else:
+                self._console.print(
+                    "[dim]Use [bold]/evolve propose SKILL_ID[/bold] to generate an evolved template.[/dim]"
+                )
+            self._console.print()
+
+    def _propose_evolution(self, skill_id: str) -> None:
+        """Generate an evolved template proposal using the LLM."""
+        if not self._template_evolver.should_evolve(skill_id):
+            state = self._template_evolver._states.get(skill_id)
+            wins = len(state.wins) if state else 0
+            self._console.print(
+                f"[red]Not enough wins:[/red] {skill_id} has {wins}/5 wins needed."
+            )
+            return
+
+        # Find the original template from the skill library
+        original_template = None
+        for skill in self._skill_library:
+            if skill.get("id") == skill_id:
+                original_template = skill.get("code_template", "")
+                break
+
+        self._console.print(f"[dim]Generating evolved template for {escape(skill_id)}...[/dim]")
+
+        try:
+            from openkernel.config import ModelConfig
+            from openkernel.llm.provider import LLMProvider
+
+            provider = LLMProvider(ModelConfig())
+            evolved = asyncio.run(
+                self._template_evolver.propose_evolution(
+                    skill_id, llm_provider=provider, original_template=original_template
+                )
+            )
+
+            self._console.print()
+            self._console.print(f"[bold green]Proposed evolution for {escape(skill_id)}:[/bold green]")
+            self._console.print()
+            syntax = Syntax(evolved, "python", theme="monokai", line_numbers=True, padding=1)
+            self._console.print(syntax)
+            self._console.print()
+            self._console.print(
+                f"[dim]Run [bold]/evolve approve {escape(skill_id)}[/bold] to apply this template.[/dim]"
+            )
+            self._console.print()
+
+        except Exception as exc:
+            self._console.print(f"[red]Evolution failed:[/red] {escape(str(exc))}")
+
+    def _approve_evolution(self, skill_id: str) -> None:
+        """Approve and apply an evolved template to the skill library."""
+        state = self._template_evolver._states.get(skill_id)
+        if state is None or state.evolved_template is None:
+            self._console.print(
+                f"[red]No pending evolution for {escape(skill_id)}.[/red] "
+                f"Run [bold]/evolve propose {escape(skill_id)}[/bold] first."
+            )
+            return
+
+        # We need a SkillLibrary instance to apply the evolution
+        from openkernel.memory.skill_library import SkillLibrary
+
+        lib = SkillLibrary(skills_dir=_PROJECT_ROOT / "data" / "skills")
+        lib.load()
+
+        success = self._template_evolver.approve_evolution(skill_id, lib)
+        if success:
+            # Reload the shell's skill list
+            self._skill_library = self._load_skills()
+            self._console.print(
+                f"[bold green]Applied:[/bold green] Evolved template for "
+                f"{escape(skill_id)} saved to data/skills/."
+            )
+        else:
+            self._console.print(
+                f"[red]Failed to apply evolution for {escape(skill_id)}.[/red]"
+            )
 
     def _cmd_quit(self, _args_str: str) -> None:
         """/quit or /exit -- exit the shell."""

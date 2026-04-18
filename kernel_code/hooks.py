@@ -164,6 +164,35 @@ def _make_post_keep_skill_evidence(skill_library: Any) -> Callable:
     return _hook
 
 
+def _make_post_keep_evolution(template_evolver: Any) -> Callable:
+    """Record a winning kernel in the template evolver for flywheel feedback."""
+
+    def _hook(
+        *,
+        speedup: float,
+        iteration: int,
+        intent: str,
+        kernel_code: str = "",
+        hardware: str = "",
+        backend: str = "",
+        skill_id: str | None = None,
+        **_kw: Any,
+    ) -> None:
+        if template_evolver is None or not kernel_code:
+            return
+        # Use skill_id if available, otherwise fall back to a generic label
+        sid = skill_id or "unknown"
+        template_evolver.record_win(
+            skill_id=sid,
+            kernel_code=kernel_code,
+            speedup=speedup,
+            hardware=hardware,
+            backend=backend,
+        )
+
+    return _hook
+
+
 def _make_post_discard_log(console: Console) -> Callable:
     """Log when an iteration is discarded."""
 
@@ -266,6 +295,7 @@ def _make_post_optimize_dashboard_link(console: Console) -> Callable:
 def create_default_hooks(
     session_mod: Any = None,
     skill_library: Any = None,
+    template_evolver: Any = None,
     console: Console | None = None,
 ) -> HookRegistry:
     """Create a HookRegistry with sensible default hooks.
@@ -276,6 +306,9 @@ def create_default_hooks(
             ``post_optimize`` save hook is omitted.
         skill_library: A :class:`~openkernel.memory.skill_library.SkillLibrary`
             instance.  If provided, successful iterations record evidence.
+        template_evolver: A :class:`~kernel_code.template_evolution.TemplateEvolver`
+            instance.  If provided, winning kernels are recorded for template
+            evolution (flywheel feedback).
         console: Rich Console to use for output.  Defaults to a new Console.
 
     Returns:
@@ -292,6 +325,8 @@ def create_default_hooks(
     hooks.register(HookRegistry.POST_KEEP, _make_post_keep_log(con))
     if skill_library is not None:
         hooks.register(HookRegistry.POST_KEEP, _make_post_keep_skill_evidence(skill_library))
+    if template_evolver is not None:
+        hooks.register(HookRegistry.POST_KEEP, _make_post_keep_evolution(template_evolver))
 
     # -- post_discard -------------------------------------------------------
     hooks.register(HookRegistry.POST_DISCARD, _make_post_discard_log(con))
