@@ -50,6 +50,14 @@ _FIELD_TYPES: dict[str, type] = {
     "show_trajectory": bool,
     "vi_mode": bool,
     "verbosity": str,
+    # API keys (stored in settings.local.yaml, gitignored)
+    "groq_api_key": str,
+    "minimax_api_key": str,
+    "anthropic_api_key": str,
+    "openai_api_key": str,
+    "hf_token": str,
+    "modal_token_id": str,
+    "modal_token_secret": str,
 }
 
 
@@ -81,6 +89,16 @@ class KernelCodeSettings:
     # Shell / UX
     vi_mode: bool = False  # prompt_toolkit vi keybindings
     verbosity: str = "normal"  # "quiet" | "normal" | "verbose"
+
+    # API Keys (stored in settings.local.yaml — gitignored, never committed)
+    # Set via: /config set groq_api_key YOUR_KEY
+    groq_api_key: str | None = None
+    minimax_api_key: str | None = None
+    anthropic_api_key: str | None = None
+    openai_api_key: str | None = None
+    hf_token: str | None = None
+    modal_token_id: str | None = None
+    modal_token_secret: str | None = None
 
     # Internal: tracks which files were merged (in order)
     source_files: list[str] = field(default_factory=list)
@@ -223,9 +241,14 @@ def save_settings(settings: KernelCodeSettings, path: Path) -> None:
 def save_project_setting(key: str, value: object, start_dir: Path | None = None) -> Path:
     """Update a single key in the project settings file.
 
-    Creates ``.kernel-code/settings.yaml`` if it doesn't exist.
+    API keys are automatically routed to ``settings.local.yaml`` (gitignored).
+    Other settings go to ``settings.yaml``.
     Returns the path that was written.
     """
+    # Route API keys to save_api_key (writes to local file)
+    if key in _API_KEY_ENV_MAP:
+        return save_api_key(key, str(value), start_dir)
+
     import yaml  # type: ignore[import-untyped]
 
     project_dir = _find_project_dir(start_dir)
@@ -242,6 +265,96 @@ def save_project_setting(key: str, value: object, start_dir: Path | None = None)
         yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
     return path
+
+
+# ------------------------------------------------------------------
+# API Key Management
+# ------------------------------------------------------------------
+
+# Mapping: settings key → environment variable name
+_API_KEY_ENV_MAP = {
+    "groq_api_key": "GROQ_API_KEY",
+    "minimax_api_key": "MINIMAX_API_KEY",
+    "anthropic_api_key": "ANTHROPIC_API_KEY",
+    "openai_api_key": "OPENAI_API_KEY",
+    "hf_token": "HF_TOKEN",
+    "modal_token_id": "MODAL_TOKEN_ID",
+    "modal_token_secret": "MODAL_TOKEN_SECRET",
+}
+
+
+def inject_api_keys(settings: KernelCodeSettings) -> int:
+    """Inject API keys from settings into environment variables.
+
+    Only sets env vars that are not already set (env takes precedence).
+    Returns the number of keys injected.
+    """
+    import os
+
+    count = 0
+    for settings_key, env_var in _API_KEY_ENV_MAP.items():
+        value = getattr(settings, settings_key, None)
+        if value and not os.environ.get(env_var):
+            os.environ[env_var] = value
+            count += 1
+    return count
+
+
+def save_api_key(key: str, value: str, start_dir: Path | None = None) -> Path:
+    """Save an API key to the LOCAL (gitignored) settings file.
+
+    API keys are always saved to ``settings.local.yaml`` to prevent
+    accidental commits. Returns the path that was written.
+    """
+    import yaml  # type: ignore[import-untyped]
+
+    # Validate key
+    if key not in _API_KEY_ENV_MAP and key not in _FIELD_TYPES:
+        raise ValueError(f"Unknown setting: {key}")
+
+    project_dir = _find_project_dir(start_dir)
+    if project_dir is None:
+        project_dir = (start_dir or Path.cwd()).resolve() / _PROJECT_DIR_NAME
+        project_dir.mkdir(parents=True, exist_ok=True)
+
+    # API keys go to local settings (gitignored)
+    if key in _API_KEY_ENV_MAP:
+        path = project_dir / _LOCAL_SETTINGS_FILE
+    else:
+        path = project_dir / _SETTINGS_FILE
+
+    data = _load_yaml(path)
+    data[key] = value
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+
+    # Also inject into current process environment
+    env_var = _API_KEY_ENV_MAP.get(key)
+    if env_var:
+        import os
+        os.environ[env_var] = value
+
+    return path
+
+
+def get_configured_providers(settings: KernelCodeSettings) -> list[dict]:
+    """List all configured LLM/infra providers with status."""
+    import os
+
+    providers = []
+    for settings_key, env_var in _API_KEY_ENV_MAP.items():
+        value = getattr(settings, settings_key, None) or os.environ.get(env_var)
+        name = settings_key.replace("_api_key", "").replace("_token", "").replace("_", " ").title()
+        providers.append({
+            "name": name,
+            "env_var": env_var,
+            "settings_key": settings_key,
+            "configured": bool(value),
+            "source": "settings" if getattr(settings, settings_key, None) else ("env" if os.environ.get(env_var) else "not set"),
+        })
+    return providers
 
 
 # ------------------------------------------------------------------

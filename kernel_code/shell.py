@@ -87,7 +87,10 @@ from kernel_code.settings import (
     load_settings,
     save_project_setting,
     settings_to_config,
+    inject_api_keys,
+    get_configured_providers,
     _FIELD_TYPES,
+    _API_KEY_ENV_MAP,
 )
 from kernel_code.skill_trigger import suggest_skills, format_skill_suggestions
 from kernel_code.iteration_formatter import format_iteration_line, format_optimization_header
@@ -135,6 +138,7 @@ if _HAS_PROMPT_TOOLKIT:
                     "/evolve",
                     "/cost",
                     "/setup",
+                    "/providers",
                     "/doctor",
                     "/theme",
                     "/help",
@@ -213,6 +217,9 @@ class KernelCodeShell:
         # Load hierarchical settings (global -> project -> local)
         self._settings: KernelCodeSettings = load_settings()
 
+        # Inject API keys from settings into environment
+        injected = inject_api_keys(self._settings)
+
         # Apply budget cap from settings
         if self._settings.max_budget is not None:
             self._budget = BudgetTracker(max_budget=self._settings.max_budget)
@@ -266,6 +273,7 @@ class KernelCodeShell:
             "/evolve": self._cmd_evolve,
             "/doctor": self._cmd_doctor,
             "/theme": self._cmd_theme,
+            "/providers": self._cmd_providers,
             "/help": self._cmd_help,
             "/quit": self._cmd_quit,
             "/exit": self._cmd_quit,
@@ -845,6 +853,7 @@ class KernelCodeShell:
                 "/doctor",
                 "Check environment health (Modal, API keys, skills, deps)",
             ),
+            ("/providers", "Show/set LLM provider API keys"),
             ("/theme", "Show/change terminal theme"),
             ("/help", "Show this help message"),
             ("/quit, /exit", "Exit the shell"),
@@ -1233,6 +1242,48 @@ class KernelCodeShell:
             self._console.print(
                 f"[red]Failed to apply evolution for {escape(skill_id)}.[/red]"
             )
+
+    def _cmd_providers(self, args_str: str) -> None:
+        """Show configured LLM/infra providers and set API keys."""
+        args = args_str.strip()
+
+        # /providers set groq_api_key VALUE
+        if args.startswith("set "):
+            parts = args[4:].strip().split(None, 1)
+            if len(parts) != 2:
+                self._console.print("[white]Usage: /providers set KEY VALUE[/white]")
+                self._console.print("[white]Keys: groq_api_key, minimax_api_key, anthropic_api_key, openai_api_key, hf_token[/white]")
+                return
+            key, value = parts
+            if key not in _API_KEY_ENV_MAP:
+                self._console.print(f"[red]Unknown provider key: {key}[/red]")
+                self._console.print(f"[white]Valid keys: {', '.join(_API_KEY_ENV_MAP.keys())}[/white]")
+                return
+            from kernel_code.settings import save_api_key
+            path = save_api_key(key, value)
+            self._console.print(f"[#4ade80]Saved {key} to {path}[/#4ade80]")
+            self._console.print(f"[white]Env var {_API_KEY_ENV_MAP[key]} is now active[/white]")
+            # Reload settings
+            self._settings = load_settings()
+            inject_api_keys(self._settings)
+            return
+
+        # Show provider status
+        providers = get_configured_providers(self._settings)
+        table = Table(title="LLM & Infrastructure Providers", show_header=True, border_style="white")
+        table.add_column("Provider", style="bold white")
+        table.add_column("Env Variable", style="white")
+        table.add_column("Status", justify="center")
+        table.add_column("Source", style="white")
+
+        for p in providers:
+            status = "[#4ade80]✓ configured[/#4ade80]" if p["configured"] else "[#ef4444]✗ not set[/#ef4444]"
+            table.add_row(p["name"], p["env_var"], status, p["source"])
+
+        self._console.print(table)
+        self._console.print()
+        self._console.print("[white]Set a key: /providers set groq_api_key YOUR_KEY[/white]")
+        self._console.print("[white]Keys are saved to .kernel-code/settings.local.yaml (gitignored)[/white]")
 
     def _cmd_doctor(self, args_str: str) -> None:
         """Diagnose installation and environment health."""
