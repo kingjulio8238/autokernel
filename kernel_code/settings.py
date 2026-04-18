@@ -48,6 +48,8 @@ _FIELD_TYPES: dict[str, type] = {
     "dashboard_port": int,
     "show_profiling": bool,
     "show_trajectory": bool,
+    "vi_mode": bool,
+    "verbosity": str,
 }
 
 
@@ -75,6 +77,10 @@ class KernelCodeSettings:
     # Display
     show_profiling: bool = True
     show_trajectory: bool = True
+
+    # Shell / UX
+    vi_mode: bool = False  # prompt_toolkit vi keybindings
+    verbosity: str = "normal"  # "quiet" | "normal" | "verbose"
 
     # Internal: tracks which files were merged (in order)
     source_files: list[str] = field(default_factory=list)

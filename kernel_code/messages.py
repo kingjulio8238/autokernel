@@ -122,17 +122,30 @@ class ConversationHistory:
 
         return context
 
-    def compact(self) -> str:
+    def compact(self, strategy: str = "balanced") -> str:
         """Compact old messages into a summary, keeping recent ones.
+
+        Strategies:
+          - "balanced" (default): keep last 10 messages, summarize the rest.
+          - "aggressive": keep only last 3 messages + summary.
+          - "minimal": keep only last 1 message + summary.
 
         Returns the summary that replaced the old messages.
         """
         if len(self._messages) <= 20:
             return ""
 
-        # Keep the last 10 messages, summarize the rest
-        old_messages = self._messages[:-10]
-        recent_messages = self._messages[-10:]
+        # Determine how many recent messages to keep based on strategy
+        if strategy == "aggressive":
+            keep_n = 3
+        elif strategy == "minimal":
+            keep_n = 1
+        else:  # balanced
+            keep_n = 10
+
+        # Keep the last N messages, summarize the rest
+        old_messages = self._messages[:-keep_n]
+        recent_messages = self._messages[-keep_n:]
 
         # Build summary from old messages
         user_count = sum(1 for m in old_messages if m.role == MessageRole.USER)

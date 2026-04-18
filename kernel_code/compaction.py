@@ -28,10 +28,21 @@ def should_compact(session_data: dict, max_context_tokens: int = 3000) -> bool:
     return len(iterations) > 20
 
 
-def compact_session(session_data: dict, max_tokens: int = 3000) -> str:
+def compact_session(
+    session_data: dict,
+    max_tokens: int = 3000,
+    strategy: str = "balanced",
+) -> str:
     """Summarise a long session into concise context.
 
-    Keeps (in priority order):
+    Strategies:
+      - "balanced" (default): top 5 kept, failed categories, bottleneck,
+        untried approaches.  Target ~3000 tokens.
+      - "aggressive": only best kernel code (10 lines) + best speedup +
+        problem info.  Everything else dropped.  Target ~500 tokens.
+      - "minimal": single-line summary.  Target ~200 tokens.
+
+    Keeps (in priority order for *balanced*):
       1. Current best kernel code (first 15 lines)
       2. Best speedup + problem info
       3. Top 5 kept optimisations (iter#, speedup, intent)
@@ -46,19 +57,58 @@ def compact_session(session_data: dict, max_tokens: int = 3000) -> str:
       - Individual discarded iteration details
       - Duplicate / similar intents
     """
-    max_chars = max_tokens * 4  # inverse of estimate_tokens
-    parts: list[str] = []
-
     iterations: list[dict] = session_data.get("iterations", [])
     kept = [it for it in iterations if it.get("decision") == "keep" or it.get("status") == "keep"]
-    errors = [it for it in iterations if it.get("status") in ("compile_error", "incorrect", "error")]
-    discarded = [it for it in iterations if it.get("decision") == "discard" or it.get("status") == "discard"]
 
     best_speedup = session_data.get("best_speedup", 0.0)
     for it in iterations:
         sp = it.get("speedup", 0.0)
         if sp and sp > best_speedup:
             best_speedup = sp
+
+    # ------------------------------------------------------------------
+    # "minimal" strategy -- single-line summary (~200 tokens)
+    # ------------------------------------------------------------------
+    if strategy == "minimal":
+        max_chars = 200 * 4
+        latest_profile = _latest_profile(iterations)
+        bottleneck = "unknown"
+        if latest_profile:
+            bottleneck = latest_profile.get("bottleneck_type", "unknown")
+        context = (
+            f"Best: {best_speedup:.1f}x on {session_data.get('problem', 'unknown')}, "
+            f"tried {len(iterations)} approaches, current bottleneck: {bottleneck}"
+        )
+        return context[:max_chars]
+
+    # ------------------------------------------------------------------
+    # "aggressive" strategy -- best kernel + key stats (~500 tokens)
+    # ------------------------------------------------------------------
+    if strategy == "aggressive":
+        max_chars = 500 * 4
+        parts: list[str] = []
+        parts.append(
+            f"=== Compacted (aggressive) ===\n"
+            f"Problem: {session_data.get('problem', 'unknown')}\n"
+            f"Total iterations: {len(iterations)}  |  Best speedup: {best_speedup:.2f}x"
+        )
+        best_code = _best_kernel_snippet(iterations, best_speedup)
+        if best_code:
+            code_lines = best_code.strip().splitlines()[:10]
+            parts.append("=== Best Kernel (first 10 lines) ===\n" + "\n".join(code_lines))
+        context = "\n\n".join(parts)
+        if len(context) > max_chars:
+            context = context[:max_chars] + "\n... (truncated)"
+        return context
+
+    # ------------------------------------------------------------------
+    # "balanced" strategy (default) -- full summary (~3000 tokens)
+    # ------------------------------------------------------------------
+    max_chars = max_tokens * 4  # inverse of estimate_tokens
+    parts: list[str] = []
+
+    errors = [it for it in iterations if it.get("status") in ("compile_error", "incorrect", "error")]
+    discarded = [it for it in iterations if it.get("decision") == "discard" or it.get("status") == "discard"]
 
     # ------------------------------------------------------------------
     # 1 & 2. Problem info + best speedup summary

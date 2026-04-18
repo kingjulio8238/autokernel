@@ -54,6 +54,29 @@ class OptimizeResult:
     best_kernel: str  # kernel source code
     summary: str  # one-line summary
 
+    def _repr_html_(self) -> str:
+        """Render as HTML in Jupyter notebooks."""
+        color = "#276749" if self.speedup > 1.0 else "#c53030"
+        return f'''
+    <div style="font-family: monospace; padding: 12px; border: 1px solid #e0ddd8; border-radius: 4px; background: #f5f2ed;">
+        <h3 style="margin: 0 0 8px 0; color: #1a1a1a;">Optimization Result</h3>
+        <table style="border-collapse: collapse;">
+            <tr><td style="padding: 2px 12px 2px 0; color: #6b6b6b;">Speedup</td>
+                <td style="font-weight: bold; color: {color};">{self.speedup:.2f}x</td></tr>
+            <tr><td style="padding: 2px 12px 2px 0; color: #6b6b6b;">Correct</td>
+                <td>{"\u2713" if self.correct else "\u2717"}</td></tr>
+            <tr><td style="padding: 2px 12px 2px 0; color: #6b6b6b;">Iterations</td>
+                <td>{self.iterations} ({self.kept} kept)</td></tr>
+            <tr><td style="padding: 2px 12px 2px 0; color: #6b6b6b;">Cost</td>
+                <td>${self.cost_usd:.3f}</td></tr>
+        </table>
+        <details style="margin-top: 8px;">
+            <summary style="cursor: pointer; color: #6b6b6b;">Best Kernel</summary>
+            <pre style="background: #1a1a1a; color: #e0ddd8; padding: 8px; border-radius: 4px; font-size: 12px; overflow-x: auto;">{self.best_kernel[:500]}</pre>
+        </details>
+    </div>
+    '''
+
 
 @dataclass
 class EvalResult:
@@ -64,6 +87,25 @@ class EvalResult:
     runtime_us: float
     ref_runtime_us: float
     bottleneck: str
+
+    def _repr_html_(self) -> str:
+        """Render as HTML in Jupyter notebooks."""
+        color = "#276749" if self.speedup > 1.0 else "#c53030"
+        return f'''
+    <div style="font-family: monospace; padding: 12px; border: 1px solid #e0ddd8; border-radius: 4px; background: #f5f2ed;">
+        <h3 style="margin: 0 0 8px 0; color: #1a1a1a;">Eval Result</h3>
+        <table style="border-collapse: collapse;">
+            <tr><td style="padding: 2px 12px 2px 0; color: #6b6b6b;">Speedup</td>
+                <td style="font-weight: bold; color: {color};">{self.speedup:.2f}x</td></tr>
+            <tr><td style="padding: 2px 12px 2px 0; color: #6b6b6b;">Correct</td>
+                <td>{"\u2713" if self.correct else "\u2717"}</td></tr>
+            <tr><td style="padding: 2px 12px 2px 0; color: #6b6b6b;">Bottleneck</td>
+                <td>{self.bottleneck}</td></tr>
+            <tr><td style="padding: 2px 12px 2px 0; color: #6b6b6b;">Runtime</td>
+                <td>{self.runtime_us:.1f} us (ref: {self.ref_runtime_us:.1f} us)</td></tr>
+        </table>
+    </div>
+    '''
 
 
 # ---------------------------------------------------------------------------
