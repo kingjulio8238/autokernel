@@ -1,6 +1,7 @@
 """Rich summary card — single bordered panel with all optimization results.
 
 Replaces scattered post-optimization print statements with one cohesive card.
+All text uses bright colors visible on dark terminals — no dim/gray text.
 """
 
 from __future__ import annotations
@@ -11,16 +12,17 @@ from rich.text import Text
 
 
 def _section_header(title: str) -> Text:
-    """Render a dim section header with underline."""
+    """Render a section header."""
     t = Text()
-    t.append(f"  {title}\n", style="bold #a09890")
+    t.append(f"  {title}\n", style="bold white")
     return t
 
 
-def _metric_row(label: str, value: str, value_style: str = "bold", extra: str = "", extra_style: str = "dim") -> Text:
+def _metric_row(label: str, value: str, value_style: str = "bold white",
+                extra: str = "", extra_style: str = "white") -> Text:
     """Render a key-value metric row with aligned columns."""
     t = Text()
-    t.append(f"  {label:<18}", style="#6b6360")
+    t.append(f"  {label:<18}", style="white")
     t.append(value, style=value_style)
     if extra:
         t.append(f"  {extra}", style=extra_style)
@@ -28,8 +30,8 @@ def _metric_row(label: str, value: str, value_style: str = "bold", extra: str = 
     return t
 
 
-def _gauge(label: str, value: float, target: float = 0.85, width: int = 15) -> Text:
-    """Render a single utilization gauge."""
+def _gauge(label: str, value: float, target: float = 0.85, width: int = 20) -> Text:
+    """Render a single utilization gauge — wider, brighter."""
     t = Text()
     pct = int(value * 100)
     bar_filled = int(value * width)
@@ -37,11 +39,11 @@ def _gauge(label: str, value: float, target: float = 0.85, width: int = 15) -> T
 
     color = "#4ade80" if value >= 0.8 else "#fbbf24" if value >= 0.5 else "#ef4444"
 
-    t.append(f"  {label:<6}", style="#6b6360")
+    t.append(f"  {label:<6}", style="white")
     t.append("█" * bar_filled, style=color)
-    t.append("░" * bar_empty, style="#3d3a36")
-    t.append(f" {pct}%", style=color)
-    t.append(f" → {int(target * 100)}%\n", style="#6b6360")
+    t.append("░" * bar_empty, style="#555555")
+    t.append(f" {pct}%", style=f"bold {color}")
+    t.append(f" → {int(target * 100)}%\n", style="white")
     return t
 
 
@@ -69,14 +71,14 @@ def render_optimization_summary(
     content.append("\n")
     pct = (kept_count / total_count * 100) if total_count > 0 else 0
     content.append_text(_metric_row("Best Speedup", f"{best_speedup:.2f}x", "bold #4ade80", f"(iter {best_iteration})"))
-    content.append_text(_metric_row("Kept / Total", f"{kept_count} / {total_count}", "bold", f"({pct:.0f}%)"))
+    content.append_text(_metric_row("Kept / Total", f"{kept_count} / {total_count}", "bold white", f"({pct:.0f}%)"))
     if cost_summary:
-        content.append_text(_metric_row("Cost", cost_summary, "bold"))
+        content.append_text(_metric_row("Cost", cost_summary, "bold white"))
     if elapsed_seconds > 0:
         mins = int(elapsed_seconds) // 60
         secs = int(elapsed_seconds) % 60
         time_str = f"{mins}m {secs:02d}s" if mins > 0 else f"{secs}s"
-        content.append_text(_metric_row("Time", time_str, "bold"))
+        content.append_text(_metric_row("Time", time_str, "bold white"))
     content.append("\n")
 
     # ═══ TRAJECTORY ═══
@@ -86,10 +88,10 @@ def render_optimization_summary(
     statuses = [it.get("decision", it.get("status", "")) for it in iterations]
     if speedups:
         content.append_text(_section_header("Trajectory"))
-        chart = render_trajectory_chart(speedups, statuses, width=45, height=5)
+        chart = render_trajectory_chart(speedups, statuses, width=50, height=5)
         for line in chart.plain.split("\n"):
             if line.strip():
-                content.append(f"  {line}\n")
+                content.append(f"  {line}\n", style="white")
         content.append("\n")
 
     # ═══ HEATMAP ═══
@@ -106,7 +108,7 @@ def render_optimization_summary(
         content.append_text(_section_header("Profiling"))
         if bottleneck_type:
             bn_color = "#ef4444" if "memory" in bottleneck_type else "#fbbf24" if "compute" in bottleneck_type else "#c084fc"
-            content.append("  Bottleneck      ", style="#6b6360")
+            content.append("  Bottleneck      ", style="white")
             content.append(bottleneck_type.upper().replace("_", " ") + "\n", style=f"bold {bn_color}")
 
         if bottleneck_metrics:
@@ -133,7 +135,7 @@ def render_optimization_summary(
         content.append_text(_section_header("Suggested"))
         for skill in skill_suggestions[:3]:
             sid = skill.get("skill_id", skill.get("name", ""))
-            content.append(f"  /skill:{sid}\n", style="#22d3ee")
+            content.append(f"  /skill:{sid}\n", style="bold #22d3ee")
         content.append("\n")
 
     # ═══ LINKS ═══
@@ -142,15 +144,15 @@ def render_optimization_summary(
         if dashboard_url:
             content.append_text(_metric_row("Dashboard", dashboard_url, "#22d3ee underline"))
         if saved_path:
-            content.append_text(_metric_row("Best saved", saved_path, "bold"))
-    content.append("\n")
+            content.append_text(_metric_row("Best saved", saved_path, "bold white"))
+    content.append("")
 
     panel = Panel(
         content,
-        title="[bold]Optimization Complete[/bold]",
-        subtitle=f"[dim]{total_count} iterations • {kept_count} kept • {best_speedup:.2f}x[/dim]",
-        border_style="#3d3a36",
-        padding=(0, 2),
-        width=min(c.width, 80),
+        title="[bold white] Optimization Complete [/bold white]",
+        subtitle=f"[white]{total_count} iterations • {kept_count} kept • {best_speedup:.2f}x[/white]",
+        border_style="#4ade80",
+        padding=(1, 3),
+        width=min(c.width, 90),
     )
     c.print(panel)

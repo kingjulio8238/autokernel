@@ -1784,8 +1784,12 @@ class KernelCodeShell:
 
         # Launch TUI for visualization
         self._console.print()
-        self._console.print("[dim]Launching TUI...[/dim]")
-        self._console.print()
+        self._console.print("[white]Launching TUI...[/white]")
+
+        # Flush stdin to prevent stale newline from triggering TUI input
+        import sys, select
+        while select.select([sys.stdin], [], [], 0.0)[0]:
+            sys.stdin.read(1)
 
         try:
             from kernel_code.tui.app import KernelCodeApp
