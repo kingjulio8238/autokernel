@@ -112,7 +112,7 @@ _HISTORY_PATH = _PROJECT_ROOT / ".kernel-code" / "history.txt"
 if _HAS_PROMPT_TOOLKIT:
 
     class KernelCodeCompleter(Completer):
-        """Tab completion for kernel-code slash commands and flags."""
+        """Tab completion with descriptions for kernel-code commands."""
 
         def __init__(self, shell: "KernelCodeShell") -> None:
             self._shell = shell
@@ -120,64 +120,86 @@ if _HAS_PROMPT_TOOLKIT:
         def get_completions(self, document, complete_event):
             text = document.text_before_cursor
 
-            # Complete slash commands
+            # Complete slash commands with descriptions
             if text.startswith("/"):
                 commands = [
-                    "/optimize",
-                    "/show",
-                    "/skills",
-                    "/skill:",
-                    "/compare",
-                    "/compact",
-                    "/context",
-                    "/diff",
-                    "/dashboard",
-                    "/git",
-                    "/history",
-                    "/config",
-                    "/evolve",
-                    "/cost",
-                    "/setup",
-                    "/providers",
-                    "/doctor",
-                    "/theme",
-                    "/help",
-                    "/quit",
-                    "/exit",
+                    ("/optimize", "Run kernel optimization"),
+                    ("/show", "Show results (best | results | run N)"),
+                    ("/skills", "List optimization skills"),
+                    ("/skill:", "Load a skill by name"),
+                    ("/compare", "Compare baseline vs optimized"),
+                    ("/diff", "Show kernel diff"),
+                    ("/compact", "Compact conversation context"),
+                    ("/context", "Show context window usage"),
+                    ("/dashboard", "Open browser dashboard"),
+                    ("/git", "Show git optimization log"),
+                    ("/history", "Show run history"),
+                    ("/config", "View/edit settings"),
+                    ("/providers", "Manage LLM API keys"),
+                    ("/evolve", "Template evolution status"),
+                    ("/cost", "Cost breakdown dashboard"),
+                    ("/advisor", "Optimization suggestions"),
+                    ("/doctor", "Environment health check"),
+                    ("/setup", "Re-run onboarding"),
+                    ("/theme", "Terminal theme info"),
+                    ("/help", "Show all commands"),
+                    ("/quit", "Exit kernel code"),
                 ]
-                for cmd in commands:
+                for cmd, desc in commands:
                     if cmd.startswith(text):
-                        yield Completion(cmd, start_position=-len(text))
+                        yield Completion(
+                            cmd,
+                            start_position=-len(text),
+                            display_meta=desc,
+                        )
 
             # Complete after /show
             if text.startswith("/show "):
-                for sub in ["best", "results", "run"]:
+                subs = [
+                    ("best", "Best optimized kernel"),
+                    ("results", "Summary table + chart"),
+                    ("run", "Details of run N"),
+                ]
+                for sub, desc in subs:
                     full = f"/show {sub}"
                     if full.startswith(text):
-                        yield Completion(full, start_position=-len(text))
+                        yield Completion(
+                            full,
+                            start_position=-len(text),
+                            display_meta=desc,
+                        )
 
             # Complete after /skill:
             if text.startswith("/skill:"):
                 prefix = text[7:]
                 for skill in self._shell._skill_library:
                     sid = skill.get("id", "")
+                    sname = skill.get("name", sid)
                     if sid.startswith(prefix):
-                        yield Completion(f"/skill:{sid}", start_position=-len(text))
+                        yield Completion(
+                            f"/skill:{sid}",
+                            start_position=-len(text),
+                            display_meta=sname,
+                        )
 
             # Complete --flags after /optimize
             if "/optimize" in text and text.endswith("--"):
-                for flag in [
-                    "--reference",
-                    "--backend",
-                    "--config",
-                    "--parallel",
-                    "--mock",
-                    "--no-mock",
-                    "--iterations",
-                    "--gpu",
-                    "--git",
+                for flag, desc in [
+                    ("--reference", "Path to reference kernel"),
+                    ("--backend", "triton or cuda"),
+                    ("--config", "YAML config file"),
+                    ("--parallel", "Try both backends"),
+                    ("--mock", "Use mock data"),
+                    ("--no-mock", "Use real engine"),
+                    ("--iterations", "Max iterations"),
+                    ("--gpu", "GPU type (H100/A100/L40S)"),
+                    ("--git", "Track with git commits"),
                 ]:
-                    yield Completion(flag, start_position=-2)
+                    yield Completion(
+                        flag,
+                        start_position=-2,
+                        display_meta=desc,
+                    )
 
 
 class KernelCodeShell:
@@ -247,12 +269,27 @@ class KernelCodeShell:
         self._prompt_session: PromptSession | None = None  # type: ignore[type-arg]
         if _HAS_PROMPT_TOOLKIT:
             _HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+            from prompt_toolkit.styles import Style as PTStyle
+
+            # Style the completion dropdown to match warm theme
+            pt_style = PTStyle.from_dict({
+                "completion-menu": "bg:#24231f #e0ddd8",
+                "completion-menu.completion": "bg:#24231f #e0ddd8",
+                "completion-menu.completion.current": "bg:#3d3a36 #4ade80 bold",
+                "completion-menu.meta.completion": "bg:#24231f #a09890 italic",
+                "completion-menu.meta.completion.current": "bg:#3d3a36 #4ade80 italic",
+                "scrollbar.background": "bg:#24231f",
+                "scrollbar.button": "bg:#3d3a36",
+            })
+
             self._prompt_session = PromptSession(
                 history=FileHistory(str(_HISTORY_PATH)),
                 completer=KernelCodeCompleter(self),
                 key_bindings=_kb,
                 multiline=False,
                 prompt_continuation="... ",
+                style=pt_style,
+                complete_in_thread=True,
             )
 
         # Command dispatch table
