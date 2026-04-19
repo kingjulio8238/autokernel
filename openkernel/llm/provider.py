@@ -37,6 +37,8 @@ _COST_PER_M_TOKENS: dict[str, tuple[float, float]] = {
     "claude-sonnet-4-20250514": (3.0, 15.0),
     "claude-opus-4-20250514": (15.0, 75.0),
     "gpt-4o": (2.5, 10.0),
+    "gpt-4o-mini": (0.15, 0.60),
+    "o3-mini": (1.10, 4.40),
     "o3": (10.0, 40.0),
 }
 

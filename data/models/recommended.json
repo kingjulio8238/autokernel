@@ -113,6 +113,59 @@
       "recommended_for": ["testing", "reasoning", "free_tier"]
     },
     {
+      "id": "gpt-4o",
+      "provider": "openai",
+      "name": "GPT-4o",
+      "strengths": [
+        "Strong coding and kernel generation",
+        "Fast inference (~100 tok/s)",
+        "Good structured JSON output",
+        "Reliable tool calling"
+      ],
+      "cost_tier": "medium",
+      "cost_per_m_input": 2.50,
+      "cost_per_m_output": 10.00,
+      "context_window": 128000,
+      "api_base": null,
+      "env_key": "OPENAI_API_KEY",
+      "recommended_for": ["coding", "kernel_gen", "structured_output"]
+    },
+    {
+      "id": "gpt-4o-mini",
+      "provider": "openai",
+      "name": "GPT-4o Mini",
+      "strengths": [
+        "Very cheap ($0.15/$0.60 per M)",
+        "Fast inference",
+        "Good enough for simple kernels",
+        "Great for testing and development"
+      ],
+      "cost_tier": "low",
+      "cost_per_m_input": 0.15,
+      "cost_per_m_output": 0.60,
+      "context_window": 128000,
+      "api_base": null,
+      "env_key": "OPENAI_API_KEY",
+      "recommended_for": ["budget", "testing", "fast_iteration"]
+    },
+    {
+      "id": "o3-mini",
+      "provider": "openai",
+      "name": "o3-mini",
+      "strengths": [
+        "Strong reasoning for complex kernels",
+        "Good at algorithmic optimization",
+        "Reliable correctness"
+      ],
+      "cost_tier": "medium",
+      "cost_per_m_input": 1.10,
+      "cost_per_m_output": 4.40,
+      "context_window": 200000,
+      "api_base": null,
+      "env_key": "OPENAI_API_KEY",
+      "recommended_for": ["reasoning", "complex_kernels", "algorithmic"]
+    },
+    {
       "id": "claude-sonnet-4-20250514",
       "provider": "anthropic",
       "name": "Claude Sonnet 4",
