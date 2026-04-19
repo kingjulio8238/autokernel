@@ -140,7 +140,7 @@ if _HAS_PROMPT_TOOLKIT:
                     ("/git", "Show git optimization log"),
                     ("/history", "Show run history"),
                     ("/config", "View/edit settings"),
-                    ("/auto", "Autonomous optimization (set goal, walk away)"),
+                    ("/autopilot", "Autonomous optimization (set goal, walk away)"),
                     ("/problem", "Load & browse kernel problems"),
                     ("/models", "Browse & select LLM models"),
                     ("/evolve", "Template evolution status"),
@@ -321,7 +321,7 @@ class KernelCodeShell:
             "/theme": self._cmd_theme,
             "/models": self._cmd_models,
             "/problem": self._cmd_problem,
-            "/auto": self._cmd_auto,
+            "/autopilot": self._cmd_autopilot,
             "/advisor": self._cmd_advisor,
             "/help": self._cmd_help,
             "/quit": self._cmd_quit,
@@ -913,12 +913,9 @@ class KernelCodeShell:
                 "Check environment health (Modal, API keys, skills, deps)",
             ),
             (
-                "/auto --target 2.0 [opts]",
-                "Autonomous optimization (set goal, walk away)",
+                "/autopilot",
+                "Autonomous optimization — interactive setup, then hands-off",
             ),
-            ("  --budget $5.00", "  Max spend (default: from settings)"),
-            ("  --time 30m", "  Wall-clock limit"),
-            ("  --rounds 5", "  Max outer-loop rounds"),
             ("/problem", "Show/load kernel problem (/problem 1.5, /problem load FILE)"),
             ("/models", "Browse & select LLM models"),
             ("/advisor", "Show 3 next optimization suggestions"),
@@ -1496,67 +1493,111 @@ class KernelCodeShell:
             f"[#4ade80]Active model \u2192 {selected['name']}[/#4ade80]"
         )
 
-    def _cmd_auto(self, args_str: str) -> None:
-        """/auto --target 2.0 [--budget 5.00] [--time 30m] [--rounds 5]"""
-        import shlex
-
-        try:
-            tokens = shlex.split(args_str)
-        except ValueError as exc:
-            self._console.print(f"[red]Parse error:[/red] {exc}")
-            return
-
-        # Parse flags
-        target = 2.0
-        budget = self._settings.max_budget or 5.00
-        time_limit = None
-        rounds = 5
-
-        i = 0
-        while i < len(tokens):
-            tok = tokens[i]
-            if tok == "--target" and i + 1 < len(tokens):
-                target = float(tokens[i + 1])
-                i += 2
-            elif tok == "--budget" and i + 1 < len(tokens):
-                budget = float(tokens[i + 1].lstrip("$"))
-                i += 2
-            elif tok == "--time" and i + 1 < len(tokens):
-                t = tokens[i + 1]
-                if t.endswith("m"):
-                    time_limit = int(t[:-1]) * 60
-                elif t.endswith("h"):
-                    time_limit = int(t[:-1]) * 3600
-                else:
-                    time_limit = int(t)
-                i += 2
-            elif tok == "--rounds" and i + 1 < len(tokens):
-                rounds = int(tokens[i + 1])
-                i += 2
-            else:
-                i += 1
-
-        # Build goal spec
+    def _cmd_autopilot(self, args_str: str) -> None:
+        """/autopilot — interactive setup then autonomous optimization."""
         from kernel_code.goal_spec import GoalSpec
 
+        self._console.print()
+        self._console.print("[bold]Autopilot Setup[/bold]")
+        self._console.print("[white]  Configure your optimization goal. Press Enter to accept defaults.[/white]")
+        self._console.print()
+
+        def _ask(label: str, default: str, hint: str = "") -> str:
+            prompt = f"  [bold white]{label}[/bold white]"
+            if hint:
+                prompt += f" [#888888]({hint})[/#888888]"
+            prompt += f" [{default}]: "
+            try:
+                val = self._console.input(prompt).strip()
+            except (EOFError, KeyboardInterrupt):
+                return ""
+            return val if val else default
+
+        # --- Step 1: Reference file ---
         ref_path = _PROJECT_ROOT / "reference.py"
+        ref_problem = ""
+        if ref_path.is_file():
+            ref_lines = ref_path.read_text().split("\n", 5)
+            for line in ref_lines:
+                if "Problem" in line or "KernelBench" in line:
+                    ref_problem = line.strip().strip('"').strip("'").strip()
+                    break
+
+        if ref_problem:
+            self._console.print(f"  [#4ade80]Reference:[/#4ade80] {ref_problem}")
+        else:
+            self._console.print("  [yellow]No reference loaded[/yellow]")
+
+        ref_input = _ask("Reference file", str(ref_path) if ref_path.is_file() else "", "path to PyTorch reference")
+        if not ref_input:
+            self._console.print("[white]Cancelled[/white]")
+            return
+        ref_path = _PROJECT_ROOT / ref_input if not ref_input.startswith("/") else __import__("pathlib").Path(ref_input)
         if not ref_path.is_file():
-            self._console.print(
-                "[red]Error:[/red] no reference file found. "
-                "Load a problem first: [bold]/problem 1.5[/bold]"
-            )
+            self._console.print(f"[red]File not found:[/red] {ref_input}")
             return
 
+        # --- Step 2: Target speedup ---
+        target_str = _ask("Target speedup", "2.0", "e.g. 1.5, 2.0, 3.0")
+        if not target_str:
+            return
+        target = float(target_str)
+
+        # --- Step 3: Hardware ---
+        hw = _ask("Hardware", self._settings.default_gpu, "L40S, H100, A100-80GB")
+        if not hw:
+            return
+
+        # --- Step 4: Backend ---
+        be = _ask("Backend", self._settings.default_backend, "triton or cuda")
+        if not be:
+            return
+
+        # --- Step 5: Model ---
+        model = self._settings.default_model
+        provider = self._settings.default_provider
+        model_input = _ask("Model", model, "Enter or /models to change")
+        if model_input == "/models":
+            self._cmd_models("")
+            model = self._settings.default_model
+            provider = self._settings.default_provider
+        elif model_input:
+            model = model_input
+
+        # --- Step 6: Budget ---
+        budget_str = _ask("Budget", f"{self._settings.max_budget or 5.00:.2f}", "max USD spend")
+        if not budget_str:
+            return
+        budget = float(budget_str.lstrip("$"))
+
+        # --- Step 7: Time limit ---
+        time_str = _ask("Time limit", "none", "e.g. 30m, 1h, or none")
+        time_limit = None
+        if time_str and time_str != "none":
+            if time_str.endswith("m"):
+                time_limit = int(time_str[:-1]) * 60
+            elif time_str.endswith("h"):
+                time_limit = int(time_str[:-1]) * 3600
+            else:
+                time_limit = int(time_str)
+
+        # --- Step 8: Rounds ---
+        rounds_str = _ask("Max rounds", "5", "outer loop iterations")
+        if not rounds_str:
+            return
+        rounds = int(rounds_str)
+
+        # --- Build and validate ---
         goal = GoalSpec(
             target_speedup=target,
             max_budget_usd=budget,
             max_time_seconds=time_limit,
             max_rounds=rounds,
             reference_path=str(ref_path),
-            hardware=self._settings.default_gpu,
-            backend=self._settings.default_backend,
-            model=self._settings.default_model,
-            provider=self._settings.default_provider,
+            hardware=hw,
+            backend=be,
+            model=model,
+            provider=provider,
         )
 
         errors = goal.validate()
@@ -1565,22 +1606,24 @@ class KernelCodeShell:
                 self._console.print(f"[red]Error:[/red] {e}")
             return
 
-        # Show goal and confirm
+        # --- Confirm ---
         self._console.print()
-        self._console.print("[bold]Autonomous Optimization[/bold]")
-        self._console.print(f"  {goal.summary()}")
-        est = estimate_cost(
-            goal.estimated_max_iterations, gpu_type=goal.hardware
-        )
-        self._console.print(
-            f"  Max cost: ~${est:.2f} "
-            f"(up to {goal.estimated_max_iterations} iterations)"
-        )
+        self._console.print("[bold]Review[/bold]")
+        self._console.print(f"  Reference:  {ref_problem or ref_path.name}")
+        self._console.print(f"  Target:     {target}x speedup")
+        self._console.print(f"  Hardware:   {hw}  |  Backend: {be}")
+        self._console.print(f"  Model:      {model}")
+        self._console.print(f"  Budget:     ${budget:.2f}")
+        if time_limit:
+            self._console.print(f"  Time limit: {time_limit // 60}m")
+        self._console.print(f"  Rounds:     up to {rounds}")
+        est = estimate_cost(goal.estimated_max_iterations, gpu_type=hw)
+        self._console.print(f"  Est. cost:  ~${est:.2f} (up to {goal.estimated_max_iterations} iterations)")
         self._console.print()
 
         try:
             answer = self._console.input(
-                "[bold white]Start autonomous run? (y/n): [/bold white]"
+                "[bold white]Launch autopilot? (y/n): [/bold white]"
             ).strip().lower()
         except (EOFError, KeyboardInterrupt):
             return
@@ -1588,26 +1631,18 @@ class KernelCodeShell:
             self._console.print("[white]Cancelled[/white]")
             return
 
-        # Detect problem name
-        ref_problem = ""
-        ref_lines = ref_path.read_text().split("\n", 5)
-        for line in ref_lines:
-            if "Problem" in line or "KernelBench" in line:
-                ref_problem = line.strip().strip('"').strip("'").strip()
-                break
-
-        # Create live display with target
+        # --- Run ---
         from kernel_code.live_display import LiveOptimizationDisplay
+
         live_display = LiveOptimizationDisplay(
             console=self._console,
             problem=ref_problem or ref_path.name,
-            hardware=goal.hardware,
-            backend=goal.backend,
+            hardware=hw,
+            backend=be,
         )
-        live_display.set_target(goal.target_speedup)
+        live_display.set_target(target)
         live_display.start()
 
-        # Run the meta optimizer
         from kernel_code.auto_optimizer import MetaOptimizer
 
         optimizer = MetaOptimizer(
@@ -1620,9 +1655,11 @@ class KernelCodeShell:
         try:
             result = optimizer.run()
         finally:
-            live_display.finish(stop_reason=result.stop_reason if 'result' in dir() else "interrupted")
+            live_display.finish(
+                stop_reason=result.stop_reason if 'result' in dir() else "interrupted"
+            )
 
-        # Show results
+        # --- Results ---
         self._console.print()
         if result.target_reached:
             self._console.print(
@@ -1631,7 +1668,7 @@ class KernelCodeShell:
         else:
             self._console.print(
                 f"  [white]Best: {result.best_speedup:.2f}x "
-                f"(target: {goal.target_speedup:.1f}x)[/white]"
+                f"(target: {target:.1f}x)[/white]"
             )
         self._console.print(
             f"  [white]{result.rounds_completed} rounds, "
@@ -1640,7 +1677,6 @@ class KernelCodeShell:
             f"{int(result.elapsed_seconds)}s[/white]"
         )
 
-        # Save best kernel
         if result.best_kernel:
             out_name = "reference_optimized.py"
             out_path = _PROJECT_ROOT / out_name
