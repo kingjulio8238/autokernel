@@ -132,18 +132,47 @@ class KernelAgentBridge:
                 f"({self._model_name})"
             )
 
-        # Run
-        try:
-            result = agent.generate_kernel(
-                problem_description=problem_desc,
-            )
-        except Exception as exc:
-            logger.error("KernelAgent failed: %s", exc)
+        # Run KernelAgent in a background thread so the Rich.Live display
+        # can keep refreshing (KernelAgent blocks on multiprocessing.join)
+        import concurrent.futures
+
+        result = None
+        error = None
+
+        def _run_agent():
+            nonlocal result, error
+            try:
+                result = agent.generate_kernel(
+                    problem_description=problem_desc,
+                )
+            except Exception as exc:
+                error = exc
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_run_agent)
+            # Poll until done — this lets the main thread stay responsive
+            while not future.done():
+                time.sleep(0.5)
+                if self._live_display:
+                    self._live_display._refresh()
+            future.result()  # raises if _run_agent raised
+
+        if error:
+            logger.error("KernelAgent failed: %s", error)
             return {
                 "success": False,
                 "kernel_code": "",
                 "speedup": 0.0,
-                "error": str(exc),
+                "error": str(error),
+                "elapsed": time.time() - start_time,
+            }
+
+        if result is None:
+            return {
+                "success": False,
+                "kernel_code": "",
+                "speedup": 0.0,
+                "error": "KernelAgent returned no result",
                 "elapsed": time.time() - start_time,
             }
 
