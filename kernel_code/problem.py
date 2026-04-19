@@ -180,31 +180,44 @@ def _load_custom(code: str, path: Path) -> Problem:
 
 
 def make_self_contained(problem: Problem) -> str:
-    """Make a GPU Mode reference self-contained by inlining dependencies.
+    """Make a GPU Mode reference self-contained for Modal eval.
 
     GPU Mode references import from task.py and utils.py — these aren't
-    available in the Modal container. This function inlines them.
+    available in the Modal container. This function strips those
+    dependencies and creates a clean, standalone reference.
+
+    The key insight: our Modal eval does its own correctness checking,
+    so we don't need GPU Mode's check_implementation or DeterministicContext.
+    We just need ref_kernel() and generate_input().
     """
     if problem.format != FORMAT_GPUMODE:
         return problem.reference_code
 
     code = problem.reference_code
 
-    # Inline task.py: replace "from task import ..." with the actual definitions
-    if problem.task_code:
-        # Remove the import line and prepend the task code
-        code = re.sub(r"^from task import.*$", "", code, flags=re.MULTILINE)
-        code = problem.task_code + "\n\n" + code
+    # Remove utils imports and check_implementation (our eval handles correctness)
+    code = re.sub(r"^from utils import.*$", "", code, flags=re.MULTILINE)
+    code = re.sub(r"^check_implementation\s*=.*$", "", code, flags=re.MULTILINE)
 
-    # Inline utils.py: replace "from utils import ..." with actual code
-    if problem.utils_code:
-        code = re.sub(r"^from utils import.*$", "", code, flags=re.MULTILINE)
-        code = problem.utils_code + "\n\n" + code
-    else:
-        # Remove utils imports if we don't have the file
-        code = re.sub(r"^from utils import.*$", "# utils not available", code, flags=re.MULTILINE)
+    # Remove task imports and type annotations that reference task types
+    code = re.sub(r"^from task import.*$", "", code, flags=re.MULTILINE)
+    # Replace type hints with generic ones
+    code = code.replace(": input_t", "")
+    code = code.replace(": output_t", "")
+    code = code.replace("-> output_t", "")
+    code = code.replace("-> input_t", "")
 
-    return code
+    # Replace DeterministicContext with a no-op (preserves indentation)
+    code = code.replace("with DeterministicContext():", "if True:  # deterministic")
+
+    # Add minimal imports
+    if "import torch" not in code:
+        code = "import torch\n" + code
+
+    # Clean up blank lines
+    code = re.sub(r"\n{3,}", "\n\n", code)
+
+    return code.strip() + "\n"
 
 
 def _extract_name(code: str) -> str:
