@@ -90,11 +90,12 @@ class KernelAgentBridge:
         # created lazily. Also suppress at root level to catch child loggers.
         _suppress_names = [
             "kernel_agent", "TritonKernelAgent", "httpx", "openai",
-            "anthropic", "litellm",
+            "anthropic", "litellm", "LiteLLM",
             "kernel_agent.ka_utils", "kernel_agent.ka_utils.providers",
             "kernel_agent.ka_utils.providers.openai_base",
             "kernel_agent.manager", "kernel_agent.worker",
             "kernel_agent.agent", "kernel_agent.prompt_manager",
+            "kernel_code.ke_profile",
         ]
         for name in _suppress_names:
             lg = logging.getLogger(name)
@@ -107,13 +108,59 @@ class KernelAgentBridge:
         settings = load_settings()
         inject_api_keys(settings)
 
-        # Build problem description from reference
+        # Build problem description from reference — emphasize dtype
         problem_desc = (
             f"Optimize the following PyTorch code into a fast Triton kernel "
             f"for {self._hardware} GPU.\n\n"
             f"Reference implementation:\n```python\n{self._reference}\n```\n\n"
-            f"The kernel must be correct (torch.allclose with rtol=1e-2, atol=1e-2)."
+            f"CRITICAL REQUIREMENTS:\n"
+            f"- The kernel MUST work with float32 inputs (NOT bfloat16)\n"
+            f"- Use the EXACT same dtypes as the reference implementation\n"
+            f"- The kernel must be correct: torch.allclose(ref, kernel, rtol=1e-2, atol=1e-2)\n"
+            f"- Output dtype must match reference output dtype (float32)\n"
+            f"- Do NOT hardcode bfloat16 or float16 — use the input tensor's dtype"
         )
+
+        # Build a test that uses the reference's actual inputs (float32)
+        test_code = f'''"""Test kernel_function against reference implementation."""
+import torch
+import sys
+
+def test_kernel():
+    from kernel import kernel_function
+
+    # Use EXACT same inputs as the reference
+{self._reference}
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Get reference inputs and model
+    inputs = get_inputs()
+    inputs = [x.to(device) if isinstance(x, torch.Tensor) else x for x in inputs]
+    model = Model().to(device).eval()
+
+    with torch.no_grad():
+        expected = model(*inputs)
+        result = kernel_function(*inputs)
+
+    # Check dtype matches
+    if result.dtype != expected.dtype:
+        print(f"DTYPE MISMATCH: expected {{expected.dtype}}, got {{result.dtype}}")
+        return False
+
+    # Check correctness
+    if not torch.allclose(result, expected, rtol=1e-2, atol=1e-2):
+        diff = (result - expected).abs().max().item()
+        print(f"NUMERICAL MISMATCH: max diff = {{diff}}")
+        return False
+
+    print("PASS")
+    return True
+
+if __name__ == "__main__":
+    success = test_kernel()
+    sys.exit(0 if success else 1)
+'''
 
         # Create agent
         agent = TritonKernelAgent(
@@ -144,6 +191,7 @@ class KernelAgentBridge:
             try:
                 result = agent.generate_kernel(
                     problem_description=problem_desc,
+                    test_code=test_code,
                 )
             except Exception as exc:
                 error = exc
@@ -210,7 +258,10 @@ class KernelAgentBridge:
                             return "test passed"
                         if "Test" in msg and "failed" in msg.lower():
                             return "test failed"
-                        return msg[:30]
+                        # Truncate at word boundary
+                        if len(msg) > 25:
+                            return msg[:25].rsplit(" ", 1)[0] + "\u2026"
+                        return msg
                 return ""
             except Exception:
                 return ""
@@ -320,7 +371,7 @@ class KernelAgentBridge:
             "kernel_runtime_us": kernel_runtime_us,
             "profile": profile,
             "worker_id": result.get("worker_id"),
-            "rounds": result.get("rounds", 0),
+            "rounds": result.get("rounds", self._max_rounds),
             "elapsed": elapsed,
         }
 

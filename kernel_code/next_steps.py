@@ -281,11 +281,15 @@ def _parse_suggestions(response: str) -> list[NextStep]:
 
 
 def _strip_markdown(text: str) -> str:
-    """Strip common markdown formatting from LLM output."""
+    """Strip common markdown formatting and LLM artifacts from output."""
     import re
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)  # **bold**
     text = re.sub(r"\*(.*?)\*", r"\1", text)  # *italic*
     text = re.sub(r"`(.*?)`", r"\1", text)  # `code`
+    # Strip common LLM prefixes
+    text = re.sub(r"^TITLE:\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^APPROACH:\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^EXPECTED:\s*", "", text, flags=re.IGNORECASE)
     return text.strip()
 
 

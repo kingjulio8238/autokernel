@@ -2653,10 +2653,17 @@ class KernelCodeShell:
         self, reference: str, iterations: int
     ) -> None:
         """Run optimization using Meta's KernelAgent engine."""
+        import logging as _logging
         from pathlib import Path as _Path
         from kernel_code.integration.kernel_agent_bridge import KernelAgentBridge
         from kernel_code.live_display import LiveOptimizationDisplay
         from kernel_code.run_log import RunLogger
+
+        # Suppress all noisy loggers before anything runs
+        for _name in ["LiteLLM", "litellm", "httpx", "openai", "kernel_code.ke_profile"]:
+            _lg = _logging.getLogger(_name)
+            _lg.setLevel(_logging.CRITICAL)
+            _lg.propagate = False
 
         ref_path = _Path(reference)
         if not ref_path.exists():
