@@ -18,6 +18,8 @@ import time
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
+import re
+
 from openkernel.engine.strategy_evolution import StrategyEvolution
 from openkernel.engine.world_model import IntentNode, IntentStatus, IntentTree
 from openkernel.engine.world_model_prompts import (
@@ -101,6 +103,50 @@ class LLMCaller(Protocol):
     """Protocol for calling an LLM with a prompt and getting text back."""
 
     def call(self, prompt: str) -> str: ...
+
+
+def _extract_json(text: str) -> dict:
+    """Extract a JSON object from LLM output that may include markdown fences.
+
+    Handles common LLM response patterns:
+    - Pure JSON
+    - ```json ... ```
+    - ``` ... ```
+    - Text before/after the JSON block
+    """
+    text = text.strip()
+
+    # Try direct parse first
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Strip markdown code fences
+    match = re.search(r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(1).strip())
+        except json.JSONDecodeError:
+            pass
+
+    # Try to find first { ... } block
+    brace_start = text.find("{")
+    if brace_start >= 0:
+        # Find matching closing brace
+        depth = 0
+        for i in range(brace_start, len(text)):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[brace_start : i + 1])
+                    except json.JSONDecodeError:
+                        break
+
+    raise json.JSONDecodeError("No valid JSON found in LLM response", text, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -450,7 +496,7 @@ class Orchestrator:
         )
         try:
             response_text = self._llm.call(prompt)
-            response = json.loads(response_text)
+            response = _extract_json(response_text)
             intents = response.get("intents", [])
         except (json.JSONDecodeError, Exception) as e:
             logger.warning(f"Failed to parse LLM intent proposals: {e}")
@@ -489,7 +535,7 @@ class Orchestrator:
         )
         try:
             response_text = self._llm.call(prompt)
-            response = json.loads(response_text)
+            response = _extract_json(response_text)
             updates = response.get("priority_updates", {})
         except (json.JSONDecodeError, Exception) as e:
             logger.warning(f"Failed to parse LLM priority updates: {e}")
@@ -525,7 +571,7 @@ class Orchestrator:
         )
         try:
             response_text = self._llm.call(prompt)
-            response = json.loads(response_text)
+            response = _extract_json(response_text)
         except (json.JSONDecodeError, Exception) as e:
             logger.warning(f"Failed to parse LLM prune decision: {e}")
             return
