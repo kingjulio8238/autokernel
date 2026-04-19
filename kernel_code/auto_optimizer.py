@@ -181,46 +181,28 @@ class MetaOptimizer:
         return ""
 
     def _run_round(self, round_num: int) -> dict:
-        """Run one optimization round via the existing bridge."""
-        from kernel_code.integration import OpenKernelBridge
-        from kernel_code.live_display import LiveOptimizationDisplay
-        from kernel_code.settings import settings_to_config, inject_api_keys
+        """Run one optimization round via KernelAgent."""
+        from kernel_code.integration.kernel_agent_bridge import KernelAgentBridge
+        from kernel_code.settings import inject_api_keys
         from kernel_code.permissions import estimate_cost
-        from kernel_code.hooks import HookRegistry, create_default_hooks
-        from kernel_code.file_cache import FileStateCache
-        from kernel_code.template_evolution import TemplateEvolver
-        from openkernel.config import Backend as _Backend, OpenKernelConfig
 
         inject_api_keys(self._settings)
 
-        settings_kwargs = settings_to_config(self._settings)
-        config = OpenKernelConfig(
-            **settings_kwargs,
-            max_iterations=self._goal.iterations_per_round,
-            max_retries_per_intent=3,  # fewer retries in autopilot for speed
-        )
-        config.backend = (
-            _Backend.CUDA if self._goal.backend == "cuda" else _Backend.TRITON
-        )
+        reference_source = Path(self._goal.reference_path).read_text()
+        model = self._goal.model or self._settings.default_model
 
-        # Use a unique session ID per round
-        import uuid
-        session_id = uuid.uuid4().hex[:8]
-
-        bridge = OpenKernelBridge(
-            config=config,
-            session_id=session_id,
-            problem_label=f"auto-round-{round_num}",
+        bridge = KernelAgentBridge(
+            reference_source=reference_source,
+            model_name=model,
+            num_workers=4,
+            max_rounds=self._goal.iterations_per_round,
             hardware=self._goal.hardware,
-            backend=self._goal.backend,
             live_display=self._live_display,
             run_logger=self._run_logger,
         )
 
-        reference_source = Path(self._goal.reference_path).read_text()
-
         try:
-            result = bridge.run_optimization(reference_source)
+            result = bridge.run()
         except Exception as exc:
             logger.error("Round %d failed: %s", round_num, exc)
             return {
@@ -234,38 +216,23 @@ class MetaOptimizer:
                 "bottleneck": "error",
             }
 
-        # Estimate cost for this round
-        iterations = result.intents_explored if hasattr(result, 'intents_explored') else 0
-        round_cost = estimate_cost(max(iterations, 1), gpu_type=self._goal.hardware)
+        # Estimate cost
+        rounds_used = result.get("rounds", 0)
+        round_cost = estimate_cost(max(rounds_used, 1), gpu_type=self._goal.hardware)
         self._total_cost += round_cost
 
-        # Load iteration data from cache
-        kept = 0
-        errors = 0
-        bottleneck = "unknown"
-        if bridge.cache_path.exists():
-            try:
-                session_data = json.loads(bridge.cache_path.read_text())
-                iters = session_data.get("iterations", [])
-                kept = sum(1 for it in iters if it.get("status") == "keep")
-                errors = sum(1 for it in iters if it.get("status") in ("error", "compile_error"))
-                for it in reversed(iters):
-                    bn = it.get("profile", {}).get("bottleneck_type", "")
-                    if bn and bn != "unknown":
-                        bottleneck = bn
-                        break
-            except Exception:
-                pass
+        speedup = result.get("speedup", 0.0)
+        success = result.get("success", False)
 
         return {
             "round": round_num,
             "strategy": self._current_strategy,
-            "best_speedup": result.final_speedup,
-            "best_kernel": result.final_kernel,
-            "kept": kept,
-            "total": iterations,
-            "errors": errors,
-            "bottleneck": bottleneck,
+            "best_speedup": speedup,
+            "best_kernel": result.get("kernel_code", ""),
+            "kept": 1 if success else 0,
+            "total": rounds_used,
+            "errors": 0 if success else rounds_used,
+            "bottleneck": "unknown",
         }
 
     def _reflect(self, round_num: int) -> MetaReflection:

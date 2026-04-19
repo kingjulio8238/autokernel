@@ -2747,6 +2747,39 @@ class KernelCodeShell:
                 f"\n  [white]No correct kernel found after {result.get('rounds', '?')} rounds[/white]"
             )
 
+        # Record to KE profile
+        from kernel_code.ke_profile import KEProfile, classify_problem
+        ke_profile = KEProfile()
+        problem_type = classify_problem(ref_problem or "custom")
+        ke_profile.record_run(
+            problem_type=problem_type,
+            total_iterations=result.get("rounds", 0),
+            best_at_iteration=result.get("rounds", 0) if result.get("success") else 0,
+            final_speedup=speedup,
+        )
+
+        # Generate next-step suggestions
+        self._session_data = {"iterations": [], "best_speedup": speedup}
+        next_steps = generate_next_steps_rule_based(self._session_data)
+        try:
+            from openkernel.config import ModelConfig as _MC
+            _model_cfg = _MC(
+                provider=self._settings.default_provider,
+                model_id=self._settings.default_model,
+            )
+            next_steps = asyncio.run(generate_next_steps_llm(
+                self._session_data, model_config=_model_cfg,
+            ))
+        except Exception:
+            pass
+        self._pending_next_steps = next_steps
+        if next_steps:
+            self._console.print(format_next_steps(next_steps))
+
+        self._console.print()
+        self._console.print(
+            f"  [white]/dashboard[/white] [#888888]— open full analysis in browser[/#888888]"
+        )
         self._console.print(f"  [white]Run log:[/white] [#888888]{run_logger.log_path}[/#888888]")
         self._console.print()
 

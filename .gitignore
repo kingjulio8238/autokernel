@@ -47,3 +47,14 @@ Thumbs.db
 # Logs
 *.log
 run.log
+
+# KernelAgent logs and caches
+triton_kernel_logs/
+
+# kernel-code run logs and learned profiles
+.kernel-code/runs/
+.kernel-code/cache/
+.kernel-code/ke_profile.json
+
+# Generated optimized kernels
+*_optimized.py

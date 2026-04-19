@@ -91,7 +91,7 @@ def _make_pre_optimize_log(console: Console) -> Callable:
     def _hook(*, config: dict, iterations: int, **_kw: Any) -> float:
         start = time.time()
         backend = config.get("backend", "triton")
-        hardware = config.get("hardware", "H100")
+        hardware = config.get("hardware", "L40S")
         console.print(
             f"[bold]Starting optimization:[/bold] {iterations} iterations, "
             f"backend={backend}, hardware={hardware}"
@@ -112,7 +112,7 @@ def _make_pre_optimize_cost_confirm(console: Console) -> Callable:
     from kernel_code.permissions import confirm_cost, estimate_cost
 
     def _hook(*, config: dict, iterations: int, **_kw: Any) -> bool:
-        gpu_type = config.get("hardware", "H100")
+        gpu_type = config.get("hardware", "L40S")
         estimated = estimate_cost(iterations, gpu_type=gpu_type)
         approved = confirm_cost(estimated, gpu_type, iterations, console=console)
         if not approved:
