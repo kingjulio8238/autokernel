@@ -28,6 +28,11 @@ import asyncio
 import json
 import logging
 import time
+import warnings
+
+# Suppress litellm's async task cleanup warnings
+warnings.filterwarnings("ignore", message=".*coroutine.*was never awaited.*")
+warnings.filterwarnings("ignore", message=".*Task was destroyed.*")
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -192,6 +197,7 @@ class MetaOptimizer:
         config = OpenKernelConfig(
             **settings_kwargs,
             max_iterations=self._goal.iterations_per_round,
+            max_retries_per_intent=3,  # fewer retries in autopilot for speed
         )
         config.backend = (
             _Backend.CUDA if self._goal.backend == "cuda" else _Backend.TRITON

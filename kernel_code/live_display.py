@@ -96,13 +96,18 @@ def _iteration_table(iterations: list[dict], width: int = 80) -> Table:
     table.add_column("#", width=4, justify="right", style="white")
     table.add_column("Speedup", width=8, justify="right")
     table.add_column("Status", width=10)
-    table.add_column("Intent", min_width=30, max_width=50)
+    table.add_column("Intent", min_width=30, max_width=55)
 
     for it in iterations:
         num = str(it.get("num", "?"))
         speedup = it.get("speedup", 0.0)
         status = it.get("status", "?")
-        intent = it.get("intent", "")[:50]
+        raw_intent = it.get("intent", "")
+        # Truncate at word boundary
+        if len(raw_intent) > 55:
+            intent = raw_intent[:55].rsplit(" ", 1)[0] + "..."
+        else:
+            intent = raw_intent
 
         # Color coding
         if status == "keep":
@@ -206,8 +211,11 @@ class LiveOptimizationDisplay:
         if status == "keep":
             self._kept_count += 1
 
+        # Use global sequential numbering
+        global_num = len(self._iterations) + 1
+
         self._iterations.append({
-            "num": num,
+            "num": global_num,
             "speedup": speedup,
             "status": status,
             "intent": intent,
@@ -267,8 +275,12 @@ class LiveOptimizationDisplay:
 
         # Round strategy + target progress
         if self._current_strategy:
+            # Truncate at word boundary
+            strat = self._current_strategy
+            if len(strat) > 65:
+                strat = strat[:65].rsplit(" ", 1)[0] + "..."
             strat_line = Text()
-            strat_line.append(f"  Strategy: {self._current_strategy[:60]}", style="white")
+            strat_line.append(f"  Strategy: {strat}", style="white")
             parts.append(strat_line)
         if self._target_speedup is not None:
             pct = min(100, int(self._best_speedup / self._target_speedup * 100))

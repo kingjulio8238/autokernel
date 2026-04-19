@@ -114,6 +114,8 @@ class LLMProvider:
         Creates a temporary event loop if needed.
         """
         import asyncio
+        import logging as _logging
+        _logging.getLogger("asyncio").setLevel(_logging.CRITICAL)
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
