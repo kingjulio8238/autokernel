@@ -50,18 +50,26 @@ def _sparkline(values: list[float], width: int = 40) -> Text:
     if not values:
         return Text("  No data yet", style="white")
 
-    mx = max(values) if max(values) > 0 else 1.0
+    best = max(values)
 
-    # Pad or truncate to width
+    # All zeros — show red blocks instead of invisible spaces
+    if best <= 0:
+        chars = "▁" * len(values[-width:])
+        result = Text()
+        result.append("  ")
+        result.append(chars, style="#ef4444")
+        result.append("  0.00x — no successful iterations", style="#ef4444")
+        return result
+
+    mx = best
     display_vals = values[-width:]
 
     chars = ""
     for v in display_vals:
-        idx = min(8, int(v / mx * 8)) if mx > 0 else 0
+        idx = max(1, min(8, int(v / mx * 8))) if v > 0 else 1
         chars += _BLOCKS[idx]
 
-    best = max(values)
-    best_style = "#4ade80" if best > 1.0 else "#fbbf24" if best > 0 else "#ef4444"
+    best_style = "#4ade80" if best > 1.0 else "#fbbf24"
 
     result = Text()
     result.append("  ")

@@ -2575,21 +2575,19 @@ class KernelCodeShell:
             cache_session_id=bridge.session_id,
         )
 
-        # Post-optimization summary
-        self._print_post_optimization_summary(
-            best_speedup=result.final_speedup,
-            kept=kept,
-            total=len(self._runs),
-            cost=self._total_cost,
-            session_total=self._budget.total_spent,
-        )
-
-        # Generate next-step suggestions
+        # Generate next-step suggestions (use user's selected model, not default)
         next_steps = generate_next_steps_rule_based(self._session_data)
         try:
-            next_steps = asyncio.run(generate_next_steps_llm(self._session_data))
+            from openkernel.config import ModelConfig as _MC
+            _model_cfg = _MC(
+                provider=self._settings.default_provider,
+                model_id=self._settings.default_model,
+            )
+            next_steps = asyncio.run(generate_next_steps_llm(
+                self._session_data, model_config=_model_cfg,
+            ))
         except Exception:
-            pass
+            pass  # keep rule-based fallback
         self._pending_next_steps = next_steps
         if next_steps:
             self._console.print(format_next_steps(next_steps))
