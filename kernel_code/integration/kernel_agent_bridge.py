@@ -85,12 +85,22 @@ class KernelAgentBridge:
 
         start_time = time.time()
 
-        # Suppress KernelAgent's verbose logging (raw LLM responses, worker details)
-        for logger_name in [
-            "TritonKernelAgent", "kernel_agent.manager", "kernel_agent.worker",
-            "kernel_agent.agent", "kernel_agent.prompt_manager", "httpx",
-        ]:
-            logging.getLogger(logger_name).setLevel(logging.WARNING)
+        # Suppress ALL KernelAgent and LLM client logging.
+        # Must suppress before AND after agent creation since loggers are
+        # created lazily. Also suppress at root level to catch child loggers.
+        _suppress_names = [
+            "kernel_agent", "TritonKernelAgent", "httpx", "openai",
+            "anthropic", "litellm",
+            "kernel_agent.ka_utils", "kernel_agent.ka_utils.providers",
+            "kernel_agent.ka_utils.providers.openai_base",
+            "kernel_agent.manager", "kernel_agent.worker",
+            "kernel_agent.agent", "kernel_agent.prompt_manager",
+        ]
+        for name in _suppress_names:
+            lg = logging.getLogger(name)
+            lg.setLevel(logging.CRITICAL)
+            lg.propagate = False
+            lg.handlers = []  # remove any existing handlers
 
         # Ensure API keys are in env — KernelAgent's providers read from os.environ
         from kernel_code.settings import load_settings, inject_api_keys
