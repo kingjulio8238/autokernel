@@ -85,6 +85,9 @@ class LLMProvider:
                 self._groq_model = self._groq_model[5:]
         else:
             # litellm for everything else
+            import warnings
+            warnings.filterwarnings("ignore", message=".*Pydantic serializer.*")
+            warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
             import litellm
             litellm.suppress_debug_info = True
             # API base (only MiniMax needs a custom one)
