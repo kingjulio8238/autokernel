@@ -146,6 +146,8 @@ class InnerLoopAdapter:
                 f"Headroom: {d.estimated_headroom:.2f}x, "
                 f"Confidence: {d.confidence:.2f}"
             )
+        elif inner.last_error:
+            critic_feedback = inner.last_error
         else:
             critic_feedback = f"No diagnosis available (status: {inner.status.value})."
 

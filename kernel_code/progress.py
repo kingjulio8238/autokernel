@@ -170,9 +170,14 @@ class OptimizationProgress:
     def error(self, error_type: str, message: str) -> None:
         """Report an error during an iteration."""
         self._stop_status()
+        # Show first line of error clearly, rest dimmed
+        lines = message.strip().split("\n")
+        first = lines[0][:120]
         self._console.print(
-            f"  [red]![/red] [red]{error_type}[/red]: [dim]{message[:80]}[/dim]"
+            f"  [red]![/red] [red]{error_type}[/red]: [white]{first}[/white]"
         )
+        for line in lines[1:3]:  # show up to 2 more lines for context
+            self._console.print(f"    [white]{line[:120]}[/white]")
 
     def complete(self, best_speedup: float, iterations: int, kept: int, cost: float) -> None:
         """Report that the optimization run is complete."""

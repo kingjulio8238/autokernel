@@ -57,6 +57,7 @@ class InnerRefinementResult:
     best_speedup: float = 0.0
     iterations_used: int = 0
     final_diagnosis: CriticDiagnosis | None = None
+    last_error: str = ""  # last error/feedback when all attempts fail
     all_speedups: list[float] = field(default_factory=list)
     total_tokens: int = 0
     total_cost_usd: float = 0.0
@@ -247,6 +248,7 @@ class InnerLoop:
             best_speedup=best_speedup,
             iterations_used=len(all_speedups),
             final_diagnosis=last_diagnosis,
+            last_error=critic_feedback or "",
             all_speedups=all_speedups,
             total_tokens=tokens_after - tokens_before,
             total_cost_usd=cost_after - cost_before,

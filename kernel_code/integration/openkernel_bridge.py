@@ -429,7 +429,7 @@ class OpenKernelBridge:
             elif decision == "discard":
                 self._progress.discarded(speedup, self._best_speedup)
             elif decision == "error":
-                error_msg = result.critic_feedback[:80] if result.critic_feedback else "unknown"
+                error_msg = result.critic_feedback[:200] if result.critic_feedback else "unknown"
                 self._progress.error(status, error_msg)
 
         iteration_data = {
