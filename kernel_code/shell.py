@@ -1916,40 +1916,31 @@ class KernelCodeShell:
 
         src = _Path(filepath).resolve()
         if not src.is_file():
-            self._console.print(f"[#ef4444]File not found: {filepath}[/#ef4444]")
+            self._console.print(f"[#ef4444]File not found: {escape(filepath)}[/#ef4444]")
             return
 
         content = src.read_text()
 
-        # Validate it has a Model class with forward()
-        if "class Model" not in content or "def forward" not in content:
-            self._console.print(
-                "[#fbbf24]Warning: no Model class with forward() found.[/#fbbf24] "
-                "The optimizer expects a KernelBench-style reference."
-            )
+        # Detect format
+        from kernel_code.problem import detect_format, FORMAT_KERNELBENCH, FORMAT_GPUMODE
 
-        # Copy to reference.py
-        header = (
-            f'"""\nCustom reference: {src.name}\n'
-            f'READ-ONLY — do not modify this file. The agent modifies kernel.py instead.\n'
-            f'Loaded via /problem load {filepath}\n"""\n\n'
-        )
+        fmt = detect_format(content)
+
+        # Copy to reference.py (preserving original for the engine)
         ref_path = _PROJECT_ROOT / "reference.py"
-        ref_path.write_text(header + content)
+        ref_path.write_text(content)
 
-        # Generate passthrough kernel.py
-        import re
-        match = re.search(r"def forward\(self,(.*?)\).*?:", content, re.DOTALL)
-        forward_params = match.group(1).strip() if match else "*args"
+        # Also copy adjacent files for GPU Mode format (task.py, utils.py)
+        if fmt == FORMAT_GPUMODE:
+            for extra in ["task.py", "utils.py"]:
+                extra_src = src.parent / extra
+                if extra_src.is_file():
+                    (_PROJECT_ROOT / extra).write_text(extra_src.read_text())
 
-        from scripts.setup_problem import make_passthrough_kernel
-        kernel_code = make_passthrough_kernel(content, forward_params)
-        kernel_path = _PROJECT_ROOT / "kernel.py"
-        kernel_path.write_text(kernel_code)
-
-        self._console.print(f"[#4ade80]Loaded: {src.name}[/#4ade80]")
-        self._console.print(f"  [white]reference.py — target to beat[/white]")
-        self._console.print(f"  [white]kernel.py — passthrough baseline[/white]")
+        fmt_label = {"kernelbench": "KernelBench", "gpumode": "GPU Mode", "custom": "Custom"}.get(fmt, fmt)
+        self._console.print(f"  [#d77757]Loaded:[/#d77757] [bold white]{src.name}[/bold white]")
+        self._console.print(f"  \u23bf  format: {fmt_label}")
+        self._console.print(f"  \u23bf  reference.py updated")
         self._console.print()
         self._console.print("  Run [bold]/optimize[/bold] to start.")
 
