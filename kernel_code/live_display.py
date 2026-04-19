@@ -311,24 +311,30 @@ class LiveOptimizationDisplay:
                 rnd = w.get("round", 0)
                 max_rnd = w.get("max_rounds", 10)
                 status = w.get("status", "working")
+                action = w.get("action", "")
 
                 wline = Text()
-                wline.append(f"  Worker {wid + 1}  ", style="white")
+                wline.append(f"  Worker {wid + 1}  ", style="bold white")
 
                 # Progress bar
-                bar_w = 20
+                bar_w = 16
                 filled = int(rnd / max(max_rnd, 1) * bar_w)
                 if status == "passed":
                     wline.append("█" * bar_w, style="#4ade80")
-                    wline.append("  ✓ passed", style="bold #4ade80")
+                    wline.append("  ✓ correct kernel found", style="bold #4ade80")
                 elif status == "stopped":
                     wline.append("█" * filled, style="#888888")
                     wline.append("░" * (bar_w - filled), style="#333333")
                     wline.append("  stopped", style="#888888")
+                elif status == "waiting":
+                    wline.append("░" * bar_w, style="#333333")
+                    wline.append("  starting...", style="#888888")
                 else:
                     wline.append("█" * filled, style="#22d3ee")
                     wline.append("░" * (bar_w - filled), style="#333333")
-                    wline.append(f"  round {rnd}/{max_rnd}", style="white")
+                    wline.append(f"  {rnd}/{max_rnd}", style="white")
+                    if action:
+                        wline.append(f"  {action}", style="#888888")
 
                 parts.append(wline)
             parts.append(Text(""))

@@ -167,8 +167,52 @@ class KernelAgentBridge:
                         return wdir
             return None
 
+        def _get_worker_action(wdir: Path) -> str:
+            """Parse the last log line to get the worker's current action."""
+            log_file = None
+            for f in wdir.iterdir():
+                if f.suffix == ".log":
+                    log_file = f
+                    break
+            if not log_file or not log_file.exists():
+                return ""
+            try:
+                # Read last 500 bytes to find the last log line
+                size = log_file.stat().st_size
+                with open(log_file, "r") as fh:
+                    if size > 500:
+                        fh.seek(size - 500)
+                    lines = fh.readlines()
+                # Find last INFO line with a meaningful action
+                for line in reversed(lines):
+                    if "INFO" not in line:
+                        continue
+                    # Extract the message after the log prefix
+                    parts = line.split(" - INFO - ", 1)
+                    if len(parts) == 2:
+                        msg = parts[1].strip()
+                        # Shorten common patterns
+                        if "Refining kernel" in msg:
+                            return "refining"
+                        if "Remote eval PASS" in msg:
+                            return "eval passed"
+                        if "Remote eval FAIL" in msg:
+                            return "eval failed"
+                        if "Round" in msg:
+                            return "evaluating"
+                        if "Writing" in msg or "wrote" in msg.lower():
+                            return "writing"
+                        if "Test" in msg and "passed" in msg.lower():
+                            return "test passed"
+                        if "Test" in msg and "failed" in msg.lower():
+                            return "test failed"
+                        return msg[:30]
+                return ""
+            except Exception:
+                return ""
+
         def _poll_workers():
-            """Poll worker directories for round progress."""
+            """Poll worker directories for round progress and current action."""
             workers_dir = _find_workers_dir()
             if not workers_dir:
                 return
@@ -179,22 +223,26 @@ class KernelAgentBridge:
                     round_files = list(wdir.glob("round_*.json"))
                     rounds = len(round_files)
                     status = "working"
+                    action = _get_worker_action(wdir)
                     if rounds > 0:
                         try:
                             latest = max(round_files, key=lambda p: p.name)
                             data = json.loads(latest.read_text())
                             if data.get("success"):
                                 status = "passed"
+                                action = "correct kernel found"
                         except Exception:
                             pass
                     worker_states.append({
                         "id": i, "round": rounds,
                         "max_rounds": self._max_rounds, "status": status,
+                        "action": action,
                     })
                 else:
                     worker_states.append({
                         "id": i, "round": 0,
                         "max_rounds": self._max_rounds, "status": "waiting",
+                        "action": "",
                     })
             if self._live_display:
                 self._live_display.update_workers(worker_states)
