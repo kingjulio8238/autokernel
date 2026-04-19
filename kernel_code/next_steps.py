@@ -289,17 +289,17 @@ def format_next_steps(
 
     for step in steps:
         result.append(f"    {step.number}. ", style="bold #22d3ee")
-        result.append(step.title, style="bold")
+        result.append(step.title, style="bold white")
         if step.expected_gain:
-            result.append(f"  ({step.expected_gain})", style="dim")
+            result.append(f"  ({step.expected_gain})", style="white")
         result.append("\n")
         if step.approach:
-            result.append(f"       {step.approach}\n", style="dim")
+            result.append(f"       {step.approach}\n", style="white")
         if step.skill_id:
-            result.append(f"       /skill:{step.skill_id}\n", style="#22d3ee dim")
+            result.append(f"       /skill:{step.skill_id}\n", style="#22d3ee")
 
     result.append(
         "\n  Type 1, 2, or 3 to start the next optimization\n",
-        style="dim italic",
+        style="white italic",
     )
     return result

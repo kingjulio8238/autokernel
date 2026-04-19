@@ -96,12 +96,12 @@
       "recommended_for": ["testing", "development", "free_tier"]
     },
     {
-      "id": "groq/qwen-qwq-32b",
+      "id": "groq/qwen/qwen3-32b",
       "provider": "groq",
-      "name": "Qwen QwQ 32B (Groq)",
+      "name": "Qwen3 32B (Groq)",
       "strengths": [
         "Free tier",
-        "Strong reasoning model",
+        "Strong reasoning and coding",
         "Good for kernel optimization strategy"
       ],
       "cost_tier": "free",

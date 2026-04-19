@@ -67,6 +67,12 @@ if _HAS_PROMPT_TOOLKIT:
             buf.validate_and_handle()
 
 from kernel_code.advisor import AdvisorState, should_advise, get_advice
+from kernel_code.next_steps import (
+    NextStep,
+    generate_next_steps_llm,
+    generate_next_steps_rule_based,
+    format_next_steps,
+)
 from kernel_code.agent_loop import AgentLoop
 from kernel_code.cost_dashboard import CostTracker
 from kernel_code.file_cache import FileStateCache
@@ -135,7 +141,7 @@ if _HAS_PROMPT_TOOLKIT:
                     ("/git", "Show git optimization log"),
                     ("/history", "Show run history"),
                     ("/config", "View/edit settings"),
-                    ("/providers", "Manage LLM API keys"),
+                    ("/models", "Browse & select LLM models"),
                     ("/evolve", "Template evolution status"),
                     ("/cost", "Cost breakdown dashboard"),
                     ("/advisor", "Optimization suggestions"),
@@ -265,6 +271,9 @@ class KernelCodeShell:
         # Agentic loop for natural language (lazy-init on first NL input)
         self._agent_loop: AgentLoop | None = None
 
+        # Pending next-step suggestions (set after each optimization)
+        self._pending_next_steps: list[NextStep] = []
+
         # prompt_toolkit session (history + completion + styled prompt)
         self._prompt_session: PromptSession | None = None  # type: ignore[type-arg]
         if _HAS_PROMPT_TOOLKIT:
@@ -310,7 +319,8 @@ class KernelCodeShell:
             "/evolve": self._cmd_evolve,
             "/doctor": self._cmd_doctor,
             "/theme": self._cmd_theme,
-            "/providers": self._cmd_providers,
+            "/models": self._cmd_models,
+            "/advisor": self._cmd_advisor,
             "/help": self._cmd_help,
             "/quit": self._cmd_quit,
             "/exit": self._cmd_quit,
@@ -467,6 +477,10 @@ class KernelCodeShell:
         self._conversation.add_user(stripped)
 
         try:
+            # Handle next-step shortcut: "1", "2", or "3" after optimization
+            if stripped in ("1", "2", "3") and self._pending_next_steps:
+                self._pick_next_step(int(stripped))
+                return
             if stripped.startswith("/"):
                 self._dispatch_command(stripped)
             else:
@@ -890,7 +904,8 @@ class KernelCodeShell:
                 "/doctor",
                 "Check environment health (Modal, API keys, skills, deps)",
             ),
-            ("/providers", "Show/set LLM provider API keys"),
+            ("/models", "Browse & select LLM models"),
+            ("/advisor", "Show 3 next optimization suggestions"),
             ("/theme", "Show/change terminal theme"),
             ("/help", "Show this help message"),
             ("/quit, /exit", "Exit the shell"),
@@ -1280,47 +1295,257 @@ class KernelCodeShell:
                 f"[red]Failed to apply evolution for {escape(skill_id)}.[/red]"
             )
 
-    def _cmd_providers(self, args_str: str) -> None:
-        """Show configured LLM/infra providers and set API keys."""
-        args = args_str.strip()
+    def _has_provider_key(self, provider: str, env_key: str) -> bool:
+        """Check if an API key is configured for a provider."""
+        import os
+        # Check env var (non-empty string)
+        env_val = os.environ.get(env_key or "")
+        if env_val:
+            return True
+        # Check settings file
+        settings_val = getattr(self._settings, f"{provider}_api_key", None)
+        if settings_val:
+            return True
+        return False
 
-        # /providers set groq_api_key VALUE
-        if args.startswith("set "):
-            parts = args[4:].strip().split(None, 1)
-            if len(parts) != 2:
-                self._console.print("[white]Usage: /providers set KEY VALUE[/white]")
-                self._console.print("[white]Keys: groq_api_key, minimax_api_key, anthropic_api_key, openai_api_key, hf_token[/white]")
-                return
-            key, value = parts
-            if key not in _API_KEY_ENV_MAP:
-                self._console.print(f"[red]Unknown provider key: {key}[/red]")
-                self._console.print(f"[white]Valid keys: {', '.join(_API_KEY_ENV_MAP.keys())}[/white]")
-                return
-            from kernel_code.settings import save_api_key
-            path = save_api_key(key, value)
-            self._console.print(f"[#4ade80]Saved {key} to {path}[/#4ade80]")
-            self._console.print(f"[white]Env var {_API_KEY_ENV_MAP[key]} is now active[/white]")
-            # Reload settings
-            self._settings = load_settings()
-            inject_api_keys(self._settings)
+    def _cmd_models(self, args_str: str) -> None:
+        """Arrow-key model picker — navigate with up/down, Enter to select, Esc to cancel."""
+        import os
+        from openkernel.llm.models import load_recommended_models
+        from kernel_code.settings import save_api_key
+
+        all_models = load_recommended_models()
+        models = [m for m in all_models if m.get("env_key")]
+        if not models:
+            self._console.print("[#ef4444]No routable models found[/#ef4444]")
             return
 
-        # Show provider status
-        providers = get_configured_providers(self._settings)
-        table = Table(title="LLM & Infrastructure Providers", show_header=True, border_style="white")
-        table.add_column("Provider", style="bold white")
-        table.add_column("Env Variable", style="white")
-        table.add_column("Status", justify="center")
-        table.add_column("Source", style="white")
+        current_model = self._settings.default_model
 
-        for p in providers:
-            status = "[#4ade80]✓ configured[/#4ade80]" if p["configured"] else "[#ef4444]✗ not set[/#ef4444]"
-            table.add_row(p["name"], p["env_var"], status, p["source"])
+        # Find initial cursor position (current active model)
+        cursor = 0
+        for i, m in enumerate(models):
+            if m["id"] == current_model:
+                cursor = i
+                break
 
-        self._console.print(table)
+        from prompt_toolkit.application import Application
+        from prompt_toolkit.key_binding import KeyBindings
+        from prompt_toolkit.layout import Layout
+        from prompt_toolkit.layout.containers import Window
+        from prompt_toolkit.layout.controls import FormattedTextControl
+
+        selected_idx = [cursor]
+        result = [None]
+
+        def _fmt_ctx(ctx: int) -> str:
+            if ctx >= 1_000_000:
+                return f"{ctx // 1_000_000}M"
+            return f"{ctx // 1_000}K"
+
+        def _get_list_text():
+            lines: list[tuple[str, str]] = []
+            lines.append(("bold", " Models\n\n"))
+
+            # Column layout:
+            #   ▸ Name                 Provider   In/Out $/M   Ctx    Key
+            lines.append(("#666666", "     "))
+            lines.append(("#666666", f"{'Name':<24}{'Provider':<11}{'Cost $/M':<13}{'Context':<9}Key\n"))
+
+            for i, m in enumerate(models):
+                name = m.get("name", m["id"])
+                provider = m.get("provider", "?")
+                env_key = m.get("env_key", "")
+                is_cursor = i == selected_idx[0]
+
+                has_key = self._has_provider_key(provider, env_key)
+
+                # Cost columns
+                cost_tier = m.get("cost_tier", "")
+                if cost_tier == "free":
+                    cost_str = "free"
+                else:
+                    cost_in = m.get("cost_per_m_input", 0)
+                    cost_out = m.get("cost_per_m_output", 0)
+                    cost_str = f"${cost_in:.1f}/${cost_out:.1f}"
+
+                ctx_str = _fmt_ctx(m.get("context_window", 0))
+                key_sym = "\u2713" if has_key else "\u2717"
+                key_style = "#4ade80" if has_key else "#ef4444"
+
+                if is_cursor:
+                    lines.append(("bold #4ade80", "  \u25b8 "))
+                    lines.append(("bold #4ade80", f"{name:<24}"))
+                    lines.append(("#4ade80", f"{provider:<11}"))
+                    lines.append(("#4ade80", f"{cost_str:<13}"))
+                    lines.append(("#4ade80", f"{ctx_str:<9}"))
+                    lines.append((key_style + " bold", f"{key_sym}\n"))
+                else:
+                    lines.append(("", "    "))
+                    lines.append(("", f"{name:<24}"))
+                    lines.append(("#888888", f"{provider:<11}"))
+                    lines.append(("#888888", f"{cost_str:<13}"))
+                    lines.append(("#888888", f"{ctx_str:<9}"))
+                    lines.append((key_style, f"{key_sym}\n"))
+
+            # Detail panel for highlighted model
+            m = models[selected_idx[0]]
+            strengths = m.get("strengths", [])
+            lines.append(("", "\n"))
+            lines.append(("bold", f"  {m.get('name', m['id'])}\n"))
+            for s in strengths[:3]:
+                lines.append(("#aaaaaa", f"    {s}\n"))
+
+            lines.append(("", "\n"))
+            lines.append(("#666666 italic", " \u2191\u2193 navigate  enter select  esc cancel"))
+            return lines
+
+        control = FormattedTextControl(_get_list_text)
+        kb = KeyBindings()
+
+        @kb.add("up")
+        def _up(event):
+            selected_idx[0] = (selected_idx[0] - 1) % len(models)
+
+        @kb.add("down")
+        def _down(event):
+            selected_idx[0] = (selected_idx[0] + 1) % len(models)
+
+        @kb.add("enter")
+        def _enter(event):
+            result[0] = selected_idx[0]
+            event.app.exit()
+
+        @kb.add("escape")
+        def _escape(event):
+            result[0] = None
+            event.app.exit()
+
+        @kb.add("c-c")
+        def _ctrl_c(event):
+            result[0] = None
+            event.app.exit()
+
+        app: Application = Application(
+            layout=Layout(Window(control)),
+            key_bindings=kb,
+            full_screen=False,
+        )
+        app.run()
+
+        if result[0] is None:
+            return
+
+        selected = models[result[0]]
+        provider = selected.get("provider", "")
+        env_key = selected.get("env_key", "")
+
+        # Check API key — ask if missing
+        if not self._has_provider_key(provider, env_key):
+            self._console.print()
+            self._console.print(
+                f"[#fbbf24]No API key for {selected['name']}[/#fbbf24]"
+            )
+            self._console.print(
+                f"[white]Provider: {provider}  |  env var: {env_key}[/white]"
+            )
+            self._console.print()
+            try:
+                key = self._console.input(
+                    "[bold white]Paste API key: [/bold white]"
+                ).strip()
+            except (EOFError, KeyboardInterrupt):
+                key = ""
+            if not key:
+                self._console.print("[white]Cancelled[/white]")
+                return
+
+            key_setting = f"{provider}_api_key"
+            if key_setting in _API_KEY_ENV_MAP:
+                path = save_api_key(key_setting, key)
+                os.environ[_API_KEY_ENV_MAP[key_setting]] = key
+                self._console.print(f"[#4ade80]Saved to {path}[/#4ade80]")
+            else:
+                os.environ[env_key] = key
+                self._console.print("[#4ade80]Key set for this session[/#4ade80]")
+
+        # Apply the model
+        save_project_setting("default_model", selected["id"])
+        save_project_setting("default_provider", provider)
+        self._settings = load_settings()
+        inject_api_keys(self._settings)
+        # Force agent loop to re-create with the new model on next use
+        self._agent_loop = None
+        self._console.print(
+            f"[#4ade80]Active model \u2192 {selected['name']}[/#4ade80]"
+        )
+
+    def _cmd_advisor(self, args_str: str) -> None:
+        """Show optimization suggestions based on current session state."""
+        if not self._session_data.get("iterations"):
+            self._console.print(
+                "[yellow]No optimization data yet.[/yellow] "
+                "Run [bold]/optimize[/bold] first."
+            )
+            return
+
+        # Generate fresh suggestions
+        steps = generate_next_steps_rule_based(self._session_data)
+        try:
+            steps = asyncio.run(generate_next_steps_llm(self._session_data))
+        except Exception:
+            pass  # keep rule-based
+
+        self._pending_next_steps = steps
+        self._console.print(format_next_steps(steps))
+
+    def _pick_next_step(self, choice: int) -> None:
+        """Handle user picking a next-step suggestion (1, 2, or 3)."""
+        if not self._pending_next_steps:
+            return
+        idx = choice - 1
+        if idx < 0 or idx >= len(self._pending_next_steps):
+            return
+
+        step = self._pending_next_steps[idx]
+        self._pending_next_steps = []  # clear after selection
+
         self._console.print()
-        self._console.print("[white]Set a key: /providers set groq_api_key YOUR_KEY[/white]")
-        self._console.print("[white]Keys are saved to .kernel-code/settings.local.yaml (gitignored)[/white]")
+        self._console.print(
+            f"[bold #4ade80]Selected:[/bold #4ade80] {step.title}"
+        )
+
+        # Load the matching skill if one was suggested
+        if step.skill_id:
+            self._cmd_skill_load(step.skill_id)
+
+        # Build the optimization intent from the suggestion
+        intent = f"{step.title}: {step.approach}"
+        self._console.print(
+            f"[white]Intent:[/white] {escape(intent)}"
+        )
+        self._console.print()
+
+        # Re-run optimization with the suggested approach as context
+        # Use the same reference file and backend from the last session
+        ref = self._session_data.get("reference_file", "")
+        backend = self._session_data.get("backend", self._settings.default_backend)
+        iters = self._session_data.get("num_iterations", 10)
+
+        if not ref:
+            self._console.print(
+                "[yellow]No reference file from last run. "
+                "Run [bold]/optimize --reference FILE[/bold] instead.[/yellow]"
+            )
+            return
+
+        self._console.print(
+            f"[bold]Starting optimization:[/bold] {step.title}"
+        )
+        self._cmd_optimize(
+            f"--reference {ref} --backend {backend} "
+            f"--iterations {iters}"
+        )
 
     def _cmd_doctor(self, args_str: str) -> None:
         """Diagnose installation and environment health."""
@@ -1645,10 +1870,19 @@ class KernelCodeShell:
         Falls back to non-streaming if streaming fails.
         """
         # Lazy-initialise the agent loop so we only create the LLM
-        # provider when actually needed.
+        # provider when actually needed.  Build ModelConfig from current
+        # settings so the user's /models selection is respected.
         if self._agent_loop is None:
+            # Ensure API keys from settings are in env before creating provider
+            inject_api_keys(self._settings)
+            from openkernel.config import ModelConfig
+            model_config = ModelConfig(
+                provider=self._settings.default_provider,
+                model_id=self._settings.default_model,
+            )
             self._agent_loop = AgentLoop(
                 session_context=self._session_data,
+                model_config=model_config,
                 console=self._console,
                 conversation=self._conversation,
             )
@@ -1661,11 +1895,14 @@ class KernelCodeShell:
         answer: str | None = None
         try:
             asyncio.run(self._stream_response(text))
-        except Exception:
+        except Exception as stream_exc:
             # Fall back to non-streaming if streaming fails
-            with self._agent_progress.thinking():
-                answer = asyncio.run(self._agent_loop.run(text))
-            self._console.print(escape(answer))
+            try:
+                with self._agent_progress.thinking():
+                    answer = asyncio.run(self._agent_loop.run(text))
+                self._console.print(escape(answer))
+            except Exception as exc:
+                format_error(exc, context="LLM call", console=self._console)
 
         # Record assistant response in conversation history
         if answer:
@@ -1904,6 +2141,22 @@ class KernelCodeShell:
         )
         self._console.quiet = False
 
+        # Generate next-step suggestions for the recursive loop
+        next_steps = generate_next_steps_rule_based(
+            self._session_data,
+            {"bottleneck": last_bottleneck, "tried": []},
+        )
+        # Try LLM-powered suggestions (async, falls back to rule-based)
+        try:
+            next_steps = asyncio.run(generate_next_steps_llm(
+                self._session_data,
+            ))
+        except Exception:
+            pass  # keep rule-based fallback
+
+        # Store for "1"/"2"/"3" shortcut input
+        self._pending_next_steps = next_steps
+
         # Single summary card — replaces all scattered post-optimization output
         elapsed = _time.time() - start_time
         render_optimization_summary(
@@ -1917,6 +2170,7 @@ class KernelCodeShell:
             bottleneck_type=last_bottleneck,
             bottleneck_metrics=last_profile,
             skill_suggestions=suggestions,
+            next_steps=next_steps,
             dashboard_url=f"http://localhost:8050/session/{self._session_id}",
             saved_path="",
             console=self._console,
