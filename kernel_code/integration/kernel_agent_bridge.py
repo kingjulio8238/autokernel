@@ -356,7 +356,7 @@ class KernelAgentBridge:
                 else:
                     eval_code = kernel_code
 
-                eval_result = _modal_eval(eval_code, self._reference, problem_format=fmt)
+                eval_result = _modal_eval(eval_code, self._self_contained_ref, problem_format=self._resolved_format)
                 if eval_result.get("correct"):
                     speedup = eval_result.get("speedup", 0.0)
                     ref_runtime_us = eval_result.get("ref_runtime_us", 0.0)
