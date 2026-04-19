@@ -22,6 +22,22 @@ from kernel_agent.ka_utils.providers.relay_provider import RelayProvider
 
 # Registry of all available models (external/OSS version)
 AVAILABLE_MODELS = [
+    # OpenAI GPT-4o Models
+    ModelConfig(
+        name="gpt-4o",
+        provider_classes=[OpenAIProvider],
+        description="GPT-4o - strong coding and kernel generation",
+    ),
+    ModelConfig(
+        name="gpt-4o-mini",
+        provider_classes=[OpenAIProvider],
+        description="GPT-4o Mini - fast and cheap",
+    ),
+    ModelConfig(
+        name="o3-mini",
+        provider_classes=[OpenAIProvider],
+        description="o3-mini - strong reasoning model",
+    ),
     ModelConfig(
         name="o4-mini",
         provider_classes=[OpenAIProvider],

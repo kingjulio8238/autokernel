@@ -85,6 +85,11 @@ class KernelAgentBridge:
 
         start_time = time.time()
 
+        # Ensure API keys are in env — KernelAgent's providers read from os.environ
+        from kernel_code.settings import load_settings, inject_api_keys
+        settings = load_settings()
+        inject_api_keys(settings)
+
         # Build problem description from reference
         problem_desc = (
             f"Optimize the following PyTorch code into a fast Triton kernel "
