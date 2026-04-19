@@ -44,6 +44,18 @@ class TritonBackend(BackendBase):
         if "class ModelNew" not in code:
             return False, "Generated code does not contain 'class ModelNew'"
 
+        # Check nn.Module inheritance
+        if "nn.Module" not in code and "torch.nn.Module" not in code:
+            return False, "ModelNew must inherit from nn.Module (class ModelNew(nn.Module))"
+
+        # Check super().__init__()
+        if "super()" not in code and "super(ModelNew" not in code:
+            return False, "ModelNew.__init__ must call super().__init__()"
+
+        # Check for forward method
+        if "def forward" not in code:
+            return False, "ModelNew must define a forward() method"
+
         # Check Python syntax
         try:
             ast.parse(code)
@@ -102,6 +114,12 @@ Optimization intent: {intent}
 Critic feedback: {critic_feedback}
 Relevant skills: {skills}
 
-The kernel must define a `ModelNew` class with the same `forward()` signature.
+CRITICAL REQUIREMENTS:
+- Define `ModelNew(torch.nn.Module)` that inherits from torch.nn.Module
+- __init__ MUST call super(ModelNew, self).__init__()
+- forward() MUST have the same signature as Model.forward() in the reference
+- Output must be a complete self-contained Python file with all imports
+- The eval harness calls ModelNew().to(device) — this MUST work
+
 Return the complete Python file inside a ```python code block.
 """
