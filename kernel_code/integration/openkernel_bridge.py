@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from kernel_code.file_cache import FileStateCache
     from kernel_code.hooks import HookRegistry
+    from kernel_code.live_display import LiveOptimizationDisplay
     from kernel_code.progress import OptimizationProgress
 
 from openkernel.config import OpenKernelConfig
@@ -214,6 +215,7 @@ class OpenKernelBridge:
         backend: str = "triton",
         hooks: "HookRegistry | None" = None,
         progress: "OptimizationProgress | None" = None,
+        live_display: "LiveOptimizationDisplay | None" = None,
         file_cache: "FileStateCache | None" = None,
     ) -> None:
         self._config = config
@@ -223,6 +225,7 @@ class OpenKernelBridge:
         self._backend = backend
         self._hooks = hooks
         self._progress = progress
+        self._live_display = live_display
         self._file_cache = file_cache
 
         # Where the TUI looks for data
@@ -326,17 +329,11 @@ class OpenKernelBridge:
 
             if decision.stop:
                 self._stop_reason = decision.reason
-                if self._progress:
-                    self._progress._stop_status()
-                    self._progress._console.print(
-                        f"  [#fbbf24]Stopping:[/#fbbf24] [white]{decision.reason}[/white]"
-                    )
                 return True
 
             if decision.adjust:
-                if self._progress:
-                    self._progress._stop_status()
-                    self._progress._console.print(
+                if self._live_display:
+                    self._live_display.print_permanent(
                         f"  [#22d3ee]Adjusted:[/#22d3ee] [white]{decision.reason}[/white]"
                     )
             return False
@@ -391,7 +388,9 @@ class OpenKernelBridge:
 
         Updates the spinner with the current status message.
         """
-        if self._progress is not None:
+        if self._live_display is not None:
+            self._live_display.update_phase(message)
+        elif self._progress is not None:
             self._progress._update_status(message)
 
     def _on_iteration(
@@ -403,11 +402,7 @@ class OpenKernelBridge:
         best_kernel: str,
     ) -> None:
         """Called after each orchestrator iteration to update the cache."""
-        # Report per-step progress if a progress reporter is configured
-        if self._progress is not None:
-            self._progress.start_iteration(iteration, node.description)
-
-        # Map orchestrator result -> TUI iteration schema (matches mock_data.py)
+        # Map orchestrator result -> iteration schema
         if result.status == "failed" or result.status == "error":
             status = "compile_error" if "compile" in result.critic_feedback.lower() else "error"
             decision = "error"
@@ -422,8 +417,17 @@ class OpenKernelBridge:
             decision = "discard"
             speedup = result.best_speedup
 
-        # Report outcome via progress reporter
-        if self._progress is not None:
+        # Update live display (inline sparkline + table)
+        if self._live_display is not None:
+            self._live_display.update_iteration(
+                num=iteration,
+                speedup=speedup,
+                status=decision,
+                intent=node.description,
+            )
+        # Fallback to old progress reporter
+        elif self._progress is not None:
+            self._progress.start_iteration(iteration, node.description)
             if decision == "keep":
                 self._progress.kept(speedup, is_new_best=(speedup == self._best_speedup))
             elif decision == "discard":

@@ -2480,6 +2480,25 @@ class KernelCodeShell:
             config = OpenKernelConfig.from_yaml(config_path)
 
         from kernel_code.integration import OpenKernelBridge
+        from kernel_code.live_display import LiveOptimizationDisplay
+
+        # Detect problem name from reference.py docstring
+        ref_problem = ""
+        ref_lines = ref_path.read_text().split("\n", 5)
+        for line in ref_lines:
+            if "Problem" in line or "KernelBench" in line:
+                ref_problem = line.strip().strip('"').strip("'").strip()
+                break
+        if not ref_problem:
+            ref_problem = ref_path.name
+
+        live_display = LiveOptimizationDisplay(
+            console=self._console,
+            problem=ref_problem,
+            hardware=self._settings.default_gpu,
+            backend=backend,
+            max_iterations=iterations,
+        )
 
         problem_label = f"L{level}#{problem}"
         bridge = OpenKernelBridge(
@@ -2490,14 +2509,18 @@ class KernelCodeShell:
             backend=backend,
             hooks=self._hooks,
             progress=self._opt_progress,
+            live_display=live_display,
             file_cache=self._file_cache,
         )
 
-        self._console.print(f"  Session:   {bridge.session_id}")
-        self._console.print(f"  Cache:     {bridge.cache_path}")
-        self._console.print()
-
-        result = bridge.run_optimization(reference_source)
+        # Start inline live display
+        live_display.start()
+        try:
+            result = bridge.run_optimization(reference_source)
+        finally:
+            # Get stop reason from bridge if available
+            stop_reason = getattr(bridge, '_stop_reason', '')
+            live_display.finish(stop_reason=stop_reason)
 
         # Load the final session data from cache
         if bridge.cache_path.exists():
