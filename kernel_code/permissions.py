@@ -50,7 +50,7 @@ def confirm_cost(
 
     con.print(
         f"[bold]Estimated cost:[/bold] ~${estimated_cost:.2f} "
-        f"({iterations} iterations on {gpu_type})"
+        f"(up to {iterations} iterations on {gpu_type}, may stop earlier)"
     )
 
     if estimated_cost < 0.10:

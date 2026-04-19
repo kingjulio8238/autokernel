@@ -536,7 +536,7 @@ class KernelCodeShell:
         backend = self._settings.default_backend
         config_path = None
         mock = False
-        iterations = 20
+        iterations = 10  # default; stopping controller may stop earlier
         level = 1
         problem = 23
         parallel = False
