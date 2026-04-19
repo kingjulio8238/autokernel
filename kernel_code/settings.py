@@ -50,6 +50,11 @@ _FIELD_TYPES: dict[str, type] = {
     "show_trajectory": bool,
     "vi_mode": bool,
     "verbosity": str,
+    "num_workers": int,
+    "max_rounds": int,
+    "iterations_per_round": int,
+    "max_autopilot_rounds": int,
+    "engine": str,
     # API keys (stored in settings.local.yaml, gitignored)
     "groq_api_key": str,
     "minimax_api_key": str,
@@ -73,12 +78,20 @@ class KernelCodeSettings:
     default_backend: str = "triton"
     default_gpu: str = "L40S"
 
+    # Optimization run params
+    # Set via: /config set num_workers 2
+    num_workers: int = 4              # parallel KernelAgent workers
+    max_rounds: int = 10              # max refinement rounds per worker
+    iterations_per_round: int = 5     # iterations per autopilot round
+    max_autopilot_rounds: int = 5     # max outer-loop rounds for /autopilot
+    engine: str = "kernel-agent"      # "kernel-agent" or "native"
+
     # Budget
-    max_budget: float | None = None  # per-session spending cap
-    auto_confirm_under: float = 0.10  # auto-approve costs below this
+    max_budget: float | None = None   # per-session spending cap ($)
+    auto_confirm_under: float = 0.10  # auto-approve costs below this ($)
 
     # Behavior
-    auto_save: bool = True  # auto-save best kernel after optimization
+    auto_save: bool = True            # auto-save best kernel after optimization
     capture_traces: bool = True
     dashboard_port: int = 8050
 
@@ -87,8 +100,8 @@ class KernelCodeSettings:
     show_trajectory: bool = True
 
     # Shell / UX
-    vi_mode: bool = False  # prompt_toolkit vi keybindings
-    verbosity: str = "normal"  # "quiet" | "normal" | "verbose"
+    vi_mode: bool = False             # prompt_toolkit vi keybindings
+    verbosity: str = "normal"         # "quiet" | "normal" | "verbose"
 
     # API Keys (stored in settings.local.yaml — gitignored, never committed)
     # Set via: /config set groq_api_key YOUR_KEY

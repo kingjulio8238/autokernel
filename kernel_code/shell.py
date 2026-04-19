@@ -537,12 +537,12 @@ class KernelCodeShell:
         backend = self._settings.default_backend
         config_path = None
         mock = False
-        iterations = 10  # default; stopping controller may stop earlier
+        iterations = self._settings.max_rounds
         level = 1
         problem = 23
         parallel = False
         git_enabled = False
-        engine = "kernel-agent"  # "kernel-agent" or "native"
+        engine = self._settings.engine
 
         i = 0
         while i < len(tokens):
@@ -2690,16 +2690,17 @@ class KernelCodeShell:
         )
 
         model = self._settings.default_model
+        workers = self._settings.num_workers
         self._console.print(f"[bold]Running optimization (KernelAgent engine)...[/bold]")
         self._console.print(f"  Reference: {escape(reference)}")
         self._console.print(f"  Model:     {model}")
-        self._console.print(f"  Workers:   4 parallel")
+        self._console.print(f"  Workers:   {workers} parallel")
         self._console.print()
 
         bridge = KernelAgentBridge(
             reference_source=reference_source,
             model_name=model,
-            num_workers=4,
+            num_workers=workers,
             max_rounds=iterations,
             hardware=self._settings.default_gpu,
             live_display=live_display,
