@@ -2706,6 +2706,7 @@ class KernelCodeShell:
             run_logger=run_logger,
         )
 
+        result = {}
         live_display.start()
         try:
             result = bridge.run()
