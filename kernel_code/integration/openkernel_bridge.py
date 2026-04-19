@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from kernel_code.hooks import HookRegistry
     from kernel_code.live_display import LiveOptimizationDisplay
     from kernel_code.progress import OptimizationProgress
+    from kernel_code.run_log import RunLogger
 
 from openkernel.config import OpenKernelConfig
 from openkernel.engine.factory import create_engine
@@ -216,6 +217,7 @@ class OpenKernelBridge:
         hooks: "HookRegistry | None" = None,
         progress: "OptimizationProgress | None" = None,
         live_display: "LiveOptimizationDisplay | None" = None,
+        run_logger: "RunLogger | None" = None,
         file_cache: "FileStateCache | None" = None,
     ) -> None:
         self._config = config
@@ -226,6 +228,7 @@ class OpenKernelBridge:
         self._hooks = hooks
         self._progress = progress
         self._live_display = live_display
+        self._run_logger = run_logger
         self._file_cache = file_cache
 
         # Where the TUI looks for data
@@ -435,6 +438,16 @@ class OpenKernelBridge:
             elif decision == "error":
                 error_msg = result.critic_feedback[:200] if result.critic_feedback else "unknown"
                 self._progress.error(status, error_msg)
+
+        # Log to run log
+        if self._run_logger is not None:
+            self._run_logger.log_iteration(
+                num=iteration,
+                speedup=speedup,
+                status=decision,
+                intent=node.description,
+                error=result.critic_feedback if decision == "error" else "",
+            )
 
         iteration_data = {
             "iteration": iteration,

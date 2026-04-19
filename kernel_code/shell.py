@@ -1643,6 +1643,24 @@ class KernelCodeShell:
             backend=be,
         )
         live_display.set_target(target)
+
+        # Run logger
+        from kernel_code.run_log import RunLogger
+        run_logger = RunLogger()
+        run_logger.start_run(
+            command="/autopilot",
+            config={
+                "command": "/autopilot",
+                "model": model,
+                "hardware": hw,
+                "backend": be,
+                "reference": str(ref_path),
+                "target": target,
+                "budget": budget,
+                "rounds": rounds,
+            },
+        )
+
         live_display.start()
 
         from kernel_code.auto_optimizer import MetaOptimizer
@@ -1652,6 +1670,7 @@ class KernelCodeShell:
             settings=self._settings,
             console=self._console,
             live_display=live_display,
+            run_logger=run_logger,
         )
 
         try:
@@ -1687,6 +1706,16 @@ class KernelCodeShell:
                 f"  [#4ade80]Best kernel saved: {out_name}[/#4ade80]"
             )
 
+        # Finalize run log
+        run_logger.end_run(
+            best_speedup=result.best_speedup,
+            best_kernel=result.best_kernel,
+            stop_reason=result.stop_reason,
+            total_cost=result.total_cost_usd,
+        )
+        self._console.print(
+            f"  [white]Run log:[/white] [#888888]{run_logger.log_path}[/#888888]"
+        )
         self._console.print()
 
     def _cmd_problem(self, args_str: str) -> None:
@@ -2702,6 +2731,20 @@ class KernelCodeShell:
             max_iterations=iterations,
         )
 
+        # Run logger
+        from kernel_code.run_log import RunLogger
+        run_logger = RunLogger()
+        run_logger.start_run(
+            command=f"/optimize --reference {reference}",
+            config={
+                "model": self._settings.default_model,
+                "hardware": self._settings.default_gpu,
+                "backend": backend,
+                "reference": reference,
+                "iterations": iterations,
+            },
+        )
+
         problem_label = f"L{level}#{problem}"
         bridge = OpenKernelBridge(
             config=config,
@@ -2712,6 +2755,7 @@ class KernelCodeShell:
             hooks=self._hooks,
             progress=self._opt_progress,
             live_display=live_display,
+            run_logger=run_logger,
             file_cache=self._file_cache,
         )
 
@@ -2808,6 +2852,17 @@ class KernelCodeShell:
             self._console.print(
                 f"[green]Best kernel saved:[/green] {out_name}"
             )
+
+        # Finalize run log
+        run_logger.end_run(
+            best_speedup=result.final_speedup,
+            best_kernel=result.final_kernel,
+            stop_reason=stop_reason,
+            total_cost=self._total_cost,
+        )
+        self._console.print(
+            f"  [white]/log[/white] [#888888]— {run_logger.log_path}[/#888888]"
+        )
 
     def _run_parallel_optimization(
         self,

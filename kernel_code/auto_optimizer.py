@@ -39,6 +39,7 @@ from kernel_code.meta_reflect import MetaReflection, reflect_on_round
 
 if TYPE_CHECKING:
     from kernel_code.live_display import LiveOptimizationDisplay
+    from kernel_code.run_log import RunLogger
     from kernel_code.settings import KernelCodeSettings
 
 logger = logging.getLogger(__name__)
@@ -75,11 +76,13 @@ class MetaOptimizer:
         settings: "KernelCodeSettings",
         console: Console | None = None,
         live_display: "LiveOptimizationDisplay | None" = None,
+        run_logger: "RunLogger | None" = None,
     ) -> None:
         self._goal = goal
         self._settings = settings
         self._console = console or Console()
         self._live_display = live_display
+        self._run_logger = run_logger
 
         # State
         self._best_speedup: float = 0.0
@@ -103,6 +106,8 @@ class MetaOptimizer:
             # --- Run one round ---
             if self._live_display:
                 self._live_display.start_round(round_num, self._current_strategy)
+            if self._run_logger:
+                self._run_logger.log_round(round_num, self._current_strategy)
 
             round_result = self._run_round(round_num)
             self._round_history.append(round_result)
@@ -203,6 +208,7 @@ class MetaOptimizer:
             hardware=self._goal.hardware,
             backend=self._goal.backend,
             live_display=self._live_display,
+            run_logger=self._run_logger,
         )
 
         reference_source = Path(self._goal.reference_path).read_text()
