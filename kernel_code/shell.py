@@ -3130,14 +3130,14 @@ class KernelCodeShell:
     # ------------------------------------------------------------------
 
     def _print_welcome(self) -> None:
-        """Print the welcome banner."""
+        """Print the welcome banner — Claude Code style."""
         self._console.print()
         self._console.print(
-            "[bold]openkernel[/bold] v0.1 -- interactive kernel optimization shell"
+            "  [bold #d77757]openkernel[/bold #d77757] [#999999]v0.1[/#999999]"
         )
         self._console.print()
 
-        # Problem — detect from reference.py docstring
+        # Problem
         ref_path = _PROJECT_ROOT / "reference.py"
         problem_label = ""
         if ref_path.is_file():
@@ -3147,52 +3147,50 @@ class KernelCodeShell:
                     problem_label = line.strip().strip('"').strip("'").strip()
                     break
         if problem_label:
-            self._console.print(f"  Problem:  [bold white]{problem_label}[/bold white]")
+            self._console.print(f"  [bold white]{problem_label}[/bold white]")
         else:
-            self._console.print("  Problem:  [yellow]none loaded[/yellow] — run [bold]python scripts/setup_problem.py --level 1 --problem 1[/bold]")
+            self._console.print("  [#ffc107]No problem loaded[/#ffc107] \u2014 run [bold]/problem 1.5[/bold]")
 
-        # Model + Provider
-        model_name = self._settings.default_model
-        provider = self._settings.default_provider
-        has_key = self._has_provider_key(provider, "")
-        # Try the standard env var lookup
-        from kernel_code.settings import _API_KEY_ENV_MAP
-        env_key = _API_KEY_ENV_MAP.get(f"{provider}_api_key", "")
-        has_key = self._has_provider_key(provider, env_key)
-        key_indicator = "[#4ade80]\u2713[/#4ade80]" if has_key else "[#ef4444]\u2717 no key[/#ef4444]"
-        self._console.print(f"  Model:    [white]{model_name}[/white]  {key_indicator}")
-
-        # Hardware + Backend
+        # Sub-info via ⎿
         hw = self._settings.default_gpu
         be = self._settings.default_backend
-        self._console.print(f"  Hardware: [white]{hw}[/white]  |  Backend: [white]{be}[/white]")
+        model_name = self._settings.default_model
+        from kernel_code.settings import _API_KEY_ENV_MAP
+        env_key = _API_KEY_ENV_MAP.get(f"{self._settings.default_provider}_api_key", "")
+        has_key = self._has_provider_key(self._settings.default_provider, env_key)
+        key_sym = "\u2713" if has_key else "\u2717"
+        key_color = "#4eba65" if has_key else "#ff6b80"
 
-        # Budget
-        if self._settings.max_budget is not None:
-            self._console.print(f"  Budget:   [white]${self._settings.max_budget:.2f}[/white]")
+        self._console.print(
+            f"  \u23bf  [{key_color}]{key_sym}[/{key_color}] "
+            f"[white]{model_name}[/white]  [#999999]\u00b7[/#999999]  "
+            f"[white]{hw}[/white]  [#999999]\u00b7[/#999999]  "
+            f"[white]{be}[/white]"
+        )
 
-        # Context files loaded
+        # Context + skills
+        context_parts = []
         if self._kernel_config and self._kernel_config.source_path:
             from kernel_code.kernel_config import load_hardware_context, load_backend_context, load_pitfalls
-            loaded = ["KERNEL.md"]
-            if load_hardware_context(hw):
-                loaded.append(f"{hw.lower()}.md")
-            if load_backend_context(be):
-                loaded.append(f"{be}.md")
-            if load_pitfalls():
-                loaded.append("pitfalls.md")
-            self._console.print(
-                f"  Context:  [white]{', '.join(loaded)}[/white]"
-            )
+            ctx_count = 1  # KERNEL.md
+            if load_hardware_context(hw): ctx_count += 1
+            if load_backend_context(be): ctx_count += 1
+            if load_pitfalls(): ctx_count += 1
+            context_parts.append(f"{ctx_count} context files")
 
-        # Skills
         n_skills = len(self._skill_library)
         if n_skills:
-            self._console.print(f"  Skills:   [white]{n_skills} loaded[/white]")
+            context_parts.append(f"{n_skills} skills")
+
+        if self._settings.max_budget is not None:
+            context_parts.append(f"${self._settings.max_budget:.2f} budget")
+
+        if context_parts:
+            self._console.print(f"  \u23bf  [#999999]{' \u00b7 '.join(context_parts)}[/#999999]")
 
         self._console.print()
         self._console.print(
-            "  Type [bold]/help[/bold] for commands, or ask a question in natural language."
+            "  [#999999]Type [bold white]/help[/bold white] for commands, or ask a question.[/#999999]"
         )
         self._console.print()
 

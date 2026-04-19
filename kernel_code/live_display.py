@@ -1,24 +1,11 @@
-"""Inline Rich.Live optimization display — no full-screen TUI.
+"""Inline Rich.Live optimization display — Claude Code-aligned.
 
-Renders a live-updating display in the terminal output stream:
-- Header with problem/hardware/backend info
-- Unicode sparkline trajectory (▁▂▃▅▆▇█)
-- Compact iteration results table
-- Animated spinner with current phase
-
-Uses Rich.Live to redraw in-place without clearing the screen.
-Everything stays in the shell — zero context switching.
-
-Usage::
-
-    from kernel_code.live_display import LiveOptimizationDisplay
-
-    display = LiveOptimizationDisplay(console, problem="matmul 4096x4096")
-    display.start()
-    display.update_iteration(1, 0.85, "discard", "tiled matmul")
-    display.update_phase("Evaluating on L40S (correctness + benchmark)")
-    display.update_iteration(2, 1.20, "keep", "vectorized loads")
-    display.finish(stop_reason="Converged")
+Uses Claude Code's visual language:
+- ⎿ connectors for sub-info
+- ── rules for sections
+- Bold headers, dim metadata
+- Brand clay (#d77757), success (#4eba65), error (#ff6b80)
+- Minimal chrome, no heavy panels
 """
 
 from __future__ import annotations
@@ -31,58 +18,45 @@ from rich.table import Table
 from rich.text import Text
 from rich.live import Live
 
-if TYPE_CHECKING:
-    pass
+# Claude Code palette
+_CLAY = "#d77757"
+_SUCCESS = "#4eba65"
+_WARNING = "#ffc107"
+_ERROR = "#ff6b80"
+_DIM = "#999999"
+_MUTED = "#777777"
 
-# Unicode block characters for sparklines (8 levels + space)
-_BLOCKS = " ▁▂▃▄▅▆▇█"
-
-
-# ---------------------------------------------------------------------------
-# Sparkline
-# ---------------------------------------------------------------------------
+_BLOCKS = " \u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588"
 
 
 def _sparkline(values: list[float], width: int = 40) -> Text:
-    """Render a unicode sparkline from speedup values."""
+    """Render a unicode sparkline."""
     if not values:
-        return Text("  No data yet", style="white")
+        return Text()
 
     best = max(values)
-
-    # All zeros — show red blocks instead of invisible spaces
     if best <= 0:
-        chars = "▁" * len(values[-width:])
-        result = Text()
-        result.append("  ")
-        result.append(chars, style="#ef4444")
-        result.append("  0.00x — no successful iterations", style="#ef4444")
-        return result
+        chars = "\u2581" * len(values[-width:])
+        t = Text()
+        t.append(f"  {chars}", style=_ERROR)
+        t.append(f"  0.00x", style=f"bold {_ERROR}")
+        return t
 
-    mx = best
     display_vals = values[-width:]
-
     chars = ""
     for v in display_vals:
-        idx = max(1, min(8, int(v / mx * 8))) if v > 0 else 1
+        idx = max(1, min(8, int(v / best * 8))) if v > 0 else 1
         chars += _BLOCKS[idx]
 
-    best_style = "#4ade80" if best > 1.0 else "#fbbf24"
-
-    result = Text()
-    result.append("  ")
-    result.append(chars, style=best_style)
-    result.append(f"  {best:.2f}x best", style=f"bold {best_style}")
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Iteration table
-# ---------------------------------------------------------------------------
+    color = _SUCCESS if best > 1.0 else _WARNING
+    t = Text()
+    t.append(f"  {chars}", style=color)
+    t.append(f"  {best:.2f}x best", style=f"bold {color}")
+    return t
 
 
 def _iteration_table(iterations: list[dict], width: int = 80) -> Table:
-    """Render the iteration results as a compact table."""
+    """Compact iteration table."""
     table = Table(
         box=None,
         padding=(0, 2),
@@ -101,29 +75,21 @@ def _iteration_table(iterations: list[dict], width: int = 80) -> Table:
         speedup = it.get("speedup", 0.0)
         status = it.get("status", "?")
         raw_intent = it.get("intent", "")
-        # Truncate at word boundary
-        if len(raw_intent) > 55:
-            intent = raw_intent[:55].rsplit(" ", 1)[0] + "..."
-        else:
-            intent = raw_intent
+        intent = raw_intent[:55].rsplit(" ", 1)[0] + "..." if len(raw_intent) > 55 else raw_intent
 
-        # Color coding
         if status == "keep":
-            speed_style = "bold #4ade80"
-            status_text = Text("✓ keep", style="#4ade80")
+            speed_style = f"bold {_SUCCESS}"
+            is_best = it.get("is_best", False)
+            status_text = Text("\u2605 best", style=f"bold {_SUCCESS}") if is_best else Text("\u2713 keep", style=_SUCCESS)
         elif status == "discard":
             speed_style = "white"
-            status_text = Text("✗ disc", style="#888888")
+            status_text = Text("\u2717 disc", style=_DIM)
         elif status in ("compile_error", "error", "incorrect"):
-            speed_style = "#ef4444"
-            status_text = Text("! error", style="#ef4444")
+            speed_style = _ERROR
+            status_text = Text("! error", style=_ERROR)
         else:
             speed_style = "white"
             status_text = Text(status[:8], style="white")
-
-        is_best = it.get("is_best", False)
-        if is_best:
-            status_text = Text("★ best", style="bold #4ade80")
 
         table.add_row(
             num,
@@ -135,17 +101,8 @@ def _iteration_table(iterations: list[dict], width: int = 80) -> Table:
     return table
 
 
-# ---------------------------------------------------------------------------
-# Live Display
-# ---------------------------------------------------------------------------
-
-
 class LiveOptimizationDisplay:
-    """Inline optimization display using Rich.Live.
-
-    Renders sparkline + table + spinner in-place in the terminal.
-    No full-screen app, no context switching.
-    """
+    """Inline display using Claude Code visual patterns."""
 
     def __init__(
         self,
@@ -171,11 +128,10 @@ class LiveOptimizationDisplay:
         self._current_round: int = 0
         self._current_strategy: str = ""
         self._target_speedup: float | None = None
-        self._round_markers: list[int] = []  # iteration indices where rounds start
-        self._worker_states: list[dict] = []  # per-worker progress for KernelAgent
+        self._round_markers: list[int] = []
+        self._worker_states: list[dict] = []
 
     def start(self) -> None:
-        """Start the live display."""
         self._start_time = time.time()
         self._live = Live(
             self._build(),
@@ -186,125 +142,100 @@ class LiveOptimizationDisplay:
         self._live.start()
 
     def set_target(self, target: float) -> None:
-        """Set a target speedup to display progress toward."""
         self._target_speedup = target
 
     def start_round(self, round_num: int, strategy: str) -> None:
-        """Mark the start of a new optimization round (for /auto mode)."""
         self._current_round = round_num
         self._current_strategy = strategy
         self._round_markers.append(len(self._iterations))
         self._refresh()
 
     def update_workers(self, workers: list[dict]) -> None:
-        """Update per-worker progress for KernelAgent mode.
-
-        Each worker dict: {"id": int, "round": int, "max_rounds": int, "status": str}
-        status: "working", "passed", "failed", "stopped"
-        """
         self._worker_states = workers
         self._refresh()
 
-    def update_iteration(
-        self,
-        num: int,
-        speedup: float,
-        status: str,
-        intent: str,
-    ) -> None:
-        """Record an iteration result and refresh the display."""
+    def update_iteration(self, num: int, speedup: float, status: str, intent: str) -> None:
         is_best = status == "keep" and speedup > self._best_speedup
         if status == "keep" and speedup > self._best_speedup:
             self._best_speedup = speedup
         if status == "keep":
             self._kept_count += 1
-
-        # Use global sequential numbering
         global_num = len(self._iterations) + 1
-
         self._iterations.append({
-            "num": global_num,
-            "speedup": speedup,
-            "status": status,
-            "intent": intent,
-            "is_best": is_best,
+            "num": global_num, "speedup": speedup, "status": status,
+            "intent": intent, "is_best": is_best,
         })
         self._speedups.append(speedup)
         self._refresh()
 
     def update_phase(self, message: str) -> None:
-        """Update the current phase message (spinner text)."""
         self._current_phase = message
         self._refresh()
 
     def finish(self, stop_reason: str = "") -> None:
-        """Stop the live display, leaving final state visible."""
         self._current_phase = ""
         self._refresh()
         if self._live:
             self._live.stop()
             self._live = None
-
-        # Print stop reason below the display
         if stop_reason:
-            self._console.print(
-                f"\n  [#fbbf24]Stopped:[/#fbbf24] [white]{stop_reason}[/white]"
-            )
+            self._console.print(f"  \u23bf  [{_DIM}]{stop_reason}[/{_DIM}]")
 
     def print_permanent(self, message: str) -> None:
-        """Print a permanent line above the live region."""
         if self._live:
             self._live.console.print(message)
 
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
-
     def _refresh(self) -> None:
-        """Rebuild and update the live display."""
         if self._live:
             self._live.update(self._build())
 
     def _build(self) -> Group:
-        """Build the full display as a Group of renderables."""
         width = min(self._console.width, 90)
         elapsed = time.time() - self._start_time
         parts: list = []
 
-        # Header
+        # Header — Claude Code style: bold title + dim metadata
         header = Text()
-        header.append(f"\n  Optimizing", style="bold white")
+        header.append("\n  \u2500\u2500 ", style=_DIM)
         if self._problem:
-            header.append(f"  {self._problem[:50]}", style="white")
-        header.append(f"  ({self._hardware}, {self._backend})", style="#888888")
-        if self._current_round > 0:
-            header.append(f"  Round {self._current_round}", style="bold #d97757")
+            header.append(self._problem[:55], style="bold white")
+        else:
+            header.append("Optimizing", style="bold white")
+        header.append(" \u2500\u2500", style=_DIM)
         parts.append(header)
 
-        # Round strategy + target progress
+        # Sub-info via ⎿
+        sub = Text()
+        sub_parts = [self._hardware, self._backend]
+        if self._current_round > 0:
+            sub_parts.append(f"round {self._current_round}")
+        sub.append(f"  \u23bf  ", style=_DIM)
+        sub.append(" \u00b7 ".join(sub_parts), style=_DIM)
+        parts.append(sub)
+
+        # Strategy
         if self._current_strategy:
-            # Truncate at word boundary
             strat = self._current_strategy
-            if len(strat) > 65:
-                strat = strat[:65].rsplit(" ", 1)[0] + "..."
-            strat_line = Text()
-            strat_line.append(f"  Strategy: {strat}", style="white")
-            parts.append(strat_line)
+            if len(strat) > 60:
+                strat = strat[:60].rsplit(" ", 1)[0] + "\u2026"
+            parts.append(Text(f"  \u23bf  {strat}", style=_MUTED))
+
+        # Target progress bar
         if self._target_speedup is not None:
             pct = min(100, int(self._best_speedup / self._target_speedup * 100))
             bar_w = 20
             filled = int(pct / 100 * bar_w)
-            target_line = Text()
-            target_line.append("  Target:   ", style="white")
-            color = "#4ade80" if pct >= 100 else "#fbbf24" if pct >= 50 else "#ef4444"
-            target_line.append("█" * filled, style=color)
-            target_line.append("░" * (bar_w - filled), style="#555555")
-            target_line.append(f" {self._best_speedup:.2f}x / {self._target_speedup:.1f}x ({pct}%)", style=f"bold {color}")
-            parts.append(target_line)
+            color = _SUCCESS if pct >= 100 else _WARNING if pct >= 50 else _ERROR
+            tgt = Text()
+            tgt.append("  \u23bf  target ", style=_DIM)
+            tgt.append("\u2588" * filled, style=color)
+            tgt.append("\u2591" * (bar_w - filled), style="#333333")
+            tgt.append(f" {self._best_speedup:.2f}x/{self._target_speedup:.1f}x", style=f"bold {color}")
+            parts.append(tgt)
 
         parts.append(Text(""))
 
-        # Worker progress (KernelAgent mode)
+        # Workers
         if self._worker_states:
             for w in self._worker_states:
                 wid = w.get("id", 0)
@@ -313,30 +244,27 @@ class LiveOptimizationDisplay:
                 status = w.get("status", "working")
                 action = w.get("action", "")
 
-                wline = Text()
-                wline.append(f"  Worker {wid + 1}  ", style="bold white")
-
-                # Progress bar
-                bar_w = 16
+                wl = Text()
+                wl.append(f"  Worker {wid + 1}  ", style="bold white")
+                bar_w = 14
                 filled = int(rnd / max(max_rnd, 1) * bar_w)
-                if status == "passed":
-                    wline.append("█" * bar_w, style="#4ade80")
-                    wline.append("  ✓ correct kernel found", style="bold #4ade80")
-                elif status == "stopped":
-                    wline.append("█" * filled, style="#888888")
-                    wline.append("░" * (bar_w - filled), style="#333333")
-                    wline.append("  stopped", style="#888888")
-                elif status == "waiting":
-                    wline.append("░" * bar_w, style="#333333")
-                    wline.append("  starting...", style="#888888")
-                else:
-                    wline.append("█" * filled, style="#d97757")
-                    wline.append("░" * (bar_w - filled), style="#333333")
-                    wline.append(f"  {rnd}/{max_rnd}", style="white")
-                    if action:
-                        wline.append(f"  {action}", style="#888888")
 
-                parts.append(wline)
+                if status == "passed":
+                    wl.append("\u2588" * bar_w, style=_SUCCESS)
+                    wl.append("  \u2713 passed", style=f"bold {_SUCCESS}")
+                elif status == "stopped":
+                    wl.append("\u2588" * filled + "\u2591" * (bar_w - filled), style=_DIM)
+                    wl.append("  stopped", style=_DIM)
+                elif status == "waiting":
+                    wl.append("\u2591" * bar_w, style="#333333")
+                    wl.append("  waiting\u2026", style=_DIM)
+                else:
+                    wl.append("\u2588" * filled, style=_CLAY)
+                    wl.append("\u2591" * (bar_w - filled), style="#333333")
+                    wl.append(f"  {rnd}/{max_rnd}", style="white")
+                    if action:
+                        wl.append(f"  {action}", style=_DIM)
+                parts.append(wl)
             parts.append(Text(""))
 
         # Sparkline
@@ -349,34 +277,30 @@ class LiveOptimizationDisplay:
             parts.append(_iteration_table(self._iterations, width=width))
             parts.append(Text(""))
 
-        # Elapsed timer
+        # Timer — Claude Code style: ✻ thinking with elapsed
         mins = int(elapsed) // 60
         secs = int(elapsed) % 60
         elapsed_str = f"{mins}m {secs:02d}s" if mins > 0 else f"{secs}s"
 
-        # Status line: phase + elapsed (updates every refresh)
         if self._current_phase:
+            phase = self._current_phase
+            if len(phase) > 55:
+                phase = phase[:55].rsplit(" ", 1)[0] + "\u2026"
+            spinner_chars = "\u2818\u2838\u2830\u2834\u2826\u2827\u2807\u280f"
+            sc = spinner_chars[int(elapsed * 4) % len(spinner_chars)]
             status_line = Text()
-            spinner_chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-            spinner_char = spinner_chars[int(elapsed * 4) % len(spinner_chars)]
-            status_line.append(f"  {spinner_char} ", style="#4ade80")
-            status_line.append(self._current_phase, style="white")
-            status_line.append(f"  ({elapsed_str})", style="#888888")
+            status_line.append(f"  {sc} ", style=_CLAY)
+            status_line.append(phase, style="white")
+            status_line.append(f"  ({elapsed_str})", style=_DIM)
             parts.append(status_line)
         else:
-            # Show summary when not actively working
             summary = Text()
-            summary.append("  ")
+            summary.append(f"  \u23bf  ", style=_DIM)
             kept = self._kept_count
             total = len(self._iterations)
             summary.append(f"{kept}/{total} kept", style="white")
-            summary.append("  |  ", style="#888888")
-            summary.append(f"best: {self._best_speedup:.2f}x", style="bold #4ade80")
-            summary.append("  |  ", style="#888888")
-            mins = int(elapsed) // 60
-            secs = int(elapsed) % 60
-            time_str = f"{mins}m {secs:02d}s" if mins > 0 else f"{secs}s"
-            summary.append(time_str, style="white")
+            summary.append(f" \u00b7 best: {self._best_speedup:.2f}x", style=f"bold {_SUCCESS}" if self._best_speedup > 0 else "white")
+            summary.append(f" \u00b7 {elapsed_str}", style=_DIM)
             parts.append(summary)
 
         return Group(*parts)

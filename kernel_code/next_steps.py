@@ -294,23 +294,23 @@ def format_next_steps(
 ) -> Text:
     """Format the 3 suggestions for display."""
     result = Text()
-    result.append("\n  Next Steps\n", style="bold")
+    result.append("\n  \u2500\u2500 Next Steps \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n", style="bold white")
 
     for step in steps:
         title = _strip_markdown(step.title)
-        result.append(f"    {step.number}. ", style="bold #22d3ee")
+        result.append(f"  {step.number}. ", style="bold #d77757")
         result.append(title, style="bold white")
         if step.expected_gain:
-            result.append(f"  ({step.expected_gain})", style="white")
+            result.append(f"  ({step.expected_gain})", style="#999999")
         result.append("\n")
         if step.approach:
             approach = _strip_markdown(step.approach)
-            result.append(f"       {approach}\n", style="white")
+            result.append(f"     \u23bf  {approach}\n", style="#999999")
         if step.skill_id:
-            result.append(f"       /skill:{step.skill_id}\n", style="#22d3ee")
+            result.append(f"     \u23bf  /skill:{step.skill_id}\n", style="#d77757")
 
     result.append(
-        "\n  Type 1, 2, or 3 to start the next optimization\n",
-        style="white italic",
+        "\n  Type 1, 2, or 3 to start\n",
+        style="#777777",
     )
     return result
