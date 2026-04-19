@@ -130,6 +130,7 @@ class KernelAgentBridge:
         fmt = self._problem_format
         if fmt == "auto":
             fmt = detect_format(self._reference)
+        self._resolved_format = fmt
 
         # Build a Problem instance — try loading from file for full context
         ref_path = Path(os.environ.get("OPENKERNEL_REFERENCE_PATH", "reference.py"))
@@ -349,7 +350,7 @@ class KernelAgentBridge:
             try:
                 # Only wrap in ModelNew for KernelBench format
                 # GPU Mode format uses kernel_function() directly
-                if fmt == "kernelbench":
+                if self._resolved_format == "kernelbench":
                     from kernel_agent.model_wrapper import wrap_in_model_new
                     eval_code = wrap_in_model_new(kernel_code, self._reference)
                 else:
@@ -398,4 +399,4 @@ class KernelAgentBridge:
             os.environ["OPENKERNEL_USE_MODAL"] = "1"
             # Send self-contained reference so Modal has all dependencies
             os.environ["OPENKERNEL_REFERENCE_CODE"] = self._self_contained_ref
-            os.environ["OPENKERNEL_PROBLEM_FORMAT"] = fmt
+            os.environ["OPENKERNEL_PROBLEM_FORMAT"] = self._resolved_format
