@@ -162,18 +162,14 @@ class KernelAgentBridge:
         }
 
     def _configure_agent(self, agent: Any) -> None:
-        """Configure agent's workers with Modal eval and callbacks."""
-        # The agent creates workers internally — we hook into them
-        # via the manager's worker setup. For now, set env vars
-        # that the agent reads.
+        """Configure agent's workers with Modal eval via env vars.
 
+        Workers are spawned via multiprocessing.Process — we can't pass
+        Python callbacks or function objects. Instead, we set env vars
+        that workers read at startup:
+        - OPENKERNEL_USE_MODAL=1 — tells workers to use Modal for eval
+        - OPENKERNEL_REFERENCE_CODE — the reference source code
+        """
         if self._use_modal:
-            # Signal workers to use remote eval
-            # We'll configure this when workers are created
             os.environ["OPENKERNEL_USE_MODAL"] = "1"
-
-        # Set model config
-        if "claude" in self._model_name.lower():
-            os.environ.setdefault("ANTHROPIC_API_KEY", os.environ.get("ANTHROPIC_API_KEY", ""))
-        elif "gpt" in self._model_name.lower() or "o3" in self._model_name.lower():
-            os.environ.setdefault("OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY", ""))
+            os.environ["OPENKERNEL_REFERENCE_CODE"] = self._reference

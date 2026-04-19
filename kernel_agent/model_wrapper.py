@@ -50,21 +50,6 @@ def wrap_in_model_new(kernel_code: str, reference_code: str) -> str:
     has_kernel_function = "def kernel_function" in kernel_code or "kernel_function" in kernel_code
 
     if has_kernel_function:
-        return f'''{kernel_code}
-
-import torch.nn as nn
-
-class ModelNew(nn.Module):
-    def __init__(self):
-        super(ModelNew, self).__init__()
-
-    def forward(self, {full_params}) -> torch.Tensor:
-        return kernel_function({param_names})
-'''
-    else:
-        # Kernel doesn't have kernel_function — wrap the whole thing
-        # This handles cases where KernelAgent outputs a @triton.jit kernel
-        # with a custom wrapper function
         return f'''import torch
 import torch.nn as nn
 
@@ -75,6 +60,13 @@ class ModelNew(nn.Module):
         super(ModelNew, self).__init__()
 
     def forward(self, {full_params}) -> torch.Tensor:
-        # TODO: wire up the Triton kernel call
-        return torch.matmul({param_names})
+        return kernel_function({param_names})
+'''
+    else:
+        # Kernel has @triton.jit but no kernel_function wrapper —
+        # return as-is and let the caller handle it
+        return f'''import torch
+import torch.nn as nn
+
+{kernel_code}
 '''

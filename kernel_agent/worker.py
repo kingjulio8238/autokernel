@@ -164,15 +164,14 @@ class VerificationWorker:
         self.no_cusolver = no_cusolver
         self.test_timeout_s = test_timeout_s
 
-        # Optional remote eval function (e.g. Modal) — bypasses local subprocess
-        # Signature: (kernel_code: str, reference_code: str) -> dict with
-        #   {"correct": bool, "speedup": float, "error": str | None}
-        self._remote_eval_fn = None
-        self._reference_code = ""  # set when using remote eval
+        # Remote eval via Modal — detected from env var OPENKERNEL_USE_MODAL=1
+        # When set, _run_test() calls Modal's eval_kernel_on_gpu instead of subprocess
+        self._use_modal = os.environ.get("OPENKERNEL_USE_MODAL") == "1"
+        self._reference_code = os.environ.get("OPENKERNEL_REFERENCE_CODE", "")
 
-        # Optional progress callbacks
-        self._on_phase = None   # (message: str) -> None
-        self._on_result = None  # (round: int, success: bool, speedup: float, error: str) -> None
+        # Progress callbacks (only work in-process, not across multiprocessing)
+        self._on_phase = None
+        self._on_result = None
 
         # Setup files
         self.kernel_file = self.workdir / "kernel.py"
@@ -324,7 +323,7 @@ class VerificationWorker:
             Tuple of (success, stdout, stderr)
         """
         # --- Remote eval path (Modal) ---
-        if self._remote_eval_fn is not None:
+        if self._use_modal:
             return self._run_remote_eval()
 
         # --- Local eval path (original) ---
@@ -363,10 +362,27 @@ class VerificationWorker:
             return False, "", str(e)
 
     def _run_remote_eval(self) -> tuple[bool, str, str]:
-        """Run kernel evaluation via remote eval function (e.g. Modal GPU)."""
+        """Run kernel evaluation via Modal remote GPU.
+
+        The worker reads OPENKERNEL_REFERENCE_CODE from env (set by the bridge)
+        and calls Modal's eval_kernel_on_gpu function. This works across
+        multiprocessing boundaries since it uses env vars + Modal's remote API.
+        """
         try:
+            import modal
+
             kernel_code = self.kernel_file.read_text()
-            result = self._remote_eval_fn(kernel_code, self._reference_code)
+            reference_code = self._reference_code or os.environ.get("OPENKERNEL_REFERENCE_CODE", "")
+
+            if not reference_code:
+                return False, "", "No reference code available for remote eval"
+
+            eval_fn = modal.Function.from_name("openkernel-eval", "eval_kernel_on_gpu")
+            result = eval_fn.remote(
+                kernel_source=kernel_code,
+                reference_source=reference_code,
+                eval_mode="fast",
+            )
 
             correct = result.get("correct", False)
             speedup = result.get("speedup", 0.0)
