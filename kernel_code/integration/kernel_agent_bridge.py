@@ -85,6 +85,13 @@ class KernelAgentBridge:
 
         start_time = time.time()
 
+        # Suppress KernelAgent's verbose logging (raw LLM responses, worker details)
+        for logger_name in [
+            "TritonKernelAgent", "kernel_agent.manager", "kernel_agent.worker",
+            "kernel_agent.agent", "kernel_agent.prompt_manager", "httpx",
+        ]:
+            logging.getLogger(logger_name).setLevel(logging.WARNING)
+
         # Ensure API keys are in env — KernelAgent's providers read from os.environ
         from kernel_code.settings import load_settings, inject_api_keys
         settings = load_settings()

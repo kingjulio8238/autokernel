@@ -27,11 +27,9 @@ import time
 from typing import TYPE_CHECKING
 
 from rich.console import Console, Group
-from rich.spinner import Spinner
 from rich.table import Table
 from rich.text import Text
 from rich.live import Live
-from rich.panel import Panel
 
 if TYPE_CHECKING:
     pass
@@ -306,13 +304,19 @@ class LiveOptimizationDisplay:
             parts.append(_iteration_table(self._iterations, width=width))
             parts.append(Text(""))
 
-        # Status line: spinner + phase + elapsed
+        # Status line: phase + elapsed (updates every refresh)
         if self._current_phase:
-            elapsed_str = f"{elapsed:.0f}s"
-            spinner_text = Text()
-            spinner_text.append(f"  {self._current_phase}", style="white")
-            spinner_text.append(f"  ({elapsed_str})", style="#888888")
-            parts.append(Spinner("dots", text=spinner_text))
+            mins = int(elapsed) // 60
+            secs = int(elapsed) % 60
+            elapsed_str = f"{mins}m {secs:02d}s" if mins > 0 else f"{secs}s"
+            status_line = Text()
+            # Rotating spinner chars
+            spinner_chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+            spinner_char = spinner_chars[int(elapsed * 4) % len(spinner_chars)]
+            status_line.append(f"  {spinner_char} ", style="#4ade80")
+            status_line.append(self._current_phase, style="white")
+            status_line.append(f"  ({elapsed_str})", style="#888888")
+            parts.append(status_line)
         else:
             # Show summary when not actively working
             summary = Text()
