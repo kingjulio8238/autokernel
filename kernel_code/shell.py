@@ -2592,6 +2592,12 @@ class KernelCodeShell:
         if next_steps:
             self._console.print(format_next_steps(next_steps))
 
+        # Post-optimization hints
+        self._console.print()
+        self._console.print(
+            f"  [white]/dashboard[/white] [#888888]— open full analysis in browser[/#888888]"
+        )
+
         # Save best kernel to file
         if result.final_kernel:
             out_name = f"{ref_path.stem}_optimized.py"
