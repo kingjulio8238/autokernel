@@ -148,14 +148,65 @@ class KernelAgentBridge:
             except Exception as exc:
                 error = exc
 
+        # Track agent log dir for progress polling
+        agent_log_dir = Path(agent.log_dir) if hasattr(agent, 'log_dir') else None
+        _found_session_dir = [None]  # mutable for closure
+
+        def _find_workers_dir():
+            """Discover the latest session's workers directory."""
+            if _found_session_dir[0]:
+                wdir = _found_session_dir[0] / "workers"
+                if wdir.exists():
+                    return wdir
+            if agent_log_dir and agent_log_dir.exists():
+                sessions = sorted(agent_log_dir.glob("session_*"), key=lambda p: p.name)
+                if sessions:
+                    _found_session_dir[0] = sessions[-1]
+                    wdir = sessions[-1] / "workers"
+                    if wdir.exists():
+                        return wdir
+            return None
+
+        def _poll_workers():
+            """Poll worker directories for round progress."""
+            workers_dir = _find_workers_dir()
+            if not workers_dir:
+                return
+            worker_states = []
+            for i in range(self._num_workers):
+                wdir = workers_dir / f"worker_{i}"
+                if wdir.exists():
+                    round_files = list(wdir.glob("round_*.json"))
+                    rounds = len(round_files)
+                    status = "working"
+                    if rounds > 0:
+                        try:
+                            latest = max(round_files, key=lambda p: p.name)
+                            data = json.loads(latest.read_text())
+                            if data.get("success"):
+                                status = "passed"
+                        except Exception:
+                            pass
+                    worker_states.append({
+                        "id": i, "round": rounds,
+                        "max_rounds": self._max_rounds, "status": status,
+                    })
+                else:
+                    worker_states.append({
+                        "id": i, "round": 0,
+                        "max_rounds": self._max_rounds, "status": "waiting",
+                    })
+            if self._live_display:
+                self._live_display.update_workers(worker_states)
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(_run_agent)
-            # Poll until done — this lets the main thread stay responsive
             while not future.done():
                 time.sleep(0.5)
+                _poll_workers()
                 if self._live_display:
                     self._live_display._refresh()
-            future.result()  # raises if _run_agent raised
+            future.result()
 
         if error:
             logger.error("KernelAgent failed: %s", error)

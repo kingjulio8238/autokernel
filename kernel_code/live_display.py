@@ -172,6 +172,7 @@ class LiveOptimizationDisplay:
         self._current_strategy: str = ""
         self._target_speedup: float | None = None
         self._round_markers: list[int] = []  # iteration indices where rounds start
+        self._worker_states: list[dict] = []  # per-worker progress for KernelAgent
 
     def start(self) -> None:
         """Start the live display."""
@@ -193,6 +194,15 @@ class LiveOptimizationDisplay:
         self._current_round = round_num
         self._current_strategy = strategy
         self._round_markers.append(len(self._iterations))
+        self._refresh()
+
+    def update_workers(self, workers: list[dict]) -> None:
+        """Update per-worker progress for KernelAgent mode.
+
+        Each worker dict: {"id": int, "round": int, "max_rounds": int, "status": str}
+        status: "working", "passed", "failed", "stopped"
+        """
+        self._worker_states = workers
         self._refresh()
 
     def update_iteration(
@@ -294,6 +304,35 @@ class LiveOptimizationDisplay:
 
         parts.append(Text(""))
 
+        # Worker progress (KernelAgent mode)
+        if self._worker_states:
+            for w in self._worker_states:
+                wid = w.get("id", 0)
+                rnd = w.get("round", 0)
+                max_rnd = w.get("max_rounds", 10)
+                status = w.get("status", "working")
+
+                wline = Text()
+                wline.append(f"  Worker {wid + 1}  ", style="white")
+
+                # Progress bar
+                bar_w = 20
+                filled = int(rnd / max(max_rnd, 1) * bar_w)
+                if status == "passed":
+                    wline.append("█" * bar_w, style="#4ade80")
+                    wline.append("  ✓ passed", style="bold #4ade80")
+                elif status == "stopped":
+                    wline.append("█" * filled, style="#888888")
+                    wline.append("░" * (bar_w - filled), style="#333333")
+                    wline.append("  stopped", style="#888888")
+                else:
+                    wline.append("█" * filled, style="#22d3ee")
+                    wline.append("░" * (bar_w - filled), style="#333333")
+                    wline.append(f"  round {rnd}/{max_rnd}", style="white")
+
+                parts.append(wline)
+            parts.append(Text(""))
+
         # Sparkline
         if self._speedups:
             parts.append(_sparkline(self._speedups, width=width - 20))
@@ -304,13 +343,14 @@ class LiveOptimizationDisplay:
             parts.append(_iteration_table(self._iterations, width=width))
             parts.append(Text(""))
 
+        # Elapsed timer
+        mins = int(elapsed) // 60
+        secs = int(elapsed) % 60
+        elapsed_str = f"{mins}m {secs:02d}s" if mins > 0 else f"{secs}s"
+
         # Status line: phase + elapsed (updates every refresh)
         if self._current_phase:
-            mins = int(elapsed) // 60
-            secs = int(elapsed) % 60
-            elapsed_str = f"{mins}m {secs:02d}s" if mins > 0 else f"{secs}s"
             status_line = Text()
-            # Rotating spinner chars
             spinner_chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
             spinner_char = spinner_chars[int(elapsed * 4) % len(spinner_chars)]
             status_line.append(f"  {spinner_char} ", style="#4ade80")
