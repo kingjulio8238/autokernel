@@ -1503,10 +1503,12 @@ class KernelCodeShell:
         self._console.print()
 
         def _ask(label: str, default: str, hint: str = "") -> str:
+            # Escape default value to prevent Rich markup interpretation
+            safe_default = escape(default)
             prompt = f"  [bold white]{label}[/bold white]"
             if hint:
                 prompt += f" [#888888]({hint})[/#888888]"
-            prompt += f" [{default}]: "
+            prompt += f" \\[{safe_default}]: "
             try:
                 val = self._console.input(prompt).strip()
             except (EOFError, KeyboardInterrupt):
@@ -1534,7 +1536,7 @@ class KernelCodeShell:
             return
         ref_path = _PROJECT_ROOT / ref_input if not ref_input.startswith("/") else __import__("pathlib").Path(ref_input)
         if not ref_path.is_file():
-            self._console.print(f"[red]File not found:[/red] {ref_input}")
+            self._console.print(f"[red]File not found:[/red] {escape(ref_input)}")
             return
 
         # --- Step 2: Target speedup ---
