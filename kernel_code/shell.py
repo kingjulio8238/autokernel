@@ -542,6 +542,7 @@ class KernelCodeShell:
         problem = 23
         parallel = False
         git_enabled = False
+        engine = "kernel-agent"  # "kernel-agent" or "native"
 
         i = 0
         while i < len(tokens):
@@ -576,6 +577,9 @@ class KernelCodeShell:
             elif tok == "--git":
                 git_enabled = True
                 i += 1
+            elif tok == "--engine" and i + 1 < len(tokens):
+                engine = tokens[i + 1]
+                i += 2
             else:
                 # Treat bare argument as reference file if no flag
                 if reference is None and not tok.startswith("-"):
@@ -661,6 +665,11 @@ class KernelCodeShell:
             )
         elif mock:
             self._run_mock_optimization(iterations=iterations)
+        elif engine == "kernel-agent":
+            self._run_kernel_agent_optimization(
+                reference=reference,
+                iterations=iterations,
+            )
         else:
             self._run_live_optimization(
                 reference=reference,
@@ -2639,6 +2648,107 @@ class KernelCodeShell:
             saved_path="",
             console=self._console,
         )
+
+    def _run_kernel_agent_optimization(
+        self, reference: str, iterations: int
+    ) -> None:
+        """Run optimization using Meta's KernelAgent engine."""
+        from pathlib import Path as _Path
+        from kernel_code.integration.kernel_agent_bridge import KernelAgentBridge
+        from kernel_code.live_display import LiveOptimizationDisplay
+        from kernel_code.run_log import RunLogger
+
+        ref_path = _Path(reference)
+        if not ref_path.exists():
+            self._console.print(f"[red]Error:[/red] file not found: {escape(reference)}")
+            return
+
+        reference_source = ref_path.read_text()
+
+        # Detect problem name
+        ref_problem = ""
+        for line in reference_source.split("\n", 5):
+            if "Problem" in line or "KernelBench" in line:
+                ref_problem = line.strip().strip('"').strip("'").strip()
+                break
+
+        live_display = LiveOptimizationDisplay(
+            console=self._console,
+            problem=ref_problem or ref_path.name,
+            hardware=self._settings.default_gpu,
+            backend=self._settings.default_backend,
+        )
+
+        run_logger = RunLogger()
+        run_logger.start_run(
+            command="/optimize --engine kernel-agent",
+            config={
+                "engine": "kernel-agent",
+                "model": self._settings.default_model,
+                "hardware": self._settings.default_gpu,
+                "backend": self._settings.default_backend,
+                "reference": reference,
+            },
+        )
+
+        model = self._settings.default_model
+        self._console.print(f"[bold]Running optimization (KernelAgent engine)...[/bold]")
+        self._console.print(f"  Reference: {escape(reference)}")
+        self._console.print(f"  Model:     {model}")
+        self._console.print(f"  Workers:   4 parallel")
+        self._console.print()
+
+        bridge = KernelAgentBridge(
+            reference_source=reference_source,
+            model_name=model,
+            num_workers=4,
+            max_rounds=iterations,
+            hardware=self._settings.default_gpu,
+            live_display=live_display,
+            run_logger=run_logger,
+        )
+
+        live_display.start()
+        try:
+            result = bridge.run()
+        finally:
+            stop_reason = "completed" if result.get("success") else "no correct kernel found"
+            live_display.finish(stop_reason=stop_reason)
+
+        # Show results
+        speedup = result.get("speedup", 0.0)
+        kernel_code = result.get("kernel_code", "")
+
+        run_logger.end_run(
+            best_speedup=speedup,
+            best_kernel=kernel_code,
+            stop_reason=stop_reason,
+            total_cost=0.0,
+        )
+
+        if result.get("success"):
+            self._console.print(
+                f"\n  [bold #4ade80]Correct kernel found: {speedup:.2f}x[/bold #4ade80]"
+            )
+            self._console.print(
+                f"  [white]Worker {result.get('worker_id', '?')}, "
+                f"{result.get('rounds', '?')} rounds, "
+                f"{result.get('elapsed', 0):.0f}s[/white]"
+            )
+            # Save
+            if kernel_code:
+                from kernel_agent.model_wrapper import wrap_in_model_new
+                wrapped = wrap_in_model_new(kernel_code, reference_source)
+                out_path = _Path.cwd() / "reference_optimized.py"
+                out_path.write_text(wrapped)
+                self._console.print(f"  [#4ade80]Saved: reference_optimized.py[/#4ade80]")
+        else:
+            self._console.print(
+                f"\n  [white]No correct kernel found after {result.get('rounds', '?')} rounds[/white]"
+            )
+
+        self._console.print(f"  [white]Run log:[/white] [#888888]{run_logger.log_path}[/#888888]")
+        self._console.print()
 
     def _run_live_optimization(
         self,
