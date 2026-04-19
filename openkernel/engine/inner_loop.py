@@ -88,10 +88,12 @@ class InnerLoop:
         generator: Generator,
         critic: Critic,
         config: OpenKernelConfig,
+        on_phase: Callable[[str], None] | None = None,
     ) -> None:
         self._generator = generator
         self._critic = critic
         self._config = config
+        self._on_phase = on_phase  # callback: (status_message) -> None
 
     async def refine(
         self,
@@ -149,10 +151,15 @@ class InnerLoop:
             current_best,
         )
 
+        def _phase(msg: str) -> None:
+            if self._on_phase is not None:
+                self._on_phase(msg)
+
         for attempt in range(1, max_attempts + 1):
             logger.info("InnerLoop: attempt %d/%d", attempt, max_attempts)
 
             # --- Generate ---------------------------------------------------
+            _phase(f"Writing kernel: {intent.description[:50]} (attempt {attempt}/{max_attempts})")
             try:
                 kernel_code = await self._generator.generate(
                     reference=reference,
@@ -169,6 +176,7 @@ class InnerLoop:
                 continue
 
             # --- Evaluate ----------------------------------------------------
+            _phase(f"Evaluating on {hardware} (correctness + benchmark)")
             eval_result = await eval_fn(kernel_code, reference)
             all_speedups.append(eval_result.speedup)
 
@@ -202,6 +210,7 @@ class InnerLoop:
                 )
 
             # --- Critic diagnosis -------------------------------------------
+            _phase(f"Analyzing performance ({eval_result.speedup:.2f}x) — diagnosing bottleneck")
             try:
                 diagnosis = await self._critic.analyze(
                     kernel_code=kernel_code,

@@ -139,17 +139,54 @@ def load_kernel_toml(path: Path) -> KernelConfig:
 # ---------------------------------------------------------------------------
 
 
-def inject_config_context(config: KernelConfig) -> str:
-    """Format *config* as an LLM-ready context string.
+def _load_data_file(relative_path: str) -> str:
+    """Load a data file relative to the project's data/ directory.
+
+    Returns empty string if the file doesn't exist.
+    """
+    data_dir = Path(__file__).resolve().parent.parent / "data"
+    path = data_dir / relative_path
+    if path.is_file():
+        return path.read_text(encoding="utf-8")
+    return ""
+
+
+def load_hardware_context(hardware: str) -> str:
+    """Load hardware spec file for the given GPU (e.g. 'L40S' → data/hardware/l40s.md)."""
+    return _load_data_file(f"hardware/{hardware.lower()}.md")
+
+
+def load_backend_context(backend: str) -> str:
+    """Load backend reference file (e.g. 'triton' → data/backend/triton.md)."""
+    return _load_data_file(f"backend/{backend.lower()}.md")
+
+
+def load_pitfalls() -> str:
+    """Load common pitfalls and gotchas."""
+    return _load_data_file("backend/pitfalls.md")
+
+
+def inject_config_context(
+    config: KernelConfig,
+    hardware_override: str | None = None,
+    backend_override: str | None = None,
+) -> str:
+    """Format *config* plus hardware/backend context as an LLM-ready string.
 
     The output is designed to be prepended to the system prompt so that every
-    optimization decision is shaped by the project-level constraints.
+    optimization decision is shaped by project constraints and GPU specs.
+
+    *hardware_override* and *backend_override* take precedence over the values
+    in KERNEL.md — this lets settings.yaml (``default_gpu``, ``default_backend``)
+    control which context files are loaded.
     """
+    hardware = hardware_override or config.hardware
+    backend = backend_override or config.backend
     parts: list[str] = []
 
     parts.append("=== Project Kernel Config (KERNEL.md) ===")
-    parts.append(f"Backend: {config.backend}")
-    parts.append(f"Hardware: {config.hardware}")
+    parts.append(f"Backend: {backend}")
+    parts.append(f"Hardware: {hardware}")
 
     if config.target_occupancy is not None:
         parts.append(f"Target occupancy: {config.target_occupancy}")
@@ -171,9 +208,23 @@ def inject_config_context(config: KernelConfig) -> str:
         for hint in config.optimization_hints:
             parts.append(f"  - {hint}")
 
-    # Always include the raw text so the LLM can read free-form notes.
     if config.raw_text:
         parts.append(f"\n--- Full KERNEL.md ---\n{config.raw_text.strip()}")
+
+    # Hardware specs — GPU-specific knowledge
+    hw = load_hardware_context(hardware)
+    if hw:
+        parts.append(f"\n{hw.strip()}")
+
+    # Backend reference — API and patterns
+    be = load_backend_context(backend)
+    if be:
+        parts.append(f"\n{be.strip()}")
+
+    # Common pitfalls
+    pitfalls = load_pitfalls()
+    if pitfalls:
+        parts.append(f"\n{pitfalls.strip()}")
 
     return "\n".join(parts)
 

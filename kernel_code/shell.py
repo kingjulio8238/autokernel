@@ -195,8 +195,7 @@ if _HAS_PROMPT_TOOLKIT:
                     ("--backend", "triton or cuda"),
                     ("--config", "YAML config file"),
                     ("--parallel", "Try both backends"),
-                    ("--mock", "Use mock data"),
-                    ("--no-mock", "Use real engine"),
+                    ("--mock", "Use mock data (testing)"),
                     ("--iterations", "Max iterations"),
                     ("--gpu", "GPU type (H100/A100/L40S)"),
                     ("--git", "Track with git commits"),
@@ -523,7 +522,7 @@ class KernelCodeShell:
     # ------------------------------------------------------------------
 
     def _cmd_optimize(self, args_str: str) -> None:
-        """/optimize --reference FILE [--backend triton|cuda] [--config YAML] [--mock] [--iterations N] [--parallel]"""
+        """/optimize --reference FILE [--backend triton|cuda] [--config YAML] [--iterations N] [--parallel] [--mock]"""
         try:
             tokens = shlex.split(args_str)
         except ValueError as exc:
@@ -534,7 +533,7 @@ class KernelCodeShell:
         reference = None
         backend = self._settings.default_backend
         config_path = None
-        mock = True
+        mock = False
         iterations = 20
         level = 1
         problem = 23
@@ -582,8 +581,8 @@ class KernelCodeShell:
 
         if not mock and reference is None:
             self._console.print(
-                "[red]Error:[/red] --reference is required in live mode (--no-mock). "
-                "Use [bold]/optimize --reference FILE --no-mock[/bold]"
+                "[red]Error:[/red] --reference is required. "
+                "Use [bold]/optimize --reference FILE[/bold]"
             )
             return
 
@@ -838,8 +837,8 @@ class KernelCodeShell:
                 "  Number of iterations (default: 20)",
             ),
             (
-                "  --mock / --no-mock",
-                "  Use mock data (default: --mock)",
+                "  --mock",
+                "  Use mock data for testing (default: live)",
             ),
             (
                 "  --parallel",
@@ -2469,20 +2468,61 @@ class KernelCodeShell:
             "[bold]openkernel[/bold] v0.1 -- interactive kernel optimization shell"
         )
         self._console.print()
-        self._console.print(
-            f"  Session: [cyan]{self._session_id}[/cyan] (new)"
-        )
-        if self._settings.source_files:
+
+        # Problem — detect from reference.py docstring
+        ref_path = _PROJECT_ROOT / "reference.py"
+        problem_label = ""
+        if ref_path.is_file():
+            first_lines = ref_path.read_text().split("\n", 5)
+            for line in first_lines:
+                if "KernelBench" in line or "Problem" in line:
+                    problem_label = line.strip().strip('"').strip("'").strip()
+                    break
+        if problem_label:
+            self._console.print(f"  Problem:  [bold white]{problem_label}[/bold white]")
+        else:
+            self._console.print("  Problem:  [yellow]none loaded[/yellow] — run [bold]python scripts/setup_problem.py --level 1 --problem 1[/bold]")
+
+        # Model + Provider
+        model_name = self._settings.default_model
+        provider = self._settings.default_provider
+        has_key = self._has_provider_key(provider, "")
+        # Try the standard env var lookup
+        from kernel_code.settings import _API_KEY_ENV_MAP
+        env_key = _API_KEY_ENV_MAP.get(f"{provider}_api_key", "")
+        has_key = self._has_provider_key(provider, env_key)
+        key_indicator = "[#4ade80]\u2713[/#4ade80]" if has_key else "[#ef4444]\u2717 no key[/#ef4444]"
+        self._console.print(f"  Model:    [white]{model_name}[/white]  {key_indicator}")
+
+        # Hardware + Backend
+        hw = self._settings.default_gpu
+        be = self._settings.default_backend
+        self._console.print(f"  Hardware: [white]{hw}[/white]  |  Backend: [white]{be}[/white]")
+
+        # Budget
+        if self._settings.max_budget is not None:
+            self._console.print(f"  Budget:   [white]${self._settings.max_budget:.2f}[/white]")
+
+        # Context files loaded
+        if self._kernel_config and self._kernel_config.source_path:
+            from kernel_code.kernel_config import load_hardware_context, load_backend_context, load_pitfalls
+            loaded = ["KERNEL.md"]
+            if load_hardware_context(hw):
+                loaded.append(f"{hw.lower()}.md")
+            if load_backend_context(be):
+                loaded.append(f"{be}.md")
+            if load_pitfalls():
+                loaded.append("pitfalls.md")
             self._console.print(
-                f"  Settings: [green]{len(self._settings.source_files)} file(s) loaded[/green]"
+                f"  Context:  [white]{', '.join(loaded)}[/white]"
             )
-        if (
-            self._kernel_config
-            and self._kernel_config.source_path
-        ):
-            self._console.print(
-                f"  Loaded KERNEL.md from: [green]{self._kernel_config.source_path}[/green]"
-            )
+
+        # Skills
+        n_skills = len(self._skill_library)
+        if n_skills:
+            self._console.print(f"  Skills:   [white]{n_skills} loaded[/white]")
+
+        self._console.print()
         self._console.print(
             "  Type [bold]/help[/bold] for commands, or ask a question in natural language."
         )

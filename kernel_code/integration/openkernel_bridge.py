@@ -265,7 +265,7 @@ class OpenKernelBridge:
         generator = Generator(llm, be)
         critic = Critic(llm)
 
-        inner_loop = InnerLoop(generator, critic, self._config)
+        inner_loop = InnerLoop(generator, critic, self._config, on_phase=self._on_phase)
         eval_fn = create_eval_fn(self._config, file_cache=self._file_cache)
         adapter = InnerLoopAdapter(inner_loop, eval_fn, critic)
 
@@ -300,6 +300,14 @@ class OpenKernelBridge:
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    def _on_phase(self, message: str) -> None:
+        """Called by the inner loop at each phase (generate, eval, analyze).
+
+        Updates the spinner with the current status message.
+        """
+        if self._progress is not None:
+            self._progress._update_status(message)
 
     def _on_iteration(
         self,

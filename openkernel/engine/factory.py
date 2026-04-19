@@ -69,6 +69,7 @@ class InnerLoopAdapter:
         inner_loop: InnerLoop,
         eval_fn: EvalFn,
         critic: Critic,
+        on_phase: "Callable[[str], None] | None" = None,
     ) -> None:
         self._inner_loop = inner_loop
         self._eval_fn = eval_fn
