@@ -56,9 +56,11 @@ class _CallbackOrchestrator(Orchestrator):
         config: dict,
         llm=None,
         on_iteration=None,
+        should_stop=None,
     ) -> None:
         super().__init__(inner_loop=inner_loop, config=config, llm=llm)
         self._on_iteration = on_iteration
+        self._should_stop = should_stop  # callable(iteration, result) -> bool
 
     # Override optimize to inject the callback ---------------------------
 
@@ -168,6 +170,12 @@ class _CallbackOrchestrator(Orchestrator):
                     best_kernel=best_kernel,
                 )
 
+            # ---- STOPPING CHECK: ask controller if we should stop ----
+            if self._should_stop is not None:
+                if self._should_stop(intents_explored, result):
+                    logger.info("Stopping controller triggered — ending optimization.")
+                    break
+
         wall_time = time.monotonic() - start_time
 
         return OptimizationResult(
@@ -223,6 +231,10 @@ class OpenKernelBridge:
         # Accumulated iterations (TUI schema)
         self._iterations: list[dict] = []
         self._best_speedup: float = 0.0
+        self._stop_reason: str = ""
+        self._stopping: StoppingController | None = None  # type: ignore[name-defined]
+        self._ke_profile: KEProfile | None = None  # type: ignore[name-defined]
+        self._problem_type: str = ""
 
     @property
     def session_id(self) -> str:
@@ -269,8 +281,67 @@ class OpenKernelBridge:
         eval_fn = create_eval_fn(self._config, file_cache=self._file_cache)
         adapter = InnerLoopAdapter(inner_loop, eval_fn, critic)
 
+        # --- Stopping controller ---
+        from kernel_code.stopping import StoppingController, StoppingStrategy
+        from kernel_code.ke_profile import KEProfile
+
+        strategy = StoppingStrategy(
+            max_iterations=self._config.max_iterations,
+        )
+
+        # Load KE profile defaults for this problem type
+        ke_profile = KEProfile()
+        problem_type = self._problem_label.lower()
+        learned = ke_profile.get_defaults(problem_type)
+        if learned:
+            if "max_iterations" in learned:
+                strategy.max_iterations = learned["max_iterations"]
+            if "convergence_patience" in learned:
+                strategy.convergence_patience = learned["convergence_patience"]
+            logger.info("KE profile: applied learned defaults for %s: %s", problem_type, learned)
+
+        self._stopping = StoppingController(strategy=strategy, llm=llm)
+        self._ke_profile = ke_profile
+        self._problem_type = problem_type
+
+        def _should_stop(iteration: int, result) -> bool:
+            """Bridge between orchestrator callback and async StoppingController."""
+            import asyncio
+
+            # Record iteration data for the controller
+            self._stopping.record_iteration({
+                "speedup": result.best_speedup,
+                "status": result.status,
+                "intent": "",  # filled by on_iteration
+            })
+
+            # Run the async check synchronously
+            try:
+                loop = asyncio.new_event_loop()
+                decision = loop.run_until_complete(self._stopping.check(iteration))
+                loop.close()
+            except Exception:
+                return False
+
+            if decision.stop:
+                self._stop_reason = decision.reason
+                if self._progress:
+                    self._progress._stop_status()
+                    self._progress._console.print(
+                        f"  [#fbbf24]Stopping:[/#fbbf24] [white]{decision.reason}[/white]"
+                    )
+                return True
+
+            if decision.adjust:
+                if self._progress:
+                    self._progress._stop_status()
+                    self._progress._console.print(
+                        f"  [#22d3ee]Adjusted:[/#22d3ee] [white]{decision.reason}[/white]"
+                    )
+            return False
+
         orch_config = {
-            "max_iterations": self._config.max_iterations,
+            "max_iterations": strategy.max_iterations,
             "stagnation_threshold": self._config.stagnation_threshold,
             "max_retries_per_intent": self._config.max_retries_per_intent,
         }
@@ -280,6 +351,7 @@ class OpenKernelBridge:
             config=orch_config,
             llm=llm,
             on_iteration=self._on_iteration,
+            should_stop=_should_stop,
         )
 
         # Write initial empty session so TUI can start
@@ -294,6 +366,18 @@ class OpenKernelBridge:
         # Final flush
         self._best_speedup = result.final_speedup
         self._flush_cache()
+
+        # Record run in KE profile for future stopping defaults
+        best_at = 0
+        for i, it in enumerate(self._iterations, 1):
+            if it.get("speedup", 0) == self._best_speedup and it.get("status") == "keep":
+                best_at = i
+        self._ke_profile.record_run(
+            problem_type=self._problem_type,
+            total_iterations=result.intents_explored,
+            best_at_iteration=best_at,
+            final_speedup=result.final_speedup,
+        )
 
         return result
 
