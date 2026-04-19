@@ -12,6 +12,7 @@ Usage::
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -304,22 +305,22 @@ class OpenKernelBridge:
         self._ke_profile = ke_profile
         self._problem_type = problem_type
 
+        # Persistent event loop for stopping controller async calls
+        _stop_loop = asyncio.new_event_loop()
+
         def _should_stop(iteration: int, result) -> bool:
             """Bridge between orchestrator callback and async StoppingController."""
-            import asyncio
 
             # Record iteration data for the controller
             self._stopping.record_iteration({
                 "speedup": result.best_speedup,
                 "status": result.status,
-                "intent": "",  # filled by on_iteration
+                "intent": "",
             })
 
-            # Run the async check synchronously
+            # Run the async check on the persistent loop
             try:
-                loop = asyncio.new_event_loop()
-                decision = loop.run_until_complete(self._stopping.check(iteration))
-                loop.close()
+                decision = _stop_loop.run_until_complete(self._stopping.check(iteration))
             except Exception:
                 return False
 

@@ -66,7 +66,6 @@ if _HAS_PROMPT_TOOLKIT:
         else:
             buf.validate_and_handle()
 
-from kernel_code.advisor import AdvisorState, should_advise, get_advice
 from kernel_code.next_steps import (
     NextStep,
     generate_next_steps_llm,
@@ -246,7 +245,7 @@ class KernelCodeShell:
         self._settings: KernelCodeSettings = load_settings()
 
         # Inject API keys from settings into environment
-        injected = inject_api_keys(self._settings)
+        inject_api_keys(self._settings)
 
         # Apply budget cap from settings
         if self._settings.max_budget is not None:
@@ -842,7 +841,7 @@ class KernelCodeShell:
             ("  --config YAML", "  Configuration file"),
             (
                 "  --iterations N",
-                "  Number of iterations (default: 20)",
+                "  Max iterations (default: 10, stops early on convergence)",
             ),
             (
                 "  --mock",
