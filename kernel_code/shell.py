@@ -2561,6 +2561,16 @@ class KernelCodeShell:
             session_total=self._budget.total_spent,
         )
 
+        # Generate next-step suggestions
+        next_steps = generate_next_steps_rule_based(self._session_data)
+        try:
+            next_steps = asyncio.run(generate_next_steps_llm(self._session_data))
+        except Exception:
+            pass
+        self._pending_next_steps = next_steps
+        if next_steps:
+            self._console.print(format_next_steps(next_steps))
+
         # Save best kernel to file
         if result.final_kernel:
             out_name = f"{ref_path.stem}_optimized.py"
