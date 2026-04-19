@@ -127,16 +127,17 @@ def _load_gpumode(code: str, path: Path) -> Problem:
     """Load a GPU Mode-format problem."""
     name = path.stem or "gpu_mode_problem"
 
-    # Check for task.py and utils.py in same directory
+    # Check for task.py and utils.py in same directory or parent
     task_code = ""
     utils_code = ""
     parent = path.parent
-    task_path = parent / "task.py"
-    utils_path = parent / "utils.py"
-    if task_path.is_file():
-        task_code = task_path.read_text()
-    if utils_path.is_file():
-        utils_code = utils_path.read_text()
+    for search_dir in [parent, parent.parent]:
+        task_path = search_dir / "task.py"
+        if task_path.is_file() and not task_code:
+            task_code = task_path.read_text()
+        utils_path = search_dir / "utils.py"
+        if utils_path.is_file() and not utils_code:
+            utils_code = utils_path.read_text()
 
     return Problem(
         name=name,
@@ -176,6 +177,34 @@ def _load_custom(code: str, path: Path) -> Problem:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def make_self_contained(problem: Problem) -> str:
+    """Make a GPU Mode reference self-contained by inlining dependencies.
+
+    GPU Mode references import from task.py and utils.py — these aren't
+    available in the Modal container. This function inlines them.
+    """
+    if problem.format != FORMAT_GPUMODE:
+        return problem.reference_code
+
+    code = problem.reference_code
+
+    # Inline task.py: replace "from task import ..." with the actual definitions
+    if problem.task_code:
+        # Remove the import line and prepend the task code
+        code = re.sub(r"^from task import.*$", "", code, flags=re.MULTILINE)
+        code = problem.task_code + "\n\n" + code
+
+    # Inline utils.py: replace "from utils import ..." with actual code
+    if problem.utils_code:
+        code = re.sub(r"^from utils import.*$", "", code, flags=re.MULTILINE)
+        code = problem.utils_code + "\n\n" + code
+    else:
+        # Remove utils imports if we don't have the file
+        code = re.sub(r"^from utils import.*$", "# utils not available", code, flags=re.MULTILINE)
+
+    return code
 
 
 def _extract_name(code: str) -> str:

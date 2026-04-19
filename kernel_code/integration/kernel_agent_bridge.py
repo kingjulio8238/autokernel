@@ -121,25 +121,41 @@ class KernelAgentBridge:
         inject_api_keys(settings)
 
         # Use Problem interface for format-aware test code
-        from kernel_code.problem import load_problem, build_test_code, detect_format, Problem
+        from kernel_code.problem import (
+            load_problem, build_test_code, detect_format,
+            make_self_contained, Problem,
+        )
 
         # Detect problem format
         fmt = self._problem_format
         if fmt == "auto":
             fmt = detect_format(self._reference)
 
-        # Build a Problem instance
-        problem = Problem(
-            reference_code=self._reference,
-            format=fmt,
-            dtype=_detect_dtype_simple(self._reference),
-        )
+        # Build a Problem instance — try loading from file for full context
+        ref_path = Path(os.environ.get("OPENKERNEL_REFERENCE_PATH", "reference.py"))
+        if ref_path.is_file():
+            try:
+                problem = load_problem(ref_path)
+            except Exception:
+                problem = Problem(
+                    reference_code=self._reference, format=fmt,
+                    dtype=_detect_dtype_simple(self._reference),
+                )
+        else:
+            problem = Problem(
+                reference_code=self._reference, format=fmt,
+                dtype=_detect_dtype_simple(self._reference),
+            )
 
-        # Build problem description
+        # Make reference self-contained (inline task.py, utils.py for GPU Mode)
+        self_contained_ref = make_self_contained(problem)
+        self._self_contained_ref = self_contained_ref
+
+        # Build problem description using self-contained reference
         problem_desc = (
             f"Optimize the following PyTorch code into a fast Triton kernel "
             f"for {self._hardware} GPU.\n\n"
-            f"Reference implementation:\n```python\n{self._reference}\n```\n\n"
+            f"Reference implementation:\n```python\n{self_contained_ref}\n```\n\n"
             f"CRITICAL REQUIREMENTS:\n"
             f"- Use the EXACT same dtypes as the reference implementation\n"
             f"- The kernel must be correct: torch.allclose(ref, kernel, rtol=1e-2, atol=1e-2)\n"
@@ -147,7 +163,8 @@ class KernelAgentBridge:
             f"- Do NOT hardcode bfloat16 or float16 — use the input tensor's dtype"
         )
 
-        # Build format-appropriate test code
+        # Build format-appropriate test code (uses self-contained ref)
+        problem.reference_code = self_contained_ref
         test_code = build_test_code(problem)
 
         # Create agent
@@ -379,4 +396,6 @@ class KernelAgentBridge:
         """
         if self._use_modal:
             os.environ["OPENKERNEL_USE_MODAL"] = "1"
-            os.environ["OPENKERNEL_REFERENCE_CODE"] = self._reference
+            # Send self-contained reference so Modal has all dependencies
+            os.environ["OPENKERNEL_REFERENCE_CODE"] = self._self_contained_ref
+            os.environ["OPENKERNEL_PROBLEM_FORMAT"] = fmt

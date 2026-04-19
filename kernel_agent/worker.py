@@ -378,15 +378,21 @@ class VerificationWorker:
             if not reference_code:
                 return False, "", "No reference code available for remote eval"
 
-            # Wrap in ModelNew — Modal's eval expects class ModelNew(nn.Module)
-            # but KernelAgent outputs kernel_function()
-            wrapped_code = wrap_in_model_new(kernel_code, reference_code)
+            # Determine format and wrap if needed
+            problem_format = os.environ.get("OPENKERNEL_PROBLEM_FORMAT", "auto")
+            if problem_format == "kernelbench" or "class Model" in reference_code:
+                # KernelBench: wrap in ModelNew
+                wrapped_code = wrap_in_model_new(kernel_code, reference_code)
+            else:
+                # GPU Mode: kernel_function() is already the right format
+                wrapped_code = kernel_code
 
             eval_fn = modal.Function.from_name("openkernel-eval", "eval_kernel_on_gpu")
             result = eval_fn.remote(
                 kernel_source=wrapped_code,
                 reference_source=reference_code,
                 eval_mode="fast",
+                problem_format=problem_format,
             )
 
             correct = result.get("correct", False)
