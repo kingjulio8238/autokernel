@@ -29,9 +29,13 @@ class OpenAIProvider(OpenAICompatibleProvider):
 
     def get_max_tokens_limit(self, model_name: str) -> int:
         """Get max tokens limit for OpenAI models."""
-        if model_name.startswith(("gpt-5", "gpt-4", "o3", "o1")):
+        if model_name.startswith("gpt-5"):
             return 32000
+        elif model_name.startswith("gpt-4o"):
+            return 16384  # GPT-4o max completion tokens
+        elif model_name.startswith(("o3", "o4", "o1")):
+            return 16384
         elif model_name.startswith("gpt-3.5"):
-            return 16000
+            return 4096
         else:
             return 8192

@@ -464,7 +464,7 @@ class VerificationWorker:
 
                 # Call LLM API
                 messages = [{"role": "user", "content": prompt}]
-                response_text = self._call_llm(messages, max_tokens=20000)
+                response_text = self._call_llm(messages, max_tokens=8192)
 
                 # Extract refined kernel from response
                 refined_kernel = self._extract_code_from_response(
