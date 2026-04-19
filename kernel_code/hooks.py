@@ -480,8 +480,9 @@ def create_default_hooks(
     hooks = HookRegistry()
 
     # -- pre_optimize -------------------------------------------------------
-    hooks.register(HookRegistry.PRE_OPTIMIZE, _make_pre_optimize_log(con))
-    hooks.register(HookRegistry.PRE_OPTIMIZE, _make_pre_optimize_cost_confirm(con))
+    # Note: cost confirmation is handled by _cmd_optimize before hooks fire.
+    # Don't duplicate it here — the hook-based confirm ran after the shell
+    # already approved, causing a double prompt that couldn't cancel the run.
     if file_cache is not None:
         hooks.register(HookRegistry.PRE_OPTIMIZE, _make_pre_optimize_cache_check(file_cache, con))
 

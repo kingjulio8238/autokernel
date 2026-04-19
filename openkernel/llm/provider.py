@@ -102,6 +102,26 @@ class LLMProvider:
         """Generate a completion from a plain text prompt."""
         return await self._call_with_retries(prompt)
 
+    def call(self, prompt: str) -> str:
+        """Synchronous wrapper around :meth:`generate`.
+
+        Used by the Orchestrator which runs a synchronous optimization loop.
+        Creates a temporary event loop if needed.
+        """
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None and loop.is_running():
+            import concurrent.futures
+            _loop = asyncio.new_event_loop()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(_loop.run_until_complete, self.generate(prompt)).result()
+        else:
+            return asyncio.run(self.generate(prompt))
+
     async def generate_stream(self, prompt: str) -> AsyncIterator[str]:
         """Generate a completion with streaming. Yields token strings as they arrive."""
         if self._is_groq:

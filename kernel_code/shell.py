@@ -2443,7 +2443,7 @@ class KernelCodeShell:
         # Fire pre_optimize hooks
         self._hooks.fire(
             HookRegistry.PRE_OPTIMIZE,
-            config={"backend": backend, "hardware": "H100"},
+            config={"backend": backend, "hardware": self._settings.default_gpu},
             iterations=iterations,
         )
 
@@ -2486,7 +2486,7 @@ class KernelCodeShell:
             config=config,
             session_id=self._session_id,
             problem_label=problem_label,
-            hardware="H100",
+            hardware=self._settings.default_gpu,
             backend=backend,
             hooks=self._hooks,
             progress=self._opt_progress,
