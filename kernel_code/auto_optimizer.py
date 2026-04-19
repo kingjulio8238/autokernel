@@ -1,0 +1,286 @@
+"""MetaOptimizer — autonomous multi-round optimization loop.
+
+Wraps the existing orchestrator/bridge in an outer reflect-adapt cycle.
+The KE provides a goal (target speedup, budget, time) and walks away.
+The optimizer runs rounds of optimization, reflects between rounds,
+pivots strategy when stuck, and stops when the goal is met or resources
+are exhausted.
+
+Architecture::
+
+    Outer loop (MetaOptimizer)  — reflect, pivot, accumulate
+      Middle loop (Orchestrator) — world model, intent tree
+        Inner loop (InnerLoop)   — generate, eval, critic, retry
+
+Usage::
+
+    from kernel_code.auto_optimizer import MetaOptimizer
+    from kernel_code.goal_spec import GoalSpec
+
+    spec = GoalSpec(target_speedup=2.0, max_budget_usd=5.00)
+    optimizer = MetaOptimizer(spec, settings=settings, console=console)
+    result = optimizer.run()
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from rich.console import Console
+
+from kernel_code.goal_spec import GoalSpec
+from kernel_code.meta_reflect import MetaReflection, reflect_on_round
+
+if TYPE_CHECKING:
+    from kernel_code.live_display import LiveOptimizationDisplay
+    from kernel_code.settings import KernelCodeSettings
+
+logger = logging.getLogger(__name__)
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+@dataclass
+class AutoResult:
+    """Final result of an autonomous optimization run."""
+
+    best_speedup: float = 0.0
+    best_kernel: str = ""
+    target_reached: bool = False
+    rounds_completed: int = 0
+    total_iterations: int = 0
+    total_cost_usd: float = 0.0
+    elapsed_seconds: float = 0.0
+    stop_reason: str = ""
+    round_history: list[dict] = field(default_factory=list)
+
+
+class MetaOptimizer:
+    """Autonomous multi-round kernel optimization.
+
+    Each round runs the existing OpenKernelBridge with a strategy hint.
+    Between rounds, the LLM reflects on progress and decides:
+    CONTINUE (refine), PIVOT (new strategy), or STOP.
+    """
+
+    def __init__(
+        self,
+        goal: GoalSpec,
+        settings: "KernelCodeSettings",
+        console: Console | None = None,
+        live_display: "LiveOptimizationDisplay | None" = None,
+    ) -> None:
+        self._goal = goal
+        self._settings = settings
+        self._console = console or Console()
+        self._live_display = live_display
+
+        # State
+        self._best_speedup: float = 0.0
+        self._best_kernel: str = ""
+        self._round_history: list[dict] = []
+        self._total_cost: float = 0.0
+        self._total_iterations: int = 0
+        self._current_strategy: str = "general optimization"
+
+    def run(self) -> AutoResult:
+        """Run the autonomous optimization loop."""
+        start_time = time.time()
+        stop_reason = ""
+
+        for round_num in range(1, self._goal.max_rounds + 1):
+            # --- Check stopping gates before starting round ---
+            stop_reason = self._check_gates(start_time)
+            if stop_reason:
+                break
+
+            # --- Run one round ---
+            if self._live_display:
+                self._live_display.start_round(round_num, self._current_strategy)
+
+            round_result = self._run_round(round_num)
+            self._round_history.append(round_result)
+            self._total_iterations += round_result.get("total", 0)
+
+            # Update best
+            round_best = round_result.get("best_speedup", 0.0)
+            if round_best > self._best_speedup:
+                self._best_speedup = round_best
+                self._best_kernel = round_result.get("best_kernel", "")
+
+            # --- Check if target reached ---
+            if self._best_speedup >= self._goal.target_speedup:
+                stop_reason = (
+                    f"Target reached: {self._best_speedup:.2f}x >= "
+                    f"{self._goal.target_speedup:.1f}x"
+                )
+                break
+
+            # --- Reflect and decide next action ---
+            if round_num < self._goal.max_rounds:
+                reflection = self._reflect(round_num)
+
+                if reflection.action == "stop":
+                    stop_reason = f"LLM advisor: {reflection.reason}"
+                    break
+                elif reflection.action == "pivot":
+                    self._current_strategy = reflection.next_strategy
+                    if self._live_display:
+                        self._live_display.print_permanent(
+                            f"  [#22d3ee]Pivoting:[/#22d3ee] [white]{reflection.next_strategy}[/white]"
+                        )
+                elif reflection.action == "continue":
+                    if reflection.next_strategy:
+                        self._current_strategy = reflection.next_strategy
+        else:
+            stop_reason = f"Completed all {self._goal.max_rounds} rounds"
+
+        elapsed = time.time() - start_time
+
+        return AutoResult(
+            best_speedup=self._best_speedup,
+            best_kernel=self._best_kernel,
+            target_reached=self._best_speedup >= self._goal.target_speedup,
+            rounds_completed=len(self._round_history),
+            total_iterations=self._total_iterations,
+            total_cost_usd=self._total_cost,
+            elapsed_seconds=elapsed,
+            stop_reason=stop_reason,
+            round_history=self._round_history,
+        )
+
+    def _check_gates(self, start_time: float) -> str:
+        """Check stopping gates. Returns reason string if should stop, empty if OK."""
+        # Budget
+        if self._total_cost >= self._goal.max_budget_usd:
+            return f"Budget exhausted: ${self._total_cost:.2f} >= ${self._goal.max_budget_usd:.2f}"
+
+        # Time
+        if self._goal.max_time_seconds:
+            elapsed = time.time() - start_time
+            if elapsed >= self._goal.max_time_seconds:
+                mins = int(elapsed) // 60
+                return f"Time limit reached: {mins}m"
+
+        return ""
+
+    def _run_round(self, round_num: int) -> dict:
+        """Run one optimization round via the existing bridge."""
+        from kernel_code.integration import OpenKernelBridge
+        from kernel_code.live_display import LiveOptimizationDisplay
+        from kernel_code.settings import settings_to_config, inject_api_keys
+        from kernel_code.permissions import estimate_cost
+        from kernel_code.hooks import HookRegistry, create_default_hooks
+        from kernel_code.file_cache import FileStateCache
+        from kernel_code.template_evolution import TemplateEvolver
+        from openkernel.config import Backend as _Backend, OpenKernelConfig
+
+        inject_api_keys(self._settings)
+
+        settings_kwargs = settings_to_config(self._settings)
+        config = OpenKernelConfig(
+            **settings_kwargs,
+            max_iterations=self._goal.iterations_per_round,
+        )
+        config.backend = (
+            _Backend.CUDA if self._goal.backend == "cuda" else _Backend.TRITON
+        )
+
+        # Use a unique session ID per round
+        import uuid
+        session_id = uuid.uuid4().hex[:8]
+
+        bridge = OpenKernelBridge(
+            config=config,
+            session_id=session_id,
+            problem_label=f"auto-round-{round_num}",
+            hardware=self._goal.hardware,
+            backend=self._goal.backend,
+            live_display=self._live_display,
+        )
+
+        reference_source = Path(self._goal.reference_path).read_text()
+
+        try:
+            result = bridge.run_optimization(reference_source)
+        except Exception as exc:
+            logger.error("Round %d failed: %s", round_num, exc)
+            return {
+                "round": round_num,
+                "strategy": self._current_strategy,
+                "best_speedup": 0.0,
+                "best_kernel": "",
+                "kept": 0,
+                "total": 0,
+                "errors": 1,
+                "bottleneck": "error",
+            }
+
+        # Estimate cost for this round
+        iterations = result.intents_explored if hasattr(result, 'intents_explored') else 0
+        round_cost = estimate_cost(max(iterations, 1), gpu_type=self._goal.hardware)
+        self._total_cost += round_cost
+
+        # Load iteration data from cache
+        kept = 0
+        errors = 0
+        bottleneck = "unknown"
+        if bridge.cache_path.exists():
+            try:
+                session_data = json.loads(bridge.cache_path.read_text())
+                iters = session_data.get("iterations", [])
+                kept = sum(1 for it in iters if it.get("status") == "keep")
+                errors = sum(1 for it in iters if it.get("status") in ("error", "compile_error"))
+                for it in reversed(iters):
+                    bn = it.get("profile", {}).get("bottleneck_type", "")
+                    if bn and bn != "unknown":
+                        bottleneck = bn
+                        break
+            except Exception:
+                pass
+
+        return {
+            "round": round_num,
+            "strategy": self._current_strategy,
+            "best_speedup": result.final_speedup,
+            "best_kernel": result.final_kernel,
+            "kept": kept,
+            "total": iterations,
+            "errors": errors,
+            "bottleneck": bottleneck,
+        }
+
+    def _reflect(self, round_num: int) -> MetaReflection:
+        """LLM reflection between rounds."""
+        from openkernel.config import ModelConfig
+        from openkernel.llm.provider import LLMProvider
+
+        budget_remaining = self._goal.max_budget_usd - self._total_cost
+
+        try:
+            model_config = ModelConfig(
+                provider=self._goal.provider or self._settings.default_provider,
+                model_id=self._goal.model or self._settings.default_model,
+            )
+            llm = LLMProvider(model_config)
+            loop = asyncio.new_event_loop()
+            reflection = loop.run_until_complete(
+                reflect_on_round(
+                    rounds=self._round_history,
+                    best_speedup=self._best_speedup,
+                    target_speedup=self._goal.target_speedup,
+                    budget_remaining=budget_remaining,
+                    llm=llm,
+                )
+            )
+            loop.close()
+            return reflection
+        except Exception as exc:
+            logger.warning("Reflection failed: %s", exc)
+            return MetaReflection(action="continue", reason=f"reflection failed: {exc}")

@@ -165,6 +165,10 @@ class LiveOptimizationDisplay:
         self._current_phase: str = ""
         self._start_time: float = 0.0
         self._live: Live | None = None
+        self._current_round: int = 0
+        self._current_strategy: str = ""
+        self._target_speedup: float | None = None
+        self._round_markers: list[int] = []  # iteration indices where rounds start
 
     def start(self) -> None:
         """Start the live display."""
@@ -176,6 +180,17 @@ class LiveOptimizationDisplay:
             transient=False,
         )
         self._live.start()
+
+    def set_target(self, target: float) -> None:
+        """Set a target speedup to display progress toward."""
+        self._target_speedup = target
+
+    def start_round(self, round_num: int, strategy: str) -> None:
+        """Mark the start of a new optimization round (for /auto mode)."""
+        self._current_round = round_num
+        self._current_strategy = strategy
+        self._round_markers.append(len(self._iterations))
+        self._refresh()
 
     def update_iteration(
         self,
@@ -246,7 +261,27 @@ class LiveOptimizationDisplay:
         if self._problem:
             header.append(f"  {self._problem[:50]}", style="white")
         header.append(f"  ({self._hardware}, {self._backend})", style="#888888")
+        if self._current_round > 0:
+            header.append(f"  Round {self._current_round}", style="bold #22d3ee")
         parts.append(header)
+
+        # Round strategy + target progress
+        if self._current_strategy:
+            strat_line = Text()
+            strat_line.append(f"  Strategy: {self._current_strategy[:60]}", style="white")
+            parts.append(strat_line)
+        if self._target_speedup is not None:
+            pct = min(100, int(self._best_speedup / self._target_speedup * 100))
+            bar_w = 20
+            filled = int(pct / 100 * bar_w)
+            target_line = Text()
+            target_line.append("  Target:   ", style="white")
+            color = "#4ade80" if pct >= 100 else "#fbbf24" if pct >= 50 else "#ef4444"
+            target_line.append("█" * filled, style=color)
+            target_line.append("░" * (bar_w - filled), style="#555555")
+            target_line.append(f" {self._best_speedup:.2f}x / {self._target_speedup:.1f}x ({pct}%)", style=f"bold {color}")
+            parts.append(target_line)
+
         parts.append(Text(""))
 
         # Sparkline
