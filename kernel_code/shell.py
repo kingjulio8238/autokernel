@@ -2539,20 +2539,6 @@ class KernelCodeShell:
             1 for it in self._runs if it["status"] == "keep"
         )
 
-        # Launch TUI for review
-        self._console.print(
-            "[dim]Launching TUI for review...[/dim]"
-        )
-        try:
-            from kernel_code.tui.app import KernelCodeApp
-
-            app = KernelCodeApp(session_path=bridge.cache_path)
-            app.run()
-        except Exception as exc:
-            self._console.print(
-                f"[yellow]TUI exited:[/yellow] {escape(str(exc))}"
-            )
-
         # Persist cost tracker data into session
         self._persist_cost_data()
 

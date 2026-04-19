@@ -95,6 +95,33 @@ class InnerLoop:
         self._critic = critic
         self._config = config
         self._on_phase = on_phase  # callback: (status_message) -> None
+        # Load hardware/backend context for injection into generator prompts
+        self._skills_context = self._load_context(config)
+
+    @staticmethod
+    def _load_context(config: OpenKernelConfig) -> str:
+        """Load hardware specs, backend reference, and pitfalls as skills context."""
+        try:
+            from kernel_code.kernel_config import (
+                load_hardware_context,
+                load_backend_context,
+                load_pitfalls,
+            )
+            parts: list[str] = []
+            hw = config.modal.gpu_type.value if config.modal else "L40S"
+            be = config.backend.value if config.backend else "triton"
+            hw_ctx = load_hardware_context(hw)
+            if hw_ctx:
+                parts.append(hw_ctx)
+            be_ctx = load_backend_context(be)
+            if be_ctx:
+                parts.append(be_ctx)
+            pit = load_pitfalls()
+            if pit:
+                parts.append(pit)
+            return "\n\n".join(parts) if parts else ""
+        except Exception:
+            return ""
 
     async def refine(
         self,
@@ -167,6 +194,7 @@ class InnerLoop:
                     hardware=hardware,
                     intent=intent.description,
                     critic_feedback=critic_feedback,
+                    skills=self._skills_context,
                 )
             except ValueError as exc:
                 # Validation failure from generator — treat as a soft error,
