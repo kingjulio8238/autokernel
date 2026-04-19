@@ -148,23 +148,27 @@ class KernelAgentBridge:
             except Exception as exc:
                 error = exc
 
-        # Track agent log dir for progress polling
+        # Track agent log dir for progress polling — only find sessions
+        # created AFTER this run started
         agent_log_dir = Path(agent.log_dir) if hasattr(agent, 'log_dir') else None
-        _found_session_dir = [None]  # mutable for closure
+        _found_session_dir = [None]
+        _run_start = time.time()
 
         def _find_workers_dir():
-            """Discover the latest session's workers directory."""
+            """Discover the current session's workers directory (created after run start)."""
             if _found_session_dir[0]:
                 wdir = _found_session_dir[0] / "workers"
                 if wdir.exists():
                     return wdir
             if agent_log_dir and agent_log_dir.exists():
-                sessions = sorted(agent_log_dir.glob("session_*"), key=lambda p: p.name)
-                if sessions:
-                    _found_session_dir[0] = sessions[-1]
-                    wdir = sessions[-1] / "workers"
-                    if wdir.exists():
-                        return wdir
+                # Only look at sessions created after this run started
+                for sdir in sorted(agent_log_dir.glob("session_*"), key=lambda p: p.name, reverse=True):
+                    if sdir.stat().st_mtime >= _run_start - 2:
+                        _found_session_dir[0] = sdir
+                        wdir = sdir / "workers"
+                        if wdir.exists():
+                            return wdir
+                        break
             return None
 
         def _get_worker_action(wdir: Path) -> str:
