@@ -64,6 +64,7 @@ def eval_kernel_on_gpu(
     kernel_source: str,
     reference_source: str,
     eval_mode: str = "fast",
+    problem_format: str = "auto",  # "auto", "kernelbench", "gpumode"
     correctness_trials: int = 5,
     perf_trials_fast: int = 10,
     perf_trials_thorough: int = 100,
@@ -94,16 +95,32 @@ def eval_kernel_on_gpu(
     with open(kernel_path, "w") as f:
         f.write(kernel_source)
 
+    # Auto-detect format if needed
+    if problem_format == "auto":
+        if "kernel_function" in kernel_source and "class ModelNew" not in kernel_source:
+            problem_format = "gpumode"
+        else:
+            problem_format = "kernelbench"
+
     try:
-        result = _run_eval(
-            ref_path=ref_path,
-            kernel_path=kernel_path,
-            reference_source=reference_source,
-            kernel_source=kernel_source,
-            correctness_trials=correctness_trials,
-            num_perf_trials=num_perf_trials,
-            tmpdir=tmpdir,
-        )
+        if problem_format == "gpumode":
+            result = _run_eval_gpumode(
+                ref_path=ref_path,
+                kernel_path=kernel_path,
+                correctness_trials=correctness_trials,
+                num_perf_trials=num_perf_trials,
+                tmpdir=tmpdir,
+            )
+        else:
+            result = _run_eval(
+                ref_path=ref_path,
+                kernel_path=kernel_path,
+                reference_source=reference_source,
+                kernel_source=kernel_source,
+                correctness_trials=correctness_trials,
+                num_perf_trials=num_perf_trials,
+                tmpdir=tmpdir,
+            )
     except Exception as exc:
         result = {
             "status": "error",
@@ -257,6 +274,148 @@ def _run_eval(
         "profile": profile,
         "error": None,
     }
+
+
+def _run_eval_gpumode(
+    *,
+    ref_path: str,
+    kernel_path: str,
+    correctness_trials: int,
+    num_perf_trials: int,
+    tmpdir: str,
+) -> dict[str, Any]:
+    """Eval for GPU Mode format: ref_kernel() + kernel_function()."""
+    import importlib.util
+    import sys
+    import torch
+
+    sys.path.insert(0, tmpdir)
+    try:
+        ref_spec = importlib.util.spec_from_file_location("_ref_mod", ref_path)
+        ref_mod = importlib.util.module_from_spec(ref_spec)
+        ref_spec.loader.exec_module(ref_mod)
+
+        kernel_spec = importlib.util.spec_from_file_location("_kernel_mod", kernel_path)
+        kernel_mod = importlib.util.module_from_spec(kernel_spec)
+        kernel_spec.loader.exec_module(kernel_mod)
+    except Exception as exc:
+        return {
+            "status": "compile_error", "correct": False, "speedup": 0.0,
+            "runtime_us": 0.0, "ref_runtime_us": 0.0,
+            "error": f"Import error: {exc}",
+        }
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Get functions
+    ref_kernel = getattr(ref_mod, "ref_kernel", None)
+    kernel_function = getattr(kernel_mod, "kernel_function", None)
+    generate_input = getattr(ref_mod, "generate_input", None)
+
+    if ref_kernel is None or kernel_function is None:
+        return {
+            "status": "error", "correct": False, "speedup": 0.0,
+            "runtime_us": 0.0, "ref_runtime_us": 0.0,
+            "error": "Missing ref_kernel or kernel_function",
+        }
+
+    # Generate inputs
+    try:
+        import inspect
+        sig = inspect.signature(generate_input)
+        params = list(sig.parameters.keys())
+        if "seed" in params:
+            data = generate_input(1024, seed=42)
+        elif len(params) >= 2:
+            data = generate_input(1024, 42)
+        else:
+            data = generate_input(1024)
+    except Exception as exc:
+        return {
+            "status": "error", "correct": False, "speedup": 0.0,
+            "runtime_us": 0.0, "ref_runtime_us": 0.0,
+            "error": f"generate_input failed: {exc}",
+        }
+
+    # Move to device
+    if isinstance(data, tuple):
+        data = tuple(x.to(device) if isinstance(x, torch.Tensor) else x for x in data)
+    elif isinstance(data, torch.Tensor):
+        data = data.to(device)
+
+    # Correctness check
+    all_correct = True
+    max_diff = 0.0
+    for trial in range(correctness_trials):
+        try:
+            with torch.no_grad():
+                ref_out = ref_kernel(data)
+                kernel_out = kernel_function(data)
+        except Exception as exc:
+            return {
+                "status": "error", "correct": False, "speedup": 0.0,
+                "runtime_us": 0.0, "ref_runtime_us": 0.0,
+                "error": f"Runtime error on trial {trial}: {exc}",
+            }
+
+        if isinstance(ref_out, torch.Tensor) and isinstance(kernel_out, torch.Tensor):
+            diff = (ref_out - kernel_out).abs().max().item()
+            max_diff = max(max_diff, diff)
+            if not torch.allclose(ref_out, kernel_out, rtol=1e-2, atol=1e-2):
+                all_correct = False
+
+    if not all_correct:
+        return {
+            "status": "incorrect", "correct": False, "speedup": 0.0,
+            "runtime_us": 0.0, "ref_runtime_us": 0.0,
+            "error": f"Correctness failed. Max diff: {max_diff:.6e}",
+        }
+
+    # Benchmark
+    def _ref_call():
+        with torch.no_grad():
+            return ref_kernel(data)
+
+    def _kernel_call():
+        with torch.no_grad():
+            return kernel_function(data)
+
+    ref_times = _benchmark_fn(_ref_call, num_perf_trials)
+    kernel_times = _benchmark_fn(_kernel_call, num_perf_trials)
+
+    ref_us = _median(ref_times) * 1e6
+    kernel_us = _median(kernel_times) * 1e6
+    speedup = ref_us / kernel_us if kernel_us > 0 else 0.0
+
+    return {
+        "status": "correct", "correct": True,
+        "speedup": round(speedup, 4),
+        "runtime_us": round(kernel_us, 2),
+        "ref_runtime_us": round(ref_us, 2),
+        "profile": {}, "error": None,
+    }
+
+
+def _benchmark_fn(fn, num_trials: int) -> list[float]:
+    """Benchmark a callable using CUDA events."""
+    import torch
+
+    times = []
+    # Warmup
+    for _ in range(3):
+        fn()
+    torch.cuda.synchronize()
+
+    for _ in range(num_trials):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        fn()
+        end.record()
+        torch.cuda.synchronize()
+        times.append(start.elapsed_time(end) / 1000.0)
+
+    return times
 
 
 def _benchmark(

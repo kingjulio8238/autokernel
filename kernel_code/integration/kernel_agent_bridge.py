@@ -36,7 +36,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _modal_eval(kernel_code: str, reference_code: str) -> dict:
+def _detect_dtype_simple(code: str) -> str:
+    """Quick dtype detection from code."""
+    if "float16" in code or "fp16" in code:
+        return "float16"
+    if "bfloat16" in code or "bf16" in code:
+        return "bfloat16"
+    return "float32"
+
+
+def _modal_eval(kernel_code: str, reference_code: str, problem_format: str = "auto") -> dict:
     """Evaluate a kernel via Modal remote GPU."""
     import modal
 
@@ -45,6 +54,7 @@ def _modal_eval(kernel_code: str, reference_code: str) -> dict:
         kernel_source=kernel_code,
         reference_source=reference_code,
         eval_mode="fast",
+        problem_format=problem_format,
     )
     return result
 
@@ -62,6 +72,7 @@ class KernelAgentBridge:
         live_display: "LiveOptimizationDisplay | None" = None,
         run_logger: "RunLogger | None" = None,
         use_modal: bool = True,
+        problem_format: str = "auto",  # "auto", "kernelbench", "gpumode"
     ) -> None:
         self._reference = reference_source
         self._model_name = model_name
@@ -71,6 +82,7 @@ class KernelAgentBridge:
         self._live_display = live_display
         self._run_logger = run_logger
         self._use_modal = use_modal
+        self._problem_format = problem_format
 
         self._best_speedup: float = 0.0
         self._best_kernel: str = ""
@@ -108,59 +120,35 @@ class KernelAgentBridge:
         settings = load_settings()
         inject_api_keys(settings)
 
-        # Build problem description from reference — emphasize dtype
+        # Use Problem interface for format-aware test code
+        from kernel_code.problem import load_problem, build_test_code, detect_format, Problem
+
+        # Detect problem format
+        fmt = self._problem_format
+        if fmt == "auto":
+            fmt = detect_format(self._reference)
+
+        # Build a Problem instance
+        problem = Problem(
+            reference_code=self._reference,
+            format=fmt,
+            dtype=_detect_dtype_simple(self._reference),
+        )
+
+        # Build problem description
         problem_desc = (
             f"Optimize the following PyTorch code into a fast Triton kernel "
             f"for {self._hardware} GPU.\n\n"
             f"Reference implementation:\n```python\n{self._reference}\n```\n\n"
             f"CRITICAL REQUIREMENTS:\n"
-            f"- The kernel MUST work with float32 inputs (NOT bfloat16)\n"
             f"- Use the EXACT same dtypes as the reference implementation\n"
             f"- The kernel must be correct: torch.allclose(ref, kernel, rtol=1e-2, atol=1e-2)\n"
-            f"- Output dtype must match reference output dtype (float32)\n"
+            f"- Output dtype must match reference output dtype\n"
             f"- Do NOT hardcode bfloat16 or float16 — use the input tensor's dtype"
         )
 
-        # Build a test that uses the reference's actual inputs (float32)
-        test_code = f'''"""Test kernel_function against reference implementation."""
-import torch
-import sys
-
-def test_kernel():
-    from kernel import kernel_function
-
-    # Use EXACT same inputs as the reference
-{self._reference}
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # Get reference inputs and model
-    inputs = get_inputs()
-    inputs = [x.to(device) if isinstance(x, torch.Tensor) else x for x in inputs]
-    model = Model().to(device).eval()
-
-    with torch.no_grad():
-        expected = model(*inputs)
-        result = kernel_function(*inputs)
-
-    # Check dtype matches
-    if result.dtype != expected.dtype:
-        print(f"DTYPE MISMATCH: expected {{expected.dtype}}, got {{result.dtype}}")
-        return False
-
-    # Check correctness
-    if not torch.allclose(result, expected, rtol=1e-2, atol=1e-2):
-        diff = (result - expected).abs().max().item()
-        print(f"NUMERICAL MISMATCH: max diff = {{diff}}")
-        return False
-
-    print("PASS")
-    return True
-
-if __name__ == "__main__":
-    success = test_kernel()
-    sys.exit(0 if success else 1)
-'''
+        # Build format-appropriate test code
+        test_code = build_test_code(problem)
 
         # Create agent
         agent = TritonKernelAgent(
@@ -342,10 +330,15 @@ if __name__ == "__main__":
 
         if result.get("success") and kernel_code and self._use_modal:
             try:
-                from kernel_agent.model_wrapper import wrap_in_model_new
-                wrapped = wrap_in_model_new(kernel_code, self._reference)
+                # Only wrap in ModelNew for KernelBench format
+                # GPU Mode format uses kernel_function() directly
+                if fmt == "kernelbench":
+                    from kernel_agent.model_wrapper import wrap_in_model_new
+                    eval_code = wrap_in_model_new(kernel_code, self._reference)
+                else:
+                    eval_code = kernel_code
 
-                eval_result = _modal_eval(wrapped, self._reference)
+                eval_result = _modal_eval(eval_code, self._reference, problem_format=fmt)
                 if eval_result.get("correct"):
                     speedup = eval_result.get("speedup", 0.0)
                     ref_runtime_us = eval_result.get("ref_runtime_us", 0.0)
