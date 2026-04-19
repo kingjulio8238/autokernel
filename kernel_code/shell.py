@@ -141,6 +141,7 @@ if _HAS_PROMPT_TOOLKIT:
                     ("/git", "Show git optimization log"),
                     ("/history", "Show run history"),
                     ("/config", "View/edit settings"),
+                    ("/problem", "Load & browse kernel problems"),
                     ("/models", "Browse & select LLM models"),
                     ("/evolve", "Template evolution status"),
                     ("/cost", "Cost breakdown dashboard"),
@@ -319,6 +320,7 @@ class KernelCodeShell:
             "/doctor": self._cmd_doctor,
             "/theme": self._cmd_theme,
             "/models": self._cmd_models,
+            "/problem": self._cmd_problem,
             "/advisor": self._cmd_advisor,
             "/help": self._cmd_help,
             "/quit": self._cmd_quit,
@@ -579,12 +581,18 @@ class KernelCodeShell:
                     reference = tok
                 i += 1
 
+        # Auto-detect reference.py if no --reference given
         if not mock and reference is None:
-            self._console.print(
-                "[red]Error:[/red] --reference is required. "
-                "Use [bold]/optimize --reference FILE[/bold]"
-            )
-            return
+            default_ref = _PROJECT_ROOT / "reference.py"
+            if default_ref.is_file():
+                reference = str(default_ref)
+            else:
+                self._console.print(
+                    "[red]Error:[/red] no reference file found. "
+                    "Load a problem first: [bold]/problem 1.5[/bold] or "
+                    "[bold]/problem load FILE[/bold]"
+                )
+                return
 
         # Cost gate -- estimate and confirm before running
         # Parallel mode runs two backends, so double the cost estimate
@@ -903,6 +911,7 @@ class KernelCodeShell:
                 "/doctor",
                 "Check environment health (Modal, API keys, skills, deps)",
             ),
+            ("/problem", "Show/load kernel problem (/problem 1.5, /problem load FILE)"),
             ("/models", "Browse & select LLM models"),
             ("/advisor", "Show 3 next optimization suggestions"),
             ("/theme", "Show/change terminal theme"),
@@ -1478,6 +1487,232 @@ class KernelCodeShell:
         self._console.print(
             f"[#4ade80]Active model \u2192 {selected['name']}[/#4ade80]"
         )
+
+    def _cmd_problem(self, args_str: str) -> None:
+        """Browse KernelBench problems, load one, or load a custom reference file.
+
+        Usage:
+            /problem                — show current problem
+            /problem browse [LEVEL] — list KernelBench problems
+            /problem LEVEL.ID       — load KernelBench problem (e.g. 1.5)
+            /problem load FILE      — load a custom reference file
+        """
+        args = args_str.strip()
+
+        # /problem — show current
+        if not args:
+            self._show_current_problem()
+            return
+
+        # /problem load FILE — custom reference
+        if args.startswith("load "):
+            filepath = args[5:].strip()
+            self._load_custom_reference(filepath)
+            return
+
+        # /problem browse [LEVEL] — list KernelBench problems
+        if args.startswith("browse"):
+            level_str = args[6:].strip()
+            level = int(level_str) if level_str else None
+            self._browse_problems(level)
+            return
+
+        # /problem LEVEL.ID — load KernelBench problem
+        if "." in args:
+            try:
+                level_s, problem_s = args.split(".", 1)
+                level = int(level_s)
+                problem_id = int(problem_s)
+            except ValueError:
+                self._console.print("[#ef4444]Invalid format. Use LEVEL.ID (e.g. 1.5)[/#ef4444]")
+                return
+            self._load_kernelbench_problem(level, problem_id)
+            return
+
+        # /problem N — treat as level to browse
+        try:
+            level = int(args)
+            self._browse_problems(level)
+        except ValueError:
+            self._console.print(
+                "[#ef4444]Unknown subcommand.[/#ef4444] "
+                "Try: [bold]/problem browse[/bold], [bold]/problem 1.5[/bold], "
+                "or [bold]/problem load FILE[/bold]"
+            )
+
+    def _show_current_problem(self) -> None:
+        """Show what problem is currently loaded."""
+        ref_path = _PROJECT_ROOT / "reference.py"
+        if not ref_path.is_file():
+            self._console.print("[yellow]No problem loaded.[/yellow]")
+            self._console.print()
+            self._console.print("  [bold]/problem browse[/bold]      — browse KernelBench problems")
+            self._console.print("  [bold]/problem 1.5[/bold]         — load Level 1, Problem 5")
+            self._console.print("  [bold]/problem load FILE[/bold]   — load your own reference")
+            return
+
+        # Parse problem info from reference.py docstring
+        content = ref_path.read_text()
+        lines = content.split("\n", 10)
+        problem_name = "Custom kernel"
+        for line in lines:
+            if "KernelBench" in line or "Problem" in line:
+                problem_name = line.strip().strip('"').strip("'").strip()
+                break
+
+        self._console.print()
+        self._console.print(f"  [bold white]{problem_name}[/bold white]")
+        self._console.print(f"  [white]Reference: reference.py ({len(content)} chars)[/white]")
+
+        # Show kernel.py status
+        kernel_path = _PROJECT_ROOT / "kernel.py"
+        if kernel_path.is_file():
+            kernel_content = kernel_path.read_text()
+            has_model_new = "ModelNew" in kernel_content
+            self._console.print(
+                f"  [white]Kernel:    kernel.py "
+                f"({'ModelNew defined' if has_model_new else 'no ModelNew'})[/white]"
+            )
+
+        # Show forward signature
+        import re
+        match = re.search(r"def forward\(self,(.*?)\).*?:", content, re.DOTALL)
+        if match:
+            params = match.group(1).strip()
+            self._console.print(f"  [white]Signature: forward(self, {params})[/white]")
+
+        self._console.print()
+        self._console.print("  Run [bold]/optimize[/bold] to start optimizing this kernel.")
+
+    def _browse_problems(self, level: int | None = None) -> None:
+        """List available KernelBench problems."""
+        try:
+            from kernelbench.dataset import construct_kernelbench_dataset
+        except ImportError:
+            self._console.print(
+                "[#ef4444]kernelbench not installed.[/#ef4444] "
+                "Install with: [bold]pip install kernelbench[/bold]"
+            )
+            return
+
+        levels = [level] if level else [1, 2, 3, 4]
+
+        for lvl in levels:
+            try:
+                dataset = construct_kernelbench_dataset(level=lvl, source="local")
+            except Exception:
+                try:
+                    dataset = construct_kernelbench_dataset(level=lvl, source="huggingface")
+                except Exception as exc:
+                    self._console.print(f"[#ef4444]Could not load Level {lvl}: {exc}[/#ef4444]")
+                    continue
+
+            problems = dataset.problems if hasattr(dataset, "problems") else []
+            self._console.print(f"\n  [bold white]Level {lvl}[/bold white] ({len(problems)} problems)")
+
+            for p in problems[:20]:  # cap display at 20
+                pid = p.problem_id if hasattr(p, "problem_id") else "?"
+                name = p.name if hasattr(p, "name") else str(p)
+                self._console.print(f"    [#4ade80]{lvl}.{pid}[/#4ade80]  {name}")
+
+            if len(problems) > 20:
+                self._console.print(f"    [white]... and {len(problems) - 20} more[/white]")
+
+        self._console.print()
+        self._console.print("  Load one: [bold]/problem 1.5[/bold]")
+
+    def _load_kernelbench_problem(self, level: int, problem_id: int) -> None:
+        """Load a KernelBench problem into reference.py and kernel.py."""
+        try:
+            from kernelbench.dataset import construct_kernelbench_dataset
+        except ImportError:
+            self._console.print(
+                "[#ef4444]kernelbench not installed.[/#ef4444] "
+                "Install with: [bold]pip install kernelbench[/bold]"
+            )
+            return
+
+        self._console.print(f"[white]Loading Level {level}, Problem {problem_id}...[/white]")
+
+        try:
+            dataset = construct_kernelbench_dataset(level=level, source="local")
+        except Exception:
+            try:
+                dataset = construct_kernelbench_dataset(level=level, source="huggingface")
+            except Exception as exc:
+                self._console.print(f"[#ef4444]Could not load dataset: {exc}[/#ef4444]")
+                return
+
+        try:
+            problem = dataset.get_problem_by_id(problem_id)
+        except Exception as exc:
+            self._console.print(f"[#ef4444]Problem {problem_id} not found: {exc}[/#ef4444]")
+            return
+
+        # Write reference.py
+        header = (
+            f'"""\nKernelBench Level {level}, Problem {problem_id}: {problem.name}\n'
+            f'READ-ONLY — do not modify this file. The agent modifies kernel.py instead.\n'
+            f'Loaded via /problem {level}.{problem_id}\n"""\n\n'
+        )
+        ref_path = _PROJECT_ROOT / "reference.py"
+        ref_path.write_text(header + problem.code)
+
+        # Generate passthrough kernel.py
+        from scripts.setup_problem import extract_forward_signature, make_passthrough_kernel
+        forward_params = extract_forward_signature(problem.code)
+        kernel_code = make_passthrough_kernel(problem.code, forward_params)
+        kernel_path = _PROJECT_ROOT / "kernel.py"
+        kernel_path.write_text(kernel_code)
+
+        self._console.print(f"[#4ade80]Loaded: {problem.name}[/#4ade80]")
+        self._console.print(f"  [white]reference.py — target to beat[/white]")
+        self._console.print(f"  [white]kernel.py — passthrough baseline (~1.0x)[/white]")
+        self._console.print()
+        self._console.print("  Run [bold]/optimize[/bold] to start.")
+
+    def _load_custom_reference(self, filepath: str) -> None:
+        """Load a custom reference file for optimization."""
+        from pathlib import Path as _Path
+
+        src = _Path(filepath).resolve()
+        if not src.is_file():
+            self._console.print(f"[#ef4444]File not found: {filepath}[/#ef4444]")
+            return
+
+        content = src.read_text()
+
+        # Validate it has a Model class with forward()
+        if "class Model" not in content or "def forward" not in content:
+            self._console.print(
+                "[#fbbf24]Warning: no Model class with forward() found.[/#fbbf24] "
+                "The optimizer expects a KernelBench-style reference."
+            )
+
+        # Copy to reference.py
+        header = (
+            f'"""\nCustom reference: {src.name}\n'
+            f'READ-ONLY — do not modify this file. The agent modifies kernel.py instead.\n'
+            f'Loaded via /problem load {filepath}\n"""\n\n'
+        )
+        ref_path = _PROJECT_ROOT / "reference.py"
+        ref_path.write_text(header + content)
+
+        # Generate passthrough kernel.py
+        import re
+        match = re.search(r"def forward\(self,(.*?)\).*?:", content, re.DOTALL)
+        forward_params = match.group(1).strip() if match else "*args"
+
+        from scripts.setup_problem import make_passthrough_kernel
+        kernel_code = make_passthrough_kernel(content, forward_params)
+        kernel_path = _PROJECT_ROOT / "kernel.py"
+        kernel_path.write_text(kernel_code)
+
+        self._console.print(f"[#4ade80]Loaded: {src.name}[/#4ade80]")
+        self._console.print(f"  [white]reference.py — target to beat[/white]")
+        self._console.print(f"  [white]kernel.py — passthrough baseline[/white]")
+        self._console.print()
+        self._console.print("  Run [bold]/optimize[/bold] to start.")
 
     def _cmd_advisor(self, args_str: str) -> None:
         """Show optimization suggestions based on current session state."""
