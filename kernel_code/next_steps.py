@@ -280,6 +280,15 @@ def _parse_suggestions(response: str) -> list[NextStep]:
     return suggestions[:3]
 
 
+def _strip_markdown(text: str) -> str:
+    """Strip common markdown formatting from LLM output."""
+    import re
+    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)  # **bold**
+    text = re.sub(r"\*(.*?)\*", r"\1", text)  # *italic*
+    text = re.sub(r"`(.*?)`", r"\1", text)  # `code`
+    return text.strip()
+
+
 def format_next_steps(
     steps: list[NextStep], console: Console | None = None
 ) -> Text:
@@ -288,13 +297,15 @@ def format_next_steps(
     result.append("\n  Next Steps\n", style="bold")
 
     for step in steps:
+        title = _strip_markdown(step.title)
         result.append(f"    {step.number}. ", style="bold #22d3ee")
-        result.append(step.title, style="bold white")
+        result.append(title, style="bold white")
         if step.expected_gain:
             result.append(f"  ({step.expected_gain})", style="white")
         result.append("\n")
         if step.approach:
-            result.append(f"       {step.approach}\n", style="white")
+            approach = _strip_markdown(step.approach)
+            result.append(f"       {approach}\n", style="white")
         if step.skill_id:
             result.append(f"       /skill:{step.skill_id}\n", style="#22d3ee")
 

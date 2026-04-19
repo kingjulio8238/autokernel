@@ -505,8 +505,8 @@ def create_default_hooks(
     # -- post_optimize ------------------------------------------------------
     if session_mod is not None:
         hooks.register(HookRegistry.POST_OPTIMIZE, _make_post_optimize_save(session_mod))
-    hooks.register(HookRegistry.POST_OPTIMIZE, _make_post_optimize_summary(con))
-    hooks.register(HookRegistry.POST_OPTIMIZE, _make_post_optimize_dashboard_link(con))
+    # Note: post-optimize summary and dashboard link are handled by the
+    # inline LiveOptimizationDisplay — don't duplicate them in hooks.
     if file_cache is not None:
         hooks.register(HookRegistry.POST_OPTIMIZE, _make_post_optimize_cache_save(file_cache, con))
 
