@@ -2726,6 +2726,17 @@ class KernelCodeShell:
             total_cost=0.0,
         )
 
+        # Render kernel profile report
+        from kernel_code.kernel_profile import render_kernel_profile
+        render_kernel_profile(
+            speedup=speedup,
+            ref_runtime_us=result.get("ref_runtime_us", 0.0),
+            kernel_runtime_us=result.get("kernel_runtime_us", 0.0),
+            profile=result.get("profile", {}),
+            hardware=self._settings.default_gpu,
+            console=self._console,
+        )
+
         if result.get("success"):
             self._console.print(
                 f"\n  [bold #4ade80]Correct kernel found: {speedup:.2f}x[/bold #4ade80]"

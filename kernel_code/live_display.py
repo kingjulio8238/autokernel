@@ -278,7 +278,7 @@ class LiveOptimizationDisplay:
             header.append(f"  {self._problem[:50]}", style="white")
         header.append(f"  ({self._hardware}, {self._backend})", style="#888888")
         if self._current_round > 0:
-            header.append(f"  Round {self._current_round}", style="bold #22d3ee")
+            header.append(f"  Round {self._current_round}", style="bold #d97757")
         parts.append(header)
 
         # Round strategy + target progress
@@ -330,7 +330,7 @@ class LiveOptimizationDisplay:
                     wline.append("░" * bar_w, style="#333333")
                     wline.append("  starting...", style="#888888")
                 else:
-                    wline.append("█" * filled, style="#22d3ee")
+                    wline.append("█" * filled, style="#d97757")
                     wline.append("░" * (bar_w - filled), style="#333333")
                     wline.append(f"  {rnd}/{max_rnd}", style="white")
                     if action:

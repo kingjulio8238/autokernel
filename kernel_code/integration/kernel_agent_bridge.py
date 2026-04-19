@@ -285,21 +285,27 @@ class KernelAgentBridge:
         kernel_code = result.get("kernel_code", "")
         speedup = 0.0
 
+        profile = {}
+        ref_runtime_us = 0.0
+        kernel_runtime_us = 0.0
+
         if result.get("success") and kernel_code and self._use_modal:
             try:
-                # Wrap in ModelNew if needed
                 from kernel_agent.model_wrapper import wrap_in_model_new
                 wrapped = wrap_in_model_new(kernel_code, self._reference)
 
                 eval_result = _modal_eval(wrapped, self._reference)
                 if eval_result.get("correct"):
                     speedup = eval_result.get("speedup", 0.0)
+                    ref_runtime_us = eval_result.get("ref_runtime_us", 0.0)
+                    kernel_runtime_us = eval_result.get("runtime_us", 0.0)
+                    profile = eval_result.get("profile", {})
 
                 if self._live_display:
                     self._live_display.update_iteration(
                         num=self._iteration_count + 1,
                         speedup=speedup,
-                        status="keep" if speedup > 1.0 else "discard",
+                        status="keep" if speedup > 0 else "discard",
                         intent=f"KernelAgent ({self._model_name})",
                     )
                     self._iteration_count += 1
@@ -310,6 +316,9 @@ class KernelAgentBridge:
             "success": result.get("success", False),
             "kernel_code": kernel_code,
             "speedup": speedup,
+            "ref_runtime_us": ref_runtime_us,
+            "kernel_runtime_us": kernel_runtime_us,
+            "profile": profile,
             "worker_id": result.get("worker_id"),
             "rounds": result.get("rounds", 0),
             "elapsed": elapsed,
