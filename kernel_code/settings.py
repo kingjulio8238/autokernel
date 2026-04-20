@@ -83,7 +83,7 @@ class KernelCodeSettings:
     num_workers: int = 4              # parallel KernelAgent workers
     max_rounds: int = 10              # max refinement rounds per worker
     iterations_per_round: int = 5     # iterations per autopilot round
-    max_autopilot_rounds: int = 5     # max outer-loop rounds for /autopilot
+    max_autopilot_rounds: int = 20    # max outer-loop rounds (budget/plateau stops first)
     engine: str = "kernel-agent"      # "kernel-agent" or "native"
 
     # Budget
