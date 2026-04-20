@@ -318,20 +318,31 @@ class KernelAgentBridge:
                         try:
                             latest = max(round_files, key=lambda p: p.name)
                             data = json.loads(latest.read_text())
+                            # Parse speedup: check top-level field first, then stdout
                             speedup = float(data.get("speedup", 0.0))
+                            if speedup == 0.0:
+                                import re as _re
+                                stdout = data.get("stdout", "")
+                                sp_match = _re.search(r"Speedup:\s*([\d.]+)x", stdout)
+                                if sp_match:
+                                    speedup = float(sp_match.group(1))
                             if data.get("success"):
                                 status = "passed"
-                                action = "correct kernel found"
+                                action = f"correct ({speedup:.2f}x)" if speedup > 0 else "correct kernel found"
                         except Exception:
                             pass
+                    # Offset worker ID by round so plots accumulate across rounds
+                    round_offset = int(os.environ.get("OPENKERNEL_ROUND_OFFSET", "0"))
+                    global_wid = round_offset + i
                     worker_states.append({
-                        "id": i, "round": rounds,
+                        "id": global_wid, "round": rounds,
                         "max_rounds": self._max_rounds, "status": status,
                         "action": action, "speedup": speedup,
                     })
                 else:
+                    round_offset = int(os.environ.get("OPENKERNEL_ROUND_OFFSET", "0"))
                     worker_states.append({
-                        "id": i, "round": 0,
+                        "id": round_offset + i, "round": 0,
                         "max_rounds": self._max_rounds, "status": "waiting",
                         "action": "",
                     })

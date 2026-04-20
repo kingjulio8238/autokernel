@@ -135,10 +135,29 @@ def render_live_lines(
     axis.append("       \u2514" + _H_LINE * width, style=_DIM)
     parts.append(axis)
 
+    # X-axis labels with intermediate time markers
     xl = Text()
-    xl.append("        0s", style=_DIM)
-    xl.append(" " * max(0, width - 10))
-    xl.append(f"{int(elapsed)}s", style=_DIM)
+    xl.append("        ", style=_DIM)
+    if elapsed <= 60:
+        # Short: just 0s and end
+        xl.append("0s", style=_DIM)
+        xl.append(" " * max(0, width - 8))
+        xl.append(f"{int(elapsed)}s", style=_DIM)
+    else:
+        # Longer: show markers at regular intervals
+        import math
+        interval = 30 if elapsed <= 180 else 60 if elapsed <= 600 else 120
+        num_marks = int(elapsed / interval) + 1
+        chars_per_mark = max(1, width // max(num_marks, 1))
+        for i in range(num_marks + 1):
+            t = i * interval
+            if t > elapsed:
+                break
+            label = f"{int(t)}s"
+            xl.append(label, style=_DIM)
+            padding = chars_per_mark - len(label)
+            if padding > 0 and i < num_marks:
+                xl.append(" " * padding)
     parts.append(xl)
 
     # Legend
