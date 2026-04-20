@@ -547,9 +547,9 @@ class KernelCodeShell:
             if stripped in ("1", "2", "3") and self._pending_next_steps:
                 self._pick_next_step(int(stripped))
                 return
-            # Detect inline code paste: "optimize this: def forward..."
-            if self._is_optimize_request(stripped):
-                self._handle_inline_optimize(stripped)
+            # Smart optimize: "optimize @file.py for H100 2x $10"
+            if self._is_optimize_intent(stripped):
+                self._smart_optimize(stripped)
                 return
             # Detect refinement hint: "try autotune", "use shared memory"
             if self._is_refinement_request(stripped):
@@ -2456,19 +2456,14 @@ class ModelNew(nn.Module):
     # Natural language
     # ------------------------------------------------------------------
 
-    def _is_optimize_request(self, text: str) -> bool:
-        """Detect if the user wants to optimize — pasted code or @file reference."""
+    def _is_optimize_intent(self, text: str) -> bool:
+        """Detect if the user wants to optimize something."""
         lower = text.lower()
-
-        # "optimize @file.py" or "optimize this @file.py"
-        if "optimize" in lower and "--- " in text and "---" in text:
-            # Has injected file content from @tag
-            return True
-
-        triggers = ["optimize this", "optimize:", "make this faster", "speed up"]
-        has_trigger = any(t in lower for t in triggers)
-        has_code = any(kw in text for kw in ["def forward", "def ", "torch.", "class Model", "@triton"])
-        return has_trigger and has_code
+        triggers = [
+            "optimize", "make faster", "speed up", "improve performance",
+            "make this faster", "optimize this", "kernel for",
+        ]
+        return any(t in lower for t in triggers)
 
     def _is_refinement_request(self, text: str) -> bool:
         """Detect if the user wants to refine the existing kernel."""
@@ -2482,6 +2477,190 @@ class ModelNew(nn.Module):
         ]
         lower = text.lower()
         return any(h in lower for h in refinement_hints)
+
+    def _smart_optimize(self, text: str) -> None:
+        """Smart optimizer — parse goal from NL, validate, ask for missing, run.
+
+        Handles: "optimize @file.py for H100 2x $10"
+        Also: "optimize" (uses defaults), "optimize @file.py" (fills rest from settings)
+        """
+        from kernel_code.goal_parser import parse_goal, validate_goal
+
+        self._console.print()
+
+        # Parse what the user gave us
+        goal = parse_goal(text)
+
+        # Fill missing from settings
+        if not goal.file:
+            ref_path = _PROJECT_ROOT / "reference.py"
+            if ref_path.is_file():
+                goal.file = "reference.py"
+            # else: will ask below
+        if not goal.hardware:
+            goal.hardware = self._settings.default_gpu
+        if not goal.backend:
+            goal.backend = self._settings.default_backend
+        if not goal.model:
+            goal.model = self._settings.default_model
+        if goal.budget_usd <= 0:
+            goal.budget_usd = self._settings.max_budget or 5.00
+        if goal.target_speedup <= 0:
+            goal.target_speedup = 2.0  # default target
+
+        # --- Ask for anything critical that's missing ---
+        if not goal.file or not (_PROJECT_ROOT / goal.file).is_file():
+            self._console.print("  [#ff6b80]No reference file found.[/#ff6b80]")
+            try:
+                f = self._console.input("  [bold white]Path to kernel file: [/bold white]").strip()
+            except (EOFError, KeyboardInterrupt):
+                return
+            if not f:
+                return
+            goal.file = f
+
+        # --- Validate ---
+        errors = validate_goal(goal, _PROJECT_ROOT)
+        if errors:
+            for e in errors:
+                self._console.print(f"  [#ff6b80]{e}[/#ff6b80]")
+            return
+
+        # --- Show plan + confirm ---
+        # Load file to detect format and name
+        from kernel_code.problem import load_problem, detect_format
+        ref_path = _PROJECT_ROOT / goal.file
+        try:
+            problem = load_problem(ref_path)
+            problem_name = problem.name or ref_path.name
+        except Exception:
+            problem_name = ref_path.name
+
+        self._console.print(f"  [bold white]\u2500\u2500 Optimization Plan \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500[/bold white]")
+        self._console.print(f"  File:     [bold white]{problem_name}[/bold white]")
+        self._console.print(f"  Target:   [bold white]{goal.target_speedup:.1f}x[/bold white] speedup")
+        self._console.print(f"  Hardware: [white]{goal.hardware}[/white]  \u00b7  Backend: [white]{goal.backend}[/white]")
+        self._console.print(f"  Model:    [white]{goal.model}[/white]")
+        self._console.print(f"  Budget:   [white]${goal.budget_usd:.2f}[/white]")
+        self._console.print()
+
+        try:
+            answer = self._console.input(
+                "  [bold white]Proceed? (y/n): [/bold white]"
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if answer not in ("y", "yes", ""):
+            self._console.print("  [#999999]Cancelled[/#999999]")
+            return
+
+        # --- Save as reference.py if it's a different file ---
+        if goal.file != "reference.py":
+            src = (_PROJECT_ROOT / goal.file).read_text()
+            (_PROJECT_ROOT / "reference.py").write_text(src)
+            # Copy supporting files for GPU Mode
+            fmt = detect_format(src)
+            if fmt == "gpumode":
+                src_dir = (_PROJECT_ROOT / goal.file).parent
+                for extra in ["task.py", "utils.py"]:
+                    ep = src_dir / extra
+                    if ep.is_file():
+                        (_PROJECT_ROOT / extra).write_text(ep.read_text())
+            self._console.print(f"  \u23bf  [#999999]Loaded {goal.file} \u2192 reference.py[/#999999]")
+
+        # --- Apply settings ---
+        if goal.hardware != self._settings.default_gpu:
+            from kernel_code.settings import save_project_setting
+            save_project_setting("default_gpu", goal.hardware)
+            self._settings.default_gpu = goal.hardware
+
+        # --- Auto-profile ---
+        self._console.print(f"  \u23bf  [#999999]Profiling reference...[/#999999]")
+        self._cmd_profile_ref("")
+
+        # --- Run autopilot ---
+        from kernel_code.goal_spec import GoalSpec
+        from kernel_code.auto_optimizer import MetaOptimizer
+        from kernel_code.live_display import LiveOptimizationDisplay
+
+        spec = GoalSpec(
+            target_speedup=goal.target_speedup,
+            max_budget_usd=goal.budget_usd,
+            max_time_seconds=goal.time_limit_seconds or None,
+            max_rounds=self._settings.max_autopilot_rounds,
+            reference_path=str(_PROJECT_ROOT / "reference.py"),
+            hardware=goal.hardware,
+            backend=goal.backend,
+            model=goal.model,
+            provider=self._settings.default_provider,
+        )
+
+        live_display = LiveOptimizationDisplay(
+            console=self._console,
+            problem=problem_name,
+            hardware=goal.hardware,
+            backend=goal.backend,
+        )
+        live_display.set_target(goal.target_speedup)
+
+        from kernel_code.run_log import RunLogger
+        run_logger = RunLogger()
+        run_logger.start_run(
+            command=f"smart optimize: {text[:60]}",
+            config={
+                "model": goal.model, "hardware": goal.hardware,
+                "backend": goal.backend, "target": goal.target_speedup,
+                "budget": goal.budget_usd, "file": goal.file,
+            },
+        )
+
+        live_display.start()
+        optimizer = MetaOptimizer(
+            goal=spec,
+            settings=self._settings,
+            console=self._console,
+            live_display=live_display,
+            run_logger=run_logger,
+        )
+
+        try:
+            result = optimizer.run()
+        finally:
+            live_display.finish(
+                stop_reason=result.stop_reason if 'result' in dir() else "interrupted"
+            )
+
+        # --- Results ---
+        from kernel_code.kernel_profile import render_kernel_profile
+        render_kernel_profile(
+            speedup=result.best_speedup,
+            console=self._console,
+        )
+
+        if result.target_reached:
+            self._console.print(
+                f"  [bold #4eba65]TARGET REACHED: {result.best_speedup:.2f}x[/bold #4eba65]"
+            )
+        else:
+            self._console.print(
+                f"  [white]Best: {result.best_speedup:.2f}x (target: {goal.target_speedup:.1f}x)[/white]"
+            )
+
+        if result.best_kernel:
+            out_path = _PROJECT_ROOT / "reference_optimized.py"
+            out_path.write_text(result.best_kernel)
+            self._console.print(f"  [#4eba65]Saved: reference_optimized.py[/#4eba65]")
+
+        run_logger.end_run(
+            best_speedup=result.best_speedup,
+            best_kernel=result.best_kernel,
+            stop_reason=result.stop_reason,
+            total_cost=result.total_cost_usd,
+        )
+
+        self._console.print(f"  \u23bf  [#999999]/diff to see changes[/#999999]")
+        self._console.print(f"  \u23bf  [#999999]Run log: {run_logger.log_path}[/#999999]")
+        self._console.print()
 
     def _handle_inline_optimize(self, text: str) -> None:
         """Handle pasted code — wrap in reference format and optimize."""
