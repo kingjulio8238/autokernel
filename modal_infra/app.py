@@ -343,6 +343,16 @@ def _run_eval_gpumode(
     elif isinstance(data, torch.Tensor):
         data = data.to(device)
 
+    # Detect calling convention: tuple (GPU Mode) or unpacked args (LLM-generated)
+    def _call_kernel(fn, data):
+        try:
+            return fn(data)
+        except TypeError:
+            # LLM generated kernel_function(A, B, C) instead of kernel_function(data)
+            if isinstance(data, tuple):
+                return fn(*data)
+            raise
+
     # Correctness check
     all_correct = True
     max_diff = 0.0
@@ -350,7 +360,7 @@ def _run_eval_gpumode(
         try:
             with torch.no_grad():
                 ref_out = ref_kernel(data)
-                kernel_out = kernel_function(data)
+                kernel_out = _call_kernel(kernel_function, data)
         except Exception as exc:
             return {
                 "status": "error", "correct": False, "speedup": 0.0,
@@ -378,7 +388,7 @@ def _run_eval_gpumode(
 
     def _kernel_call():
         with torch.no_grad():
-            return kernel_function(data)
+            return _call_kernel(kernel_function, data)
 
     ref_times = _benchmark_fn(_ref_call, num_perf_trials)
     kernel_times = _benchmark_fn(_kernel_call, num_perf_trials)

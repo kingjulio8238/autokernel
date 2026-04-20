@@ -302,7 +302,14 @@ def test_kernel():
     elif isinstance(data, torch.Tensor):
         data = data.to(device)
     expected = ref_kernel(data)
-    result = kernel_function(data)
+    # Try tuple call first, fall back to unpacked args
+    try:
+        result = kernel_function(data)
+    except TypeError:
+        if isinstance(data, tuple):
+            result = kernel_function(*data)
+        else:
+            raise
     if isinstance(expected, torch.Tensor) and isinstance(result, torch.Tensor):
         if not torch.allclose(result, expected, rtol=1e-2, atol=1e-2):
             diff = (result - expected).abs().max().item()
