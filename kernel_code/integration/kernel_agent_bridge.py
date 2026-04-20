@@ -423,29 +423,48 @@ class KernelAgentBridge:
         }
 
     def _find_few_shot_example(self, ref_path: Path) -> str:
-        """Find a working Triton solution for a similar problem."""
-        # Check if there's a solutions/correct/ directory near the reference
+        """Find a relevant Triton code example for the problem.
+
+        Three-level search:
+        1. Exact solution (GPU Mode benchmarks with solutions/correct/)
+        2. Skill template match (10 skills with code_template by problem type)
+        3. Generic Triton pattern (vectoradd as universal example)
+        """
+        # Level 1: Exact solution from benchmark
         for search_dir in [ref_path.parent, ref_path.parent.parent]:
             solutions_dir = search_dir / "solutions" / "correct"
             if solutions_dir.is_dir():
-                for sol in solutions_dir.iterdir():
+                for sol in sorted(solutions_dir.iterdir()):
                     if sol.suffix == ".py" and "triton" in sol.name.lower():
                         return sol.read_text()
-                # Fall back to any correct solution
-                for sol in solutions_dir.iterdir():
-                    if sol.suffix == ".py" and sol.name != "ref.py":
-                        return sol.read_text()
 
-        # Check benchmarks directory for similar problem types
-        benchmarks = Path(__file__).resolve().parent.parent.parent / "data" / "benchmarks" / "gpumode"
-        if benchmarks.is_dir():
-            # Find any triton solution as a general example
-            for prob_dir in benchmarks.iterdir():
-                if not prob_dir.is_dir():
+        # Level 2: Match skills library by problem keywords
+        ref_code = self._reference.lower()
+        skills_dir = Path(__file__).resolve().parent.parent.parent / "data" / "skills"
+        if skills_dir.is_dir():
+            import json as _json
+            best_skill = None
+            best_score = 0
+            for skill_file in skills_dir.glob("*.json"):
+                try:
+                    skill = _json.loads(skill_file.read_text())
+                    # Score by keyword match
+                    keywords = skill.get("tags", [])
+                    trigger_kw = skill.get("auto_trigger", {}).get("problem_keywords", [])
+                    all_kw = keywords + trigger_kw
+                    # Prefer triton skills
+                    backend = skill.get("backend", "")
+                    is_triton = backend == "triton" or "triton" in skill.get("id", "")
+                    score = sum(1 for kw in all_kw if kw in ref_code)
+                    if is_triton:
+                        score += 5  # strongly prefer triton examples
+                    if score > best_score and skill.get("code_template"):
+                        best_score = score
+                        best_skill = skill
+                except Exception:
                     continue
-                triton_sol = prob_dir / "solutions" / "correct" / "submission_triton.py"
-                if triton_sol.is_file():
-                    return triton_sol.read_text()
+            if best_skill and best_skill.get("code_template"):
+                return best_skill["code_template"]
 
         return ""
 
