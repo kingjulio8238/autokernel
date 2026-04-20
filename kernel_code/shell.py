@@ -482,16 +482,17 @@ class KernelCodeShell:
         except Exception:
             pass
         _motd = pick_motd(
-            _returning,
-            last_version=getattr(self._settings, "last_version_seen", None),
+            returning=_returning,
+            last_version_seen=getattr(self._settings, "last_version_seen", None),
             current_version=_version,
             recent_runs=recent_runs_from_sessions(limit=3),
         )
-        render_welcome(self._console, returning=_returning, hw=_hw, motd=_motd)
-        # Persist last_version_seen
+        render_welcome(self._console, returning=_returning, hw=_hw, motd=_motd, version=_version)
+        # Persist last_version_seen so release-note card fires once
         if getattr(self._settings, "last_version_seen", None) != _version:
             try:
                 save_project_setting("last_version_seen", _version)
+                self._settings.last_version_seen = _version
             except Exception:
                 pass
 

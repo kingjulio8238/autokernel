@@ -12,7 +12,9 @@ Usage::
 from __future__ import annotations
 
 import importlib.metadata
+import os
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 from rich.console import Console
@@ -20,7 +22,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-_ACCENT = "magenta"
+ACCENT = "magenta"
+_ACCENT = ACCENT  # alias
 _DIM = "#999999"
 _VERSION = "0.1.0"
 
@@ -28,6 +31,21 @@ try:
     _VERSION = importlib.metadata.version("openkernel")
 except Exception:
     pass
+
+_FIRST_RUN_TIP = (
+    "new here? point [bold]optimize[/bold] at a kernel:\n"
+    "  [bold]optimize @my_kernel.py 2x $5[/bold]\n"
+    "or run [bold]/optimize --mock[/bold] to try without GPU"
+)
+
+
+def _getattr_or_item(obj, key: str, default=None):
+    """Accept both dataclass-style and dict-style settings."""
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
 
 # GPU specs lookup
 _GPU_SPECS = {
@@ -55,30 +73,38 @@ class Motd:
     body: str = ""
 
 
-def detect_hw(settings=None) -> HardwareInfo:
-    """Detect hardware info from settings."""
-    import os
+def detect_hw(creds: dict | None = None, settings=None) -> HardwareInfo:
+    """Detect hardware info from settings. Accepts dataclass or dict."""
+    creds = creds or {}
+    gpu_key = _getattr_or_item(settings, "default_gpu", "L40S")
+    specs = _GPU_SPECS.get(gpu_key, _GPU_SPECS["L40S"])
+    backend = _getattr_or_item(settings, "default_backend", "triton")
 
-    gpu = "L40S"
-    backend = "triton"
-    model = "gpt-4o"
+    model = _getattr_or_item(settings, "default_model", "") or ""
     model_ok = False
-
-    if settings is not None:
-        gpu = getattr(settings, "default_gpu", gpu)
-        backend = getattr(settings, "default_backend", backend)
-        model = getattr(settings, "default_model", model)
-
-        # Check if model's API key is set
-        provider = getattr(settings, "default_provider", "")
-        from kernel_code.settings import _API_KEY_ENV_MAP
-        env_key = _API_KEY_ENV_MAP.get(f"{provider}_api_key", "")
-        model_ok = bool(os.environ.get(env_key)) or bool(getattr(settings, f"{provider}_api_key", None))
-
-    specs = _GPU_SPECS.get(gpu, _GPU_SPECS["L40S"])
+    if model:
+        if "groq" in model.lower():
+            model_ok = bool(creds.get("groq") or
+                            os.environ.get("GROQ_API_KEY") or
+                            _getattr_or_item(settings, "groq_api_key"))
+        elif "openai" in model.lower() or "gpt" in model.lower():
+            model_ok = bool(creds.get("openai") or
+                            os.environ.get("OPENAI_API_KEY") or
+                            _getattr_or_item(settings, "openai_api_key"))
+        elif "anthropic" in model.lower() or "claude" in model.lower():
+            model_ok = bool(creds.get("anthropic") or
+                            os.environ.get("ANTHROPIC_API_KEY") or
+                            _getattr_or_item(settings, "anthropic_api_key"))
+        elif "minimax" in model.lower():
+            model_ok = bool(os.environ.get("MINIMAX_API_KEY") or
+                            _getattr_or_item(settings, "minimax_api_key"))
+        else:
+            model_ok = True
+    else:
+        model = "none detected"
 
     return HardwareInfo(
-        gpu=gpu,
+        gpu=gpu_key,
         sm=specs["sm"],
         compute=specs["compute"],
         bandwidth=specs["bandwidth"],
@@ -122,57 +148,43 @@ def recent_runs_from_sessions(limit: int = 3) -> list[dict]:
 
 
 def pick_motd(
+    *,
     returning: bool,
-    last_version: str | None = None,
-    current_version: str | None = None,
+    last_version_seen: str | None = None,
+    current_version: str = "0.1.0",
     recent_runs: list[dict] | None = None,
 ) -> Motd:
-    """Pick the right MOTD for context.
+    """Pick the right MOTD. Precedence: version-bump > returning > first-run."""
+    today = date.today().isoformat()
 
-    Precedence:
-    1. Release-note card (version bumped)
-    2. Recent-sessions card (returning with runs)
-    3. "welcome back" empty state (returning, no runs)
-    4. First-run tip (everything else)
-    """
     # 1. Release-note card on version bump
-    if last_version and current_version and last_version != current_version:
+    if last_version_seen and last_version_seen != current_version:
         return Motd(
             header=f"what's new \u00b7 v{current_version}",
             body=(
-                f"+ updated from v{last_version}\n"
-                f"+ see /help for new commands"
+                f"[{ACCENT}]+[/{ACCENT}] updated from v{last_version_seen}\n"
+                f"[{ACCENT}]+[/{ACCENT}] see [{ACCENT}]/help[/{ACCENT}] for details"
             ),
         )
 
-    if not returning:
+    # 2. Returning-user card
+    if returning:
+        runs = recent_runs if recent_runs is not None else recent_runs_from_sessions(limit=3)
+        if runs:
+            lines = []
+            for r in runs[:3]:
+                name = r.get("name", "?")[:22]
+                spd = r.get("speedup", 0.0)
+                spd_str = f"[green]{spd:.2f}\u00d7[/green]" if spd else "[dim]\u2014[/dim]"
+                lines.append(f"  {name:<22s} \u2192 {spd_str}")
+            return Motd(header=f"recent \u00b7 {today}", body="\n".join(lines))
         return Motd(
-            header="welcome",
-            body=(
-                "new here? point [bold]optimize[/bold] at a kernel:\n"
-                "  [bold]optimize @my_kernel.py 2x $5[/bold]\n"
-                "or run [bold]/optimize --mock[/bold] to try without GPU"
-            ),
+            header=f"welcome back \u00b7 {today}",
+            body=f"[dim]no runs yet \u2014 point [{ACCENT}]/optimize[/{ACCENT}] at a kernel.[/dim]",
         )
 
-    # 2. Recent-sessions card
-    runs = recent_runs or recent_runs_from_sessions(limit=3)
-    if runs:
-        lines = []
-        for r in runs[:3]:
-            name = r.get("name", "?")[:20]
-            speedup = r.get("speedup", 0.0)
-            lines.append(f"{name:<20} \u2192 {speedup:.2f}\u00d7")
-        return Motd(
-            header="recent",
-            body="\n".join(lines),
-        )
-
-    # 3. Welcome back empty state
-    return Motd(
-        header="welcome back",
-        body="type [bold]optimize[/bold] to start, or [bold]/help[/bold] for commands",
-    )
+    # 3. First-run tip
+    return Motd(header=f"motd \u00b7 {today}", body=_FIRST_RUN_TIP)
 
 
 def render_welcome(
@@ -181,10 +193,12 @@ def render_welcome(
     returning: bool = False,
     hw: HardwareInfo | None = None,
     motd: Motd | None = None,
+    version: str | None = None,
 ) -> None:
     """Render the A2 hero welcome card."""
     hw = hw or HardwareInfo()
-    motd = motd or pick_motd(returning)
+    motd = motd or pick_motd(returning=returning)
+    ver = version or _VERSION
 
     console.print()
 
@@ -201,7 +215,7 @@ def render_welcome(
         console.print(f"  [{_ACCENT}]{line}[/{_ACCENT}]")
 
     # Title + version
-    console.print(f"  [bold white]kernel code[/bold white] [{_DIM}]v{_VERSION}[/{_DIM}]")
+    console.print(f"  [bold white]kernel code[/bold white] [{_DIM}]v{ver}[/{_DIM}]")
     console.print(f"  [{_DIM}]agent-driven triton & cuda optimization[/{_DIM}]")
 
     # Specs table
