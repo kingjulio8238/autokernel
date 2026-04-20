@@ -89,23 +89,36 @@ def detect_hw(settings=None) -> HardwareInfo:
 
 
 def recent_runs_from_sessions(limit: int = 3) -> list[dict]:
-    """Read recent runs from .kernel-code/sessions/*.json."""
+    """Read recent runs from .kernel-code/runs/*.log (JSON SUMMARY block)."""
     import json as _json
+    import re as _re
 
-    sessions_dir = Path(__file__).resolve().parent.parent / "cache" / "sessions"
-    if not sessions_dir.is_dir():
+    runs_dir = Path(__file__).resolve().parent.parent / ".kernel-code" / "runs"
+    if not runs_dir.is_dir():
         return []
 
     results = []
-    for f in sorted(sessions_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:limit]:
+    for f in sorted(runs_dir.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)[:limit * 2]:
         try:
-            data = _json.loads(f.read_text())
-            name = data.get("problem", f.stem)
-            speedup = data.get("best_speedup", 0.0)
-            results.append({"name": name, "speedup": speedup})
+            content = f.read_text()
+            # Extract JSON SUMMARY block from the log
+            json_match = _re.search(r"JSON SUMMARY\n(\{.*?\})\n", content, _re.DOTALL)
+            if json_match:
+                data = _json.loads(json_match.group(1))
+                ref = data.get("config", {}).get("file", data.get("config", {}).get("reference", ""))
+                if ref:
+                    p = Path(ref)
+                    # For GPU Mode: use parent dir name (vectoradd_py)
+                    # For others: use filename without extension
+                    name = p.parent.name if p.name == "reference.py" and p.parent.name != "." else p.stem
+                else:
+                    name = f.stem.split("_", 3)[-1]
+                speedup = data.get("best_speedup", 0.0)
+                if name and speedup > 0:
+                    results.append({"name": name, "speedup": speedup})
         except Exception:
             continue
-    return results
+    return results[:limit]
 
 
 def pick_motd(
