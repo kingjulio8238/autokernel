@@ -310,10 +310,12 @@ class KernelAgentBridge:
                     rounds = len(round_files)
                     status = "working"
                     action = _get_worker_action(wdir)
+                    speedup = 0.0
                     if rounds > 0:
                         try:
                             latest = max(round_files, key=lambda p: p.name)
                             data = json.loads(latest.read_text())
+                            speedup = float(data.get("speedup", 0.0))
                             if data.get("success"):
                                 status = "passed"
                                 action = "correct kernel found"
@@ -322,7 +324,7 @@ class KernelAgentBridge:
                     worker_states.append({
                         "id": i, "round": rounds,
                         "max_rounds": self._max_rounds, "status": status,
-                        "action": action,
+                        "action": action, "speedup": speedup,
                     })
                 else:
                     worker_states.append({
