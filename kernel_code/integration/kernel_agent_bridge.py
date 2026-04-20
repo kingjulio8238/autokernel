@@ -83,8 +83,11 @@ class KernelAgentBridge:
         self._run_logger = run_logger
         self._use_modal = use_modal
         self._problem_format = problem_format
+        self._per_worker_latest: list[dict] = []
 
-        self._best_speedup: float = 0.0
+        # Start from global best if provided (for multi-round autopilot)
+        global_best = float(os.environ.get("OPENKERNEL_BEST_SPEEDUP", "0.0"))
+        self._best_speedup: float = global_best
         self._best_kernel: str = ""
         self._iteration_count: int = 0
 
@@ -334,6 +337,11 @@ class KernelAgentBridge:
                     })
             if self._live_display:
                 self._live_display.update_workers(worker_states)
+            # Capture for round-summary plot
+            self._per_worker_latest = [
+                {"id": w["id"], "speedup": w.get("speedup", 0.0)}
+                for w in worker_states
+            ]
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(_run_agent)
@@ -422,6 +430,7 @@ class KernelAgentBridge:
             "worker_id": result.get("worker_id"),
             "rounds": result.get("rounds", self._max_rounds),
             "elapsed": elapsed,
+            "per_worker": self._per_worker_latest,
         }
 
     def _find_few_shot_example(self, ref_path: Path) -> str:
