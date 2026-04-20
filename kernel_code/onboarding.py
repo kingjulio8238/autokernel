@@ -60,7 +60,7 @@ def run_onboarding(console: Console | None = None) -> dict:
         # Step 1: Welcome — A2 hero card from welcome.py
         from kernel_code.welcome import render_welcome, detect_hw, pick_motd
         hw = detect_hw()  # pre-credential: fallback values
-        motd = pick_motd(returning=False)
+        motd = pick_motd(returning=False, current_version=_VERSION if '_VERSION' in dir() else "0.1.0")
         render_welcome(con, returning=False, hw=hw, motd=motd)
 
         # Step 2: Detect credentials
