@@ -88,8 +88,50 @@ def detect_hw(settings=None) -> HardwareInfo:
     )
 
 
-def pick_motd(returning: bool, last_version: str | None = None) -> Motd:
-    """Pick the right MOTD for context."""
+def recent_runs_from_sessions(limit: int = 3) -> list[dict]:
+    """Read recent runs from .kernel-code/sessions/*.json."""
+    import json as _json
+
+    sessions_dir = Path(__file__).resolve().parent.parent / "cache" / "sessions"
+    if not sessions_dir.is_dir():
+        return []
+
+    results = []
+    for f in sorted(sessions_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:limit]:
+        try:
+            data = _json.loads(f.read_text())
+            name = data.get("problem", f.stem)
+            speedup = data.get("best_speedup", 0.0)
+            results.append({"name": name, "speedup": speedup})
+        except Exception:
+            continue
+    return results
+
+
+def pick_motd(
+    returning: bool,
+    last_version: str | None = None,
+    current_version: str | None = None,
+    recent_runs: list[dict] | None = None,
+) -> Motd:
+    """Pick the right MOTD for context.
+
+    Precedence:
+    1. Release-note card (version bumped)
+    2. Recent-sessions card (returning with runs)
+    3. "welcome back" empty state (returning, no runs)
+    4. First-run tip (everything else)
+    """
+    # 1. Release-note card on version bump
+    if last_version and current_version and last_version != current_version:
+        return Motd(
+            header=f"what's new \u00b7 v{current_version}",
+            body=(
+                f"+ updated from v{last_version}\n"
+                f"+ see /help for new commands"
+            ),
+        )
+
     if not returning:
         return Motd(
             header="welcome",
@@ -100,17 +142,20 @@ def pick_motd(returning: bool, last_version: str | None = None) -> Motd:
             ),
         )
 
-    # Check for recent sessions
-    runs_dir = Path(__file__).resolve().parent.parent / ".kernel-code" / "runs"
-    if runs_dir.is_dir():
-        logs = sorted(runs_dir.glob("*.log"), reverse=True)
-        if logs:
-            recent = logs[0].name
-            return Motd(
-                header="recent",
-                body=f"last run: {recent}\ntype [bold]optimize[/bold] to continue",
-            )
+    # 2. Recent-sessions card
+    runs = recent_runs or recent_runs_from_sessions(limit=3)
+    if runs:
+        lines = []
+        for r in runs[:3]:
+            name = r.get("name", "?")[:20]
+            speedup = r.get("speedup", 0.0)
+            lines.append(f"{name:<20} \u2192 {speedup:.2f}\u00d7")
+        return Motd(
+            header="recent",
+            body="\n".join(lines),
+        )
 
+    # 3. Welcome back empty state
     return Motd(
         header="welcome back",
         body="type [bold]optimize[/bold] to start, or [bold]/help[/bold] for commands",
@@ -171,5 +216,18 @@ def render_welcome(
         )
         console.print(f"  ", end="")
         console.print(panel)
+
+    # Action row
+    actions = Text()
+    actions.append("  ")
+    actions.append("[1]", style=f"bold {_ACCENT}")
+    actions.append("optimize ", style="white")
+    actions.append("[2]", style=f"bold {_ACCENT}")
+    actions.append("skills ", style="white")
+    actions.append("[3]", style=f"bold {_ACCENT}")
+    actions.append("dashboard ", style="white")
+    actions.append("[?]", style=f"bold {_ACCENT}")
+    actions.append("help", style="white")
+    console.print(actions)
 
     console.print()

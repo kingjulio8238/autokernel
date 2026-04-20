@@ -216,17 +216,20 @@ if _HAS_PROMPT_TOOLKIT:
                                     display_meta="file",
                                 )
 
+            # Complete --flags after /roofline
+            if "/roofline" in text and text.endswith("--"):
+                for flag, desc in [
+                    ("--me", "Overlay your best kernel"),
+                    ("--mem", "Highlight memory roof"),
+                ]:
+                    yield Completion(flag, start_position=-2, display_meta=desc)
+
             # Complete --flags after /optimize
             if "/optimize" in text and text.endswith("--"):
                 for flag, desc in [
-                    ("--reference", "Path to reference kernel"),
-                    ("--backend", "triton or cuda"),
-                    ("--config", "YAML config file"),
-                    ("--parallel", "Try both backends"),
                     ("--mock", "Use mock data (testing)"),
-                    ("--iterations", "Max iterations"),
-                    ("--gpu", "GPU type (H100/A100/L40S)"),
-                    ("--git", "Track with git commits"),
+                    ("--engine", "native or kernel-agent"),
+                    ("--no-plots", "Disable live plots (CI mode)"),
                 ]:
                     yield Completion(
                         flag,
@@ -459,13 +462,32 @@ class KernelCodeShell:
                         resumed = self._resume_session(latest.session_id)
 
         # A2 hero welcome card
-        from kernel_code.welcome import render_welcome, detect_hw, pick_motd
+        from kernel_code.welcome import (
+            render_welcome, detect_hw, pick_motd, recent_runs_from_sessions,
+        )
         from kernel_code.settings import inject_api_keys as _inject
         _inject(self._settings)
         _hw = detect_hw(self._settings)
         _returning = bool(self._explicit_session_id) or resumed
-        _motd = pick_motd(_returning)
+        _version = "0.1.0"
+        try:
+            import importlib.metadata
+            _version = importlib.metadata.version("openkernel")
+        except Exception:
+            pass
+        _motd = pick_motd(
+            _returning,
+            last_version=getattr(self._settings, "last_version_seen", None),
+            current_version=_version,
+            recent_runs=recent_runs_from_sessions(limit=3),
+        )
         render_welcome(self._console, returning=_returning, hw=_hw, motd=_motd)
+        # Persist last_version_seen
+        if getattr(self._settings, "last_version_seen", None) != _version:
+            try:
+                save_project_setting("last_version_seen", _version)
+            except Exception:
+                pass
 
         # Status banner (problem, context, skills)
         self._print_welcome()
@@ -3382,9 +3404,22 @@ def get_init_inputs():
         if next_steps:
             self._console.print(format_next_steps(next_steps))
 
+        # Teaching moment: show roofline after first successful optimize
+        if speedup > 1.0 and not getattr(self._settings, "roofline_shown", False):
+            self._console.print(
+                f"  [{_DIM}]first optimization complete — here's how your kernel "
+                f"stacks up on the roofline. run /roofline --me anytime.[/{_DIM}]"
+            )
+            self._cmd_roofline("--me")
+            try:
+                save_project_setting("roofline_shown", True)
+                self._settings.roofline_shown = True
+            except Exception:
+                pass
+
         self._console.print()
         self._console.print(
-            f"  [white]/dashboard[/white] [#888888]— open full analysis in browser[/#888888]"
+            f"  [white]/dashboard[/white] [#888888]\u2014 open full analysis[/#888888]"
         )
         self._console.print(f"  [white]Run log:[/white] [#888888]{run_logger.log_path}[/#888888]")
         self._console.print()
