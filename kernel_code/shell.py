@@ -142,6 +142,7 @@ if _HAS_PROMPT_TOOLKIT:
                     ("/history", "Show run history"),
                     ("/config", "View/edit settings"),
                     ("/profile", "Profile reference kernel (bottleneck analysis)"),
+                    ("/roofline", "Show roofline plot (--me, --mem)"),
                     ("/autopilot", "Autonomous optimization (set goal, walk away)"),
                     ("/problem", "Load & browse kernel problems"),
                     ("/models", "Browse & select LLM models"),
@@ -349,6 +350,7 @@ class KernelCodeShell:
             "/models": self._cmd_models,
             "/problem": self._cmd_problem,
             "/profile": self._cmd_profile_ref,
+            "/roofline": self._cmd_roofline,
             "/autopilot": self._cmd_autopilot,
             "/advisor": self._cmd_advisor,
             "/help": self._cmd_help,
@@ -458,6 +460,16 @@ class KernelCodeShell:
                     if answer in ("y", "yes"):
                         resumed = self._resume_session(latest.session_id)
 
+        # A2 hero welcome card
+        from kernel_code.welcome import render_welcome, detect_hw, pick_motd
+        from kernel_code.settings import inject_api_keys as _inject
+        _inject(self._settings)
+        _hw = detect_hw(self._settings)
+        _returning = bool(self._explicit_session_id) or resumed
+        _motd = pick_motd(_returning)
+        render_welcome(self._console, returning=_returning, hw=_hw, motd=_motd)
+
+        # Status banner (problem, context, skills)
         self._print_welcome()
         while True:
             user_input = self._prompt()
@@ -2411,6 +2423,30 @@ class ModelNew(nn.Module):
             self._console.print(f"  \u23bf  [#999999]Reference runtime: {ref_us:.0f}\u03bcs on {self._settings.default_gpu}[/#999999]")
             self._console.print(f"  \u23bf  [#999999]Run /optimize to generate a faster kernel[/#999999]")
         self._console.print()
+
+    def _cmd_roofline(self, args_str: str) -> None:
+        """/roofline [--me] [--mem] — show roofline plot."""
+        from kernel_code.roofline_view import render_roofline
+
+        args = args_str.strip().lower()
+        if "--me" in args:
+            # Show user's best kernel on the roofline
+            best = self._best_run.get("speedup", 0.0) if self._best_run else 0.0
+            render_roofline(
+                self._console, view="me",
+                user_speedup=best, user_label="your kernel",
+                hardware=self._settings.default_gpu,
+            )
+        elif "--mem" in args:
+            render_roofline(
+                self._console, view="mem",
+                hardware=self._settings.default_gpu,
+            )
+        else:
+            render_roofline(
+                self._console, view="compute",
+                hardware=self._settings.default_gpu,
+            )
 
     def _cmd_diff(self, _args_str: str) -> None:
         """Show diff between reference and optimized kernel."""

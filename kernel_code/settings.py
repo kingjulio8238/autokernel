@@ -55,6 +55,8 @@ _FIELD_TYPES: dict[str, type] = {
     "iterations_per_round": int,
     "max_autopilot_rounds": int,
     "engine": str,
+    "last_version_seen": str,
+    "roofline_shown": bool,
     # API keys (stored in settings.local.yaml, gitignored)
     "groq_api_key": str,
     "minimax_api_key": str,
@@ -102,6 +104,8 @@ class KernelCodeSettings:
     # Shell / UX
     vi_mode: bool = False             # prompt_toolkit vi keybindings
     verbosity: str = "normal"         # "quiet" | "normal" | "verbose"
+    last_version_seen: str | None = None  # for MOTD version-bump detection
+    roofline_shown: bool = False          # auto-show after first successful optimize
 
     # API Keys (stored in settings.local.yaml — gitignored, never committed)
     # Set via: /config set groq_api_key YOUR_KEY
