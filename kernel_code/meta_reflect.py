@@ -125,6 +125,9 @@ def _parse_reflection(response: str) -> MetaReflection:
 
     if upper.startswith("PIVOT"):
         strategy = line.split(":", 1)[1].strip() if ":" in line else "try a different approach"
+        # Clean up LLM artifacts like "10 words", trailing word counts
+        import re
+        strategy = re.sub(r",?\s*\d+\s*words?\s*$", "", strategy).strip()
         return MetaReflection(action="pivot", next_strategy=strategy, reason="strategy exhausted")
 
     if upper.startswith("CONTINUE"):

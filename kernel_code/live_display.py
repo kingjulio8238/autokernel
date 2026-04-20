@@ -251,7 +251,7 @@ class LiveOptimizationDisplay:
 
                 if status == "passed":
                     wl.append("\u2588" * bar_w, style=_SUCCESS)
-                    wl.append("  \u2713 passed", style=f"bold {_SUCCESS}")
+                    wl.append("  \u2713 correct kernel", style=f"bold {_SUCCESS}")
                 elif status == "stopped":
                     wl.append("\u2588" * filled + "\u2591" * (bar_w - filled), style=_DIM)
                     wl.append("  stopped", style=_DIM)

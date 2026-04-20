@@ -116,6 +116,9 @@ class MetaOptimizer:
             if self._run_logger:
                 self._run_logger.log_round(round_num, self._current_strategy)
 
+            # Set strategy in env so the bridge can show it as intent
+            os.environ["OPENKERNEL_CURRENT_STRATEGY"] = self._current_strategy
+
             round_result = self._run_round(round_num)
             self._round_history.append(round_result)
             self._total_iterations += round_result.get("total", 0)
@@ -150,7 +153,11 @@ class MetaOptimizer:
                 reflection = self._reflect(round_num)
 
                 if reflection.action == "stop":
-                    stop_reason = f"LLM advisor: {reflection.reason}"
+                    stop_reason = (
+                        f"Stopped: {reflection.reason} "
+                        f"(best: {self._best_speedup:.2f}x, target: {self._goal.target_speedup:.1f}x, "
+                        f"budget remaining: ${self._goal.max_budget_usd - self._total_cost:.2f})"
+                    )
                     break
                 elif reflection.action == "pivot":
                     self._current_strategy = reflection.next_strategy

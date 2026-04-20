@@ -364,11 +364,22 @@ class KernelAgentBridge:
                     profile = eval_result.get("profile", {})
 
                 if self._live_display:
+                    # Only "keep" if it beats the current best
+                    if speedup > self._best_speedup:
+                        status = "keep"
+                        self._best_speedup = speedup
+                    else:
+                        status = "discard"
+
+                    # Show the optimization strategy, not "KernelAgent (gpt-4o)"
+                    strategy = os.environ.get("OPENKERNEL_CURRENT_STRATEGY", "")
+                    intent = strategy[:50] if strategy else f"round {self._iteration_count + 1}"
+
                     self._live_display.update_iteration(
                         num=self._iteration_count + 1,
                         speedup=speedup,
-                        status="keep" if speedup > 0 else "discard",
-                        intent=f"KernelAgent ({self._model_name})",
+                        status=status,
+                        intent=intent,
                     )
                     self._iteration_count += 1
             except Exception as exc:
