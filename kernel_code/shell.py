@@ -496,8 +496,7 @@ class KernelCodeShell:
             except Exception:
                 pass
 
-        # Status banner (problem, context, skills)
-        self._print_welcome()
+        # The A2 hero replaces the old status banner — no need for _print_welcome()
         while True:
             user_input = self._prompt()
             if user_input is None:  # EOF / Ctrl-D
