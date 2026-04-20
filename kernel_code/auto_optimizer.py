@@ -116,8 +116,11 @@ class MetaOptimizer:
             if self._run_logger:
                 self._run_logger.log_round(round_num, self._current_strategy)
 
-            # Set strategy in env so the bridge can show it as intent
+            # Set strategy + best kernel in env for the bridge to use
             os.environ["OPENKERNEL_CURRENT_STRATEGY"] = self._current_strategy
+            if self._best_kernel:
+                os.environ["OPENKERNEL_BEST_KERNEL"] = self._best_kernel
+                os.environ["OPENKERNEL_BEST_SPEEDUP"] = f"{self._best_speedup:.2f}"
 
             round_result = self._run_round(round_num)
             self._round_history.append(round_result)

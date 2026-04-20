@@ -152,7 +152,14 @@ class KernelAgentBridge:
         self_contained_ref = make_self_contained(problem)
         self._self_contained_ref = self_contained_ref
 
-        # Build problem description using self-contained reference
+        # --- Few-shot: find a working solution for a similar problem ---
+        few_shot = self._find_few_shot_example(ref_path)
+
+        # --- Best kernel carry-forward from previous round ---
+        prev_kernel = os.environ.get("OPENKERNEL_BEST_KERNEL", "")
+        prev_speedup = os.environ.get("OPENKERNEL_BEST_SPEEDUP", "")
+
+        # Build problem description with all context
         problem_desc = (
             f"Optimize the following PyTorch code into a fast Triton kernel "
             f"for {self._hardware} GPU.\n\n"
@@ -163,6 +170,24 @@ class KernelAgentBridge:
             f"- Output dtype must match reference output dtype\n"
             f"- Do NOT hardcode bfloat16 or float16 — use the input tensor's dtype"
         )
+
+        # Add few-shot example if available
+        if few_shot:
+            problem_desc += (
+                f"\n\n## WORKING EXAMPLE (similar problem)\n"
+                f"Here is a correct, working Triton kernel for a similar problem. "
+                f"Use it as a reference for Triton syntax and patterns:\n"
+                f"```python\n{few_shot}\n```"
+            )
+
+        # Add best kernel from previous round for refinement
+        if prev_kernel and prev_speedup:
+            problem_desc += (
+                f"\n\n## PREVIOUS BEST KERNEL ({prev_speedup}x speedup)\n"
+                f"This kernel works but is not fast enough. Improve it:\n"
+                f"```python\n{prev_kernel}\n```\n"
+                f"Focus on: vectorized loads, autotune configs, memory coalescing."
+            )
 
         # Build format-appropriate test code (uses self-contained ref)
         problem.reference_code = self_contained_ref
@@ -396,6 +421,33 @@ class KernelAgentBridge:
             "rounds": result.get("rounds", self._max_rounds),
             "elapsed": elapsed,
         }
+
+    def _find_few_shot_example(self, ref_path: Path) -> str:
+        """Find a working Triton solution for a similar problem."""
+        # Check if there's a solutions/correct/ directory near the reference
+        for search_dir in [ref_path.parent, ref_path.parent.parent]:
+            solutions_dir = search_dir / "solutions" / "correct"
+            if solutions_dir.is_dir():
+                for sol in solutions_dir.iterdir():
+                    if sol.suffix == ".py" and "triton" in sol.name.lower():
+                        return sol.read_text()
+                # Fall back to any correct solution
+                for sol in solutions_dir.iterdir():
+                    if sol.suffix == ".py" and sol.name != "ref.py":
+                        return sol.read_text()
+
+        # Check benchmarks directory for similar problem types
+        benchmarks = Path(__file__).resolve().parent.parent.parent / "data" / "benchmarks" / "gpumode"
+        if benchmarks.is_dir():
+            # Find any triton solution as a general example
+            for prob_dir in benchmarks.iterdir():
+                if not prob_dir.is_dir():
+                    continue
+                triton_sol = prob_dir / "solutions" / "correct" / "submission_triton.py"
+                if triton_sol.is_file():
+                    return triton_sol.read_text()
+
+        return ""
 
     def _configure_agent(self, agent: Any) -> None:
         """Configure agent's workers with Modal eval via env vars.
