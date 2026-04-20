@@ -2495,35 +2495,68 @@ class ModelNew(nn.Module):
         # Parse what the user gave us
         goal = parse_goal(text)
 
-        # Fill missing from settings
+        # Fill from settings only what's truly implicit
         if not goal.file:
             ref_path = _PROJECT_ROOT / "reference.py"
             if ref_path.is_file():
                 goal.file = "reference.py"
-            # else: will ask below
-        if not goal.hardware:
-            goal.hardware = self._settings.default_gpu
         if not goal.backend:
             goal.backend = self._settings.default_backend
         if not goal.model:
             goal.model = self._settings.default_model
-        if goal.budget_usd <= 0:
-            goal.budget_usd = self._settings.max_budget or 5.00
-        if goal.target_speedup <= 0:
-            goal.target_speedup = 2.0  # default target
 
-        # --- Ask for anything critical that's missing ---
-        if not goal.file or not (_PROJECT_ROOT / goal.file).is_file():
-            self._console.print("  [#ff6b80]No reference file found.[/#ff6b80]")
+        # --- Ask for what wasn't explicitly stated ---
+        def _ask(label: str, default: str, hint: str = "") -> str:
+            safe = escape(default)
+            prompt = f"  [bold white]{label}[/bold white]"
+            if hint:
+                prompt += f" [#999999]({hint})[/#999999]"
+            prompt += f" \\[{safe}]: "
             try:
-                f = self._console.input("  [bold white]Path to kernel file: [/bold white]").strip()
+                val = self._console.input(prompt).strip()
             except (EOFError, KeyboardInterrupt):
+                return ""
+            return val if val else default
+
+        # File
+        if not goal.file or not (_PROJECT_ROOT / goal.file).is_file():
+            goal.file = _ask("Kernel file", "", "path to .py file")
+            if not goal.file:
                 return
-            if not f:
+
+        # Target speedup
+        if "target" not in goal.explicit:
+            val = _ask("Target speedup", "2.0", "e.g. 1.5, 2.0, 3.0")
+            if not val:
                 return
-            goal.file = f
+            goal.target_speedup = float(val)
+
+        # Hardware
+        if "hardware" not in goal.explicit:
+            val = _ask("Hardware", self._settings.default_gpu, "L40S, H100, A100-80GB")
+            if not val:
+                return
+            goal.hardware = val
+
+        # Budget
+        if "budget" not in goal.explicit:
+            default_budget = f"{self._settings.max_budget or 5.00:.2f}"
+            val = _ask("Budget", default_budget, "max USD spend")
+            if not val:
+                return
+            goal.budget_usd = float(val.lstrip("$"))
+
+        # Time limit
+        if "time" not in goal.explicit:
+            val = _ask("Time limit", "none", "e.g. 30m, 1h, or none")
+            if val and val != "none":
+                if val.endswith("m"):
+                    goal.time_limit_seconds = int(val[:-1]) * 60
+                elif val.endswith("h"):
+                    goal.time_limit_seconds = int(val[:-1]) * 3600
 
         # --- Validate ---
+        from kernel_code.goal_parser import validate_goal
         errors = validate_goal(goal, _PROJECT_ROOT)
         if errors:
             for e in errors:
@@ -2531,7 +2564,6 @@ class ModelNew(nn.Module):
             return
 
         # --- Show plan + confirm ---
-        # Load file to detect format and name
         from kernel_code.problem import load_problem, detect_format
         ref_path = _PROJECT_ROOT / goal.file
         try:
@@ -2540,12 +2572,15 @@ class ModelNew(nn.Module):
         except Exception:
             problem_name = ref_path.name
 
+        self._console.print()
         self._console.print(f"  [bold white]\u2500\u2500 Optimization Plan \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500[/bold white]")
         self._console.print(f"  File:     [bold white]{problem_name}[/bold white]")
         self._console.print(f"  Target:   [bold white]{goal.target_speedup:.1f}x[/bold white] speedup")
         self._console.print(f"  Hardware: [white]{goal.hardware}[/white]  \u00b7  Backend: [white]{goal.backend}[/white]")
         self._console.print(f"  Model:    [white]{goal.model}[/white]")
         self._console.print(f"  Budget:   [white]${goal.budget_usd:.2f}[/white]")
+        if goal.time_limit_seconds:
+            self._console.print(f"  Time:     [white]{goal.time_limit_seconds // 60}m[/white]")
         self._console.print()
 
         try:
@@ -2554,7 +2589,7 @@ class ModelNew(nn.Module):
             ).strip().lower()
         except (EOFError, KeyboardInterrupt):
             return
-        if answer not in ("y", "yes", ""):
+        if answer not in ("y", "yes"):
             self._console.print("  [#999999]Cancelled[/#999999]")
             return
 
