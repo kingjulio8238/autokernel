@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shlex
 import uuid
 import webbrowser
@@ -189,6 +190,31 @@ if _HAS_PROMPT_TOOLKIT:
                             start_position=-len(text),
                             display_meta=sname,
                         )
+
+            # Complete @file references — search for files in project
+            if "@" in text:
+                # Find the @ and the partial path after it
+                at_idx = text.rfind("@")
+                partial = text[at_idx + 1:]
+                if not partial.startswith("/"):
+                    # Search for matching files
+                    import glob
+                    project = str(_PROJECT_ROOT)
+                    patterns = [
+                        f"{project}/{partial}*.py",
+                        f"{project}/**/{partial}*.py",
+                    ]
+                    seen = set()
+                    for pat in patterns:
+                        for match in sorted(glob.glob(pat, recursive=True))[:10]:
+                            rel = os.path.relpath(match, project)
+                            if rel not in seen:
+                                seen.add(rel)
+                                yield Completion(
+                                    f"@{rel}",
+                                    start_position=-(len(partial) + 1),
+                                    display_meta="file",
+                                )
 
             # Complete --flags after /optimize
             if "/optimize" in text and text.endswith("--"):
@@ -471,11 +497,47 @@ class KernelCodeShell:
             self._console.print()
             return ""
 
+    def _resolve_file_tags(self, text: str) -> tuple[str, list[str]]:
+        """Resolve @file references — inject file contents into context.
+
+        Returns (processed_text, list_of_loaded_files).
+        """
+        import re
+
+        tagged_files: list[str] = []
+        file_contents: list[str] = []
+
+        # Find all @path references
+        for match in re.finditer(r"@([\w./_-]+\.py)", text):
+            rel_path = match.group(1)
+            full_path = _PROJECT_ROOT / rel_path
+            if full_path.is_file():
+                content = full_path.read_text()
+                tagged_files.append(rel_path)
+                file_contents.append(f"\n--- {rel_path} ---\n{content}\n--- end {rel_path} ---\n")
+
+        if not tagged_files:
+            return text, []
+
+        # Remove @tags from text and append file contents
+        clean_text = re.sub(r"@[\w./_-]+\.py", "", text).strip()
+        if file_contents:
+            clean_text = clean_text + "\n" + "\n".join(file_contents)
+
+        return clean_text, tagged_files
+
     def _handle_input(self, user_input: str) -> None:
         """Route user input to the appropriate handler."""
         stripped = user_input.strip()
         if not stripped:
             return
+
+        # Resolve @file tags — inject file content into context
+        if "@" in stripped and ".py" in stripped:
+            stripped, tagged_files = self._resolve_file_tags(stripped)
+            if tagged_files:
+                for f in tagged_files:
+                    self._console.print(f"  \u23bf  [#999999]Loaded @{f}[/#999999]")
 
         # Record user message in conversation history
         self._conversation.add_user(stripped)
@@ -2395,9 +2457,15 @@ class ModelNew(nn.Module):
     # ------------------------------------------------------------------
 
     def _is_optimize_request(self, text: str) -> bool:
-        """Detect if the user pasted code to optimize."""
-        triggers = ["optimize this", "optimize:", "make this faster", "speed up"]
+        """Detect if the user wants to optimize — pasted code or @file reference."""
         lower = text.lower()
+
+        # "optimize @file.py" or "optimize this @file.py"
+        if "optimize" in lower and "--- " in text and "---" in text:
+            # Has injected file content from @tag
+            return True
+
+        triggers = ["optimize this", "optimize:", "make this faster", "speed up"]
         has_trigger = any(t in lower for t in triggers)
         has_code = any(kw in text for kw in ["def forward", "def ", "torch.", "class Model", "@triton"])
         return has_trigger and has_code
@@ -2421,18 +2489,26 @@ class ModelNew(nn.Module):
 
         self._console.print()
 
-        # Extract code: everything after the trigger phrase, or inside ``` blocks
+        # Extract code from @file injection or pasted text
         code = text
-        for trigger in ["optimize this:", "optimize:", "make this faster:", "speed up:"]:
-            if trigger in code.lower():
-                idx = code.lower().index(trigger) + len(trigger)
-                code = code[idx:]
-                break
 
-        # Strip markdown fences
-        match = re.search(r"```(?:python)?\s*\n?(.*?)```", code, re.DOTALL)
-        if match:
-            code = match.group(1)
+        # Check for injected @file content: "--- path ---\ncontent\n--- end path ---"
+        file_match = re.search(r"--- (\S+) ---\n(.*?)\n--- end \1 ---", code, re.DOTALL)
+        if file_match:
+            code = file_match.group(2).strip()
+        else:
+            # Extract after trigger phrase
+            for trigger in ["optimize this:", "optimize:", "make this faster:", "speed up:"]:
+                if trigger in code.lower():
+                    idx = code.lower().index(trigger) + len(trigger)
+                    code = code[idx:]
+                    break
+
+            # Strip markdown fences
+            match = re.search(r"```(?:python)?\s*\n?(.*?)```", code, re.DOTALL)
+            if match:
+                code = match.group(1)
+
         code = code.strip()
 
         if not code:
