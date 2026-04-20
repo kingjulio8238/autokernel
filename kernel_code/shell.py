@@ -539,6 +539,10 @@ class KernelCodeShell:
                 for f in tagged_files:
                     self._console.print(f"  \u23bf  [#999999]Loaded @{f}[/#999999]")
 
+        # Ignore single-char non-command inputs (stray y/n from prompts)
+        if len(stripped) <= 2 and stripped.lower() in ("n", "no", "y", "yes"):
+            return
+
         # Record user message in conversation history
         self._conversation.add_user(stripped)
 
