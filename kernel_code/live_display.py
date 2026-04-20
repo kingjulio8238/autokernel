@@ -154,13 +154,13 @@ class LiveOptimizationDisplay:
 
     def update_workers(self, workers: list[dict]) -> None:
         self._worker_states = workers
-        # Capture per-worker speedup history for plot A
+        # Capture per-worker speedup history for plot A using GLOBAL id
         now = time.time() - self._start_time
         for w in workers:
-            wid = w.get("id", 0)
+            gid = w.get("global_id", w.get("id", 0))  # global ID for plot tracking
             rnd = w.get("round", 0)
             speedup = w.get("speedup", 0.0)
-            history = self._worker_speedups.setdefault(wid, [])
+            history = self._worker_speedups.setdefault(gid, [])
             if rnd > 0 and speedup > 0 and (not history or history[-1][0] < rnd):
                 history.append((rnd, speedup, now))
         self._refresh()

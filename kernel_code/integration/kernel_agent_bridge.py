@@ -331,18 +331,21 @@ class KernelAgentBridge:
                                 action = f"correct ({speedup:.2f}x)" if speedup > 0 else "correct kernel found"
                         except Exception:
                             pass
-                    # Offset worker ID by round so plots accumulate across rounds
+                    # Local ID for worker bar display, global ID for plot tracking
                     round_offset = int(os.environ.get("OPENKERNEL_ROUND_OFFSET", "0"))
-                    global_wid = round_offset + i
                     worker_states.append({
-                        "id": global_wid, "round": rounds,
+                        "id": i,  # local ID for Worker 1, Worker 2 display
+                        "global_id": round_offset + i,  # global ID for Plot A
+                        "round": rounds,
                         "max_rounds": self._max_rounds, "status": status,
                         "action": action, "speedup": speedup,
                     })
                 else:
                     round_offset = int(os.environ.get("OPENKERNEL_ROUND_OFFSET", "0"))
                     worker_states.append({
-                        "id": round_offset + i, "round": 0,
+                        "id": i,
+                        "global_id": round_offset + i,
+                        "round": 0,
                         "max_rounds": self._max_rounds, "status": "waiting",
                         "action": "",
                     })

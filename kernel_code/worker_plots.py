@@ -160,12 +160,14 @@ def render_live_lines(
                 xl.append(" " * padding)
     parts.append(xl)
 
-    # Legend
+    # Legend — only show workers with actual speedup data
     ranked = sorted(per_worker.items(),
                     key=lambda kv: kv[1][-1][1] if kv[1] else 0,
                     reverse=True)
     for i, (wid, pts) in enumerate(ranked):
         cur = pts[-1][1] if pts else 0.0
+        if cur <= 0:
+            continue  # skip workers with no speedup data
         row = Text()
         row.append("  \u25cf ", style=_worker_color(wid))
         row.append(f"w{wid} {cur:.2f}\u00d7", style=f"bold {_worker_color(wid)}")
