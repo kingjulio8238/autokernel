@@ -129,7 +129,7 @@ if _HAS_PROMPT_TOOLKIT:
             # Complete slash commands with descriptions
             if text.startswith("/"):
                 commands = [
-                    ("/optimize", "Run kernel optimization"),
+                    ("/optimize", "Optimize kernel (runs until target or budget)"),
                     ("/show", "Show results (best | results | run N)"),
                     ("/skills", "List optimization skills"),
                     ("/skill:", "Load a skill by name"),
@@ -143,7 +143,6 @@ if _HAS_PROMPT_TOOLKIT:
                     ("/config", "View/edit settings"),
                     ("/profile", "Profile reference kernel (bottleneck analysis)"),
                     ("/roofline", "Show roofline plot (--me, --mem)"),
-                    ("/autopilot", "Autonomous optimization (set goal, walk away)"),
                     ("/problem", "Load & browse kernel problems"),
                     ("/models", "Browse & select LLM models"),
                     ("/evolve", "Template evolution status"),
@@ -331,7 +330,7 @@ class KernelCodeShell:
 
         # Command dispatch table
         self._commands: dict[str, Callable[[str], None]] = {
-            "/optimize": self._cmd_optimize,
+            "/optimize": self._cmd_optimize_unified,
             "/show": self._cmd_show,
             "/compare": self._cmd_compare,
             "/dashboard": self._cmd_dashboard,
@@ -351,7 +350,6 @@ class KernelCodeShell:
             "/problem": self._cmd_problem,
             "/profile": self._cmd_profile_ref,
             "/roofline": self._cmd_roofline,
-            "/autopilot": self._cmd_autopilot,
             "/advisor": self._cmd_advisor,
             "/help": self._cmd_help,
             "/quit": self._cmd_quit,
@@ -611,6 +609,25 @@ class KernelCodeShell:
     # ------------------------------------------------------------------
     # Commands
     # ------------------------------------------------------------------
+
+    def _cmd_optimize_unified(self, args_str: str) -> None:
+        """/optimize [@file] [target] [$budget] [--engine native] [--mock]"""
+        args = args_str.strip()
+
+        # --mock → old single-round mock path
+        if "--mock" in args:
+            self._cmd_optimize(args)
+            return
+
+        # --engine native → old single-round live path
+        if "--engine native" in args:
+            self._cmd_optimize(args)
+            return
+
+        # Default: smart optimize (autopilot until target)
+        # The smart optimize is triggered from _handle_input when text
+        # contains "optimize". For /optimize slash command, call it directly.
+        self._smart_optimize(f"optimize {args}")
 
     def _cmd_optimize(self, args_str: str) -> None:
         """/optimize --reference FILE [--backend triton|cuda] [--config YAML] [--iterations N] [--parallel] [--mock]"""
@@ -933,18 +950,14 @@ class KernelCodeShell:
 
         commands = [
             (
-                "/optimize --reference FILE [opts]",
-                "Run kernel optimization",
+                "/optimize [@file] [target] [$budget]",
+                "Optimize kernel — runs until target or budget",
             ),
-            ("  --backend triton|cuda", "  Code-generation backend"),
-            ("  --config YAML", "  Configuration file"),
-            (
-                "  --iterations N",
-                "  Max iterations (default: 10, stops early on convergence)",
-            ),
+            ("  Example: /optimize @relu.py 2x $5", ""),
+            ("  --engine native", "  Single-round mode (debugging)"),
             (
                 "  --mock",
-                "  Use mock data for testing (default: live)",
+                "  Use mock data for testing",
             ),
             (
                 "  --parallel",
@@ -1008,10 +1021,6 @@ class KernelCodeShell:
             (
                 "/doctor",
                 "Check environment health (Modal, API keys, skills, deps)",
-            ),
-            (
-                "/autopilot",
-                "Autonomous optimization — interactive setup, then hands-off",
             ),
             ("/problem", "Show/load kernel problem (/problem 1.5, /problem load FILE)"),
             ("/models", "Browse & select LLM models"),
