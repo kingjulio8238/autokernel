@@ -250,9 +250,8 @@ class LiveOptimizationDisplay:
         if self._worker_speedups and self._show_plots:
             from kernel_code.worker_plots import render_live_lines
             plot = render_live_lines(self._worker_speedups, elapsed, width=min(width, 55))
-            if plot.plain.strip():
-                parts.append(plot)
-                parts.append(Text(""))
+            parts.append(plot)
+            parts.append(Text(""))
 
         # Workers
         if self._worker_states:
