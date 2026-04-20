@@ -140,6 +140,7 @@ if _HAS_PROMPT_TOOLKIT:
                     ("/git", "Show git optimization log"),
                     ("/history", "Show run history"),
                     ("/config", "View/edit settings"),
+                    ("/profile", "Profile reference kernel (bottleneck analysis)"),
                     ("/autopilot", "Autonomous optimization (set goal, walk away)"),
                     ("/problem", "Load & browse kernel problems"),
                     ("/models", "Browse & select LLM models"),
@@ -321,6 +322,7 @@ class KernelCodeShell:
             "/theme": self._cmd_theme,
             "/models": self._cmd_models,
             "/problem": self._cmd_problem,
+            "/profile": self._cmd_profile_ref,
             "/autopilot": self._cmd_autopilot,
             "/advisor": self._cmd_advisor,
             "/help": self._cmd_help,
@@ -482,6 +484,14 @@ class KernelCodeShell:
             # Handle next-step shortcut: "1", "2", or "3" after optimization
             if stripped in ("1", "2", "3") and self._pending_next_steps:
                 self._pick_next_step(int(stripped))
+                return
+            # Detect inline code paste: "optimize this: def forward..."
+            if self._is_optimize_request(stripped):
+                self._handle_inline_optimize(stripped)
+                return
+            # Detect refinement hint: "try autotune", "use shared memory"
+            if self._is_refinement_request(stripped):
+                self._handle_refinement(stripped)
                 return
             if stripped.startswith("/"):
                 self._dispatch_command(stripped)
@@ -2250,69 +2260,130 @@ class KernelCodeShell:
             console=self._console,
         )
 
-    def _cmd_diff(self, _args_str: str) -> None:
-        """Show diff between reference and best optimized kernel."""
-        import difflib
+    def _cmd_profile_ref(self, args_str: str) -> None:
+        """Profile the reference kernel on Modal — shows runtime, bottleneck, SOL."""
+        from pathlib import Path as _Path
 
-        if not self._session_data.get("iterations"):
-            self._console.print(
-                "[dim]No optimization results. Run /optimize first.[/dim]"
-            )
+        ref_path = _PROJECT_ROOT / "reference.py"
+        if not ref_path.is_file():
+            self._console.print("  [#ff6b80]No reference.py found. Run /problem first.[/#ff6b80]")
             return
 
-        # Get reference code
-        reference = self._session_data.get("reference_code", "")
-        if (
-            not reference
-            and hasattr(self, "_reference_path")
-            and self._reference_path
-        ):
+        reference_source = ref_path.read_text()
+
+        # Detect format and make self-contained
+        from kernel_code.problem import detect_format, make_self_contained, Problem
+        fmt = detect_format(reference_source)
+
+        if fmt == "gpumode":
+            p = None
             try:
-                reference = Path(self._reference_path).read_text()
+                from kernel_code.problem import load_problem
+                p = load_problem(ref_path)
             except Exception:
-                pass
+                p = Problem(reference_code=reference_source, format=fmt)
+            reference_source = make_self_contained(p)
 
-        if not reference:
+        self._console.print()
+        self._console.print("  [bold white]\u2500\u2500 Profiling reference \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500[/bold white]")
+
+        # For KernelBench: run the Model as both ref and kernel (passthrough = 1.0x baseline)
+        # For GPU Mode: run ref_kernel as both ref and kernel
+        if fmt == "kernelbench":
+            # Build a passthrough ModelNew
+            import re
+            match = re.search(r"def forward\(self,(.*?)\).*?:", reference_source, re.DOTALL)
+            params = match.group(1).strip() if match else "*args"
+            param_names = ", ".join(p.split(":")[0].strip() for p in params.split(",") if p.strip())
+            kernel_source = f'''import torch
+import torch.nn as nn
+
+class ModelNew(nn.Module):
+    def __init__(self):
+        super().__init__()
+    def forward(self, {params}) -> torch.Tensor:
+        return torch.matmul({param_names})
+'''
+            pf = "kernelbench"
+        else:
+            # GPU Mode: use ref_kernel as kernel_function
+            kernel_source = reference_source.replace("def ref_kernel(", "def kernel_function(")
+            pf = "gpumode"
+
+        self._console.print("  \u23bf  [#999999]Evaluating on Modal...[/#999999]")
+
+        try:
+            import modal
+            eval_fn = modal.Function.from_name("openkernel-eval", "eval_kernel_on_gpu")
+            result = eval_fn.remote(
+                kernel_source=kernel_source,
+                reference_source=reference_source,
+                eval_mode="fast",
+                problem_format=pf,
+            )
+        except Exception as exc:
+            self._console.print(f"  [#ff6b80]Profile failed: {exc}[/#ff6b80]")
+            return
+
+        # Store profile for use in subsequent /optimize
+        self._last_profile = result
+
+        # Display profile
+        from kernel_code.kernel_profile import render_kernel_profile
+        render_kernel_profile(
+            speedup=result.get("speedup", 0.0),
+            ref_runtime_us=result.get("ref_runtime_us", 0.0),
+            kernel_runtime_us=result.get("runtime_us", 0.0),
+            profile=result.get("profile", {}),
+            hardware=self._settings.default_gpu,
+            console=self._console,
+        )
+
+        # Show guidance
+        ref_us = result.get("ref_runtime_us", 0.0)
+        if ref_us > 0:
+            self._console.print(f"  \u23bf  [#999999]Reference runtime: {ref_us:.0f}\u03bcs on {self._settings.default_gpu}[/#999999]")
+            self._console.print(f"  \u23bf  [#999999]Run /optimize to generate a faster kernel[/#999999]")
+        self._console.print()
+
+    def _cmd_diff(self, _args_str: str) -> None:
+        """Show diff between reference and optimized kernel."""
+        import difflib
+        from rich.syntax import Syntax
+
+        ref_path = _PROJECT_ROOT / "reference.py"
+        opt_path = _PROJECT_ROOT / "reference_optimized.py"
+
+        # Try files first (most reliable)
+        if ref_path.is_file() and opt_path.is_file():
+            reference = ref_path.read_text()
+            optimized = opt_path.read_text()
+        else:
             self._console.print(
-                "[dim]Reference code not available.[/dim]"
+                "  [#999999]No optimized kernel found. Run /optimize first.[/#999999]"
             )
             return
 
-        # Get best kernel
-        best_iter = None
-        best_speedup = 0
-        for it in self._session_data.get("iterations", []):
-            if (
-                it.get("decision") == "keep"
-                and it.get("speedup", 0) > best_speedup
-            ):
-                best_speedup = it["speedup"]
-                best_iter = it
-
-        if not best_iter or not best_iter.get("kernel_code_snippet"):
-            self._console.print(
-                "[dim]No optimized kernel available.[/dim]"
-            )
-            return
-
-        optimized = best_iter["kernel_code_snippet"]
-
-        # Generate diff
         diff = difflib.unified_diff(
             reference.splitlines(keepends=True),
             optimized.splitlines(keepends=True),
-            fromfile="reference.py (baseline)",
-            tofile=f"optimized.py ({best_speedup:.2f}x)",
+            fromfile="reference.py",
+            tofile="reference_optimized.py",
         )
         diff_text = "".join(diff)
 
         if not diff_text:
             self._console.print(
-                "[dim]No differences (kernel matches reference).[/dim]"
+                "  [#999999]No differences (kernel matches reference).[/#999999]"
             )
             return
 
+        self._console.print()
+        self._console.print(
+            "  [bold white]\u2500\u2500 Diff: reference \u2192 optimized \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500[/bold white]"
+        )
         self._console.print(Syntax(diff_text, "diff", theme="monokai"))
+        self._console.print()
 
     def _cmd_quit(self, _args_str: str) -> None:
         """/quit or /exit -- exit the shell."""
@@ -2322,6 +2393,186 @@ class KernelCodeShell:
     # ------------------------------------------------------------------
     # Natural language
     # ------------------------------------------------------------------
+
+    def _is_optimize_request(self, text: str) -> bool:
+        """Detect if the user pasted code to optimize."""
+        triggers = ["optimize this", "optimize:", "make this faster", "speed up"]
+        lower = text.lower()
+        has_trigger = any(t in lower for t in triggers)
+        has_code = any(kw in text for kw in ["def forward", "def ", "torch.", "class Model", "@triton"])
+        return has_trigger and has_code
+
+    def _is_refinement_request(self, text: str) -> bool:
+        """Detect if the user wants to refine the existing kernel."""
+        opt_path = _PROJECT_ROOT / "reference_optimized.py"
+        if not opt_path.is_file():
+            return False
+        refinement_hints = [
+            "try ", "use ", "add ", "increase ", "decrease ", "change ",
+            "autotune", "shared memory", "block size", "vectorize",
+            "tile", "fuse", "tensor core", "coalesce", "unroll",
+        ]
+        lower = text.lower()
+        return any(h in lower for h in refinement_hints)
+
+    def _handle_inline_optimize(self, text: str) -> None:
+        """Handle pasted code — wrap in reference format and optimize."""
+        import re
+
+        self._console.print()
+
+        # Extract code: everything after the trigger phrase, or inside ``` blocks
+        code = text
+        for trigger in ["optimize this:", "optimize:", "make this faster:", "speed up:"]:
+            if trigger in code.lower():
+                idx = code.lower().index(trigger) + len(trigger)
+                code = code[idx:]
+                break
+
+        # Strip markdown fences
+        match = re.search(r"```(?:python)?\s*\n?(.*?)```", code, re.DOTALL)
+        if match:
+            code = match.group(1)
+        code = code.strip()
+
+        if not code:
+            self._console.print("[#ff6b80]No code detected to optimize.[/#ff6b80]")
+            return
+
+        # Detect if it's a full reference (has class Model) or a snippet
+        from kernel_code.problem import detect_format
+        fmt = detect_format(code)
+
+        if "class Model" not in code and "def ref_kernel" not in code:
+            # Wrap bare function in a Model class
+            # Try to extract function signature
+            func_match = re.search(r"def (\w+)\((.*?)\).*?:", code)
+            if func_match:
+                func_name = func_match.group(1)
+                params = func_match.group(2)
+                # Build a reference wrapper
+                code = f'''import torch
+import torch.nn as nn
+
+class Model(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    {code}
+
+# Default inputs — adjust sizes as needed
+def get_inputs():
+    return [torch.randn(1024, 1024, device="cuda")]
+
+def get_init_inputs():
+    return []
+'''
+                self._console.print(f"  \u23bf  [#999999]Wrapped as Model with forward()[/#999999]")
+            else:
+                self._console.print("[#ff6b80]Could not parse function from pasted code.[/#ff6b80]")
+                return
+
+        # Save as reference.py
+        ref_path = _PROJECT_ROOT / "reference.py"
+        ref_path.write_text(code)
+        self._console.print(f"  \u23bf  [#999999]Saved to reference.py[/#999999]")
+        self._console.print()
+
+        # Run optimization
+        self._cmd_optimize("")
+
+    def _handle_refinement(self, hint: str) -> None:
+        """Refine the existing optimized kernel with a hint from the KE."""
+        from pathlib import Path as _Path
+
+        opt_path = _PROJECT_ROOT / "reference_optimized.py"
+        ref_path = _PROJECT_ROOT / "reference.py"
+
+        if not opt_path.is_file() or not ref_path.is_file():
+            self._console.print("  [#999999]No optimized kernel to refine. Run /optimize first.[/#999999]")
+            return
+
+        current_kernel = opt_path.read_text()
+        reference = ref_path.read_text()
+
+        self._console.print()
+        self._console.print(f"  [bold white]\u2500\u2500 Refining kernel \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500[/bold white]")
+        self._console.print(f"  \u23bf  Hint: {hint[:60]}")
+        self._console.print()
+
+        # Build a refinement prompt that includes the current kernel
+        from kernel_code.problem import detect_format, make_self_contained, Problem, load_problem
+
+        fmt = detect_format(reference)
+        if fmt == "gpumode":
+            try:
+                p = load_problem(ref_path)
+                reference = make_self_contained(p)
+            except Exception:
+                pass
+
+        from kernel_code.integration.kernel_agent_bridge import KernelAgentBridge
+        from kernel_code.live_display import LiveOptimizationDisplay
+
+        # Modify the reference to include the current kernel + refinement hint
+        refinement_ref = (
+            f"# CURRENT KERNEL TO REFINE:\n"
+            f"# {hint}\n"
+            f"#\n"
+            f"# Improve this kernel based on the hint above.\n"
+            f"# Keep what works, fix what doesn't.\n\n"
+            f"{reference}\n\n"
+            f"# === CURRENT KERNEL (to be improved) ===\n"
+            f"# {hint}\n"
+            f"{current_kernel}"
+        )
+
+        live_display = LiveOptimizationDisplay(
+            console=self._console,
+            problem=f"Refining: {hint[:40]}",
+            hardware=self._settings.default_gpu,
+            backend=self._settings.default_backend,
+        )
+
+        bridge = KernelAgentBridge(
+            reference_source=reference,
+            model_name=self._settings.default_model,
+            num_workers=self._settings.num_workers,
+            max_rounds=self._settings.max_rounds,
+            hardware=self._settings.default_gpu,
+            live_display=live_display,
+        )
+
+        result = {}
+        live_display.start()
+        try:
+            result = bridge.run()
+        finally:
+            stop = "improved" if result.get("success") else "no improvement found"
+            live_display.finish(stop_reason=stop)
+
+        speedup = result.get("speedup", 0.0)
+        kernel_code = result.get("kernel_code", "")
+
+        from kernel_code.kernel_profile import render_kernel_profile
+        render_kernel_profile(
+            speedup=speedup,
+            ref_runtime_us=result.get("ref_runtime_us", 0.0),
+            kernel_runtime_us=result.get("kernel_runtime_us", 0.0),
+            profile=result.get("profile", {}),
+            hardware=self._settings.default_gpu,
+            console=self._console,
+        )
+
+        if result.get("success") and kernel_code:
+            from kernel_agent.model_wrapper import wrap_in_model_new
+            if fmt == "kernelbench":
+                kernel_code = wrap_in_model_new(kernel_code, reference)
+            opt_path.write_text(kernel_code)
+            self._console.print(f"  [#4eba65]Refined kernel saved: reference_optimized.py[/#4eba65]")
+        else:
+            self._console.print(f"  [#999999]No improvement found. Current kernel unchanged.[/#999999]")
+        self._console.print()
 
     def _handle_natural_language(self, text: str) -> None:
         """Handle natural language input through the agentic loop.
