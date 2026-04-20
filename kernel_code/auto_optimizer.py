@@ -134,15 +134,16 @@ class MetaOptimizer:
                 )
                 break
 
-            # --- Plateau detection: 3 rounds with <2% improvement ---
+            # --- Plateau detection: inform but don't stop ---
+            # Keep iterating toward target — only budget/time can stop us
             if len(self._round_history) >= 3:
                 recent = [r.get("best_speedup", 0.0) for r in self._round_history[-3:]]
                 if recent[-1] > 0 and all(abs(s - recent[-1]) / max(recent[-1], 0.001) < 0.02 for s in recent):
-                    stop_reason = (
-                        f"Plateau: best speedup unchanged at {self._best_speedup:.2f}x "
-                        f"for 3 rounds — likely at ceiling for this model/problem"
-                    )
-                    break
+                    if self._live_display:
+                        self._live_display.print_permanent(
+                            f"  \u23bf  [#999999]Plateau at {self._best_speedup:.2f}x for 3 rounds "
+                            f"— trying different strategies...[/#999999]"
+                        )
 
             # --- Reflect and decide next action ---
             if round_num < self._goal.max_rounds:
