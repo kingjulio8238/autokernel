@@ -468,7 +468,13 @@ class KernelCodeShell:
         from kernel_code.settings import inject_api_keys as _inject
         _inject(self._settings)
         _hw = detect_hw(self._settings)
-        _returning = bool(self._explicit_session_id) or resumed
+        # Returning = has run before (settings exist, or run logs exist, or session resumed)
+        _returning = (
+            bool(self._explicit_session_id)
+            or resumed
+            or bool(self._settings.source_files)  # settings.yaml was loaded
+            or (_PROJECT_ROOT / ".kernel-code" / "runs").is_dir()
+        )
         _version = "0.1.0"
         try:
             import importlib.metadata
