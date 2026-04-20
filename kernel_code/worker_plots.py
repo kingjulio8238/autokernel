@@ -1,182 +1,256 @@
-"""Worker progress plots for /optimize and /autopilot.
+"""Worker-progress plots for /optimize (plot A) and /autopilot (plot C).
 
-Plot A — live multi-line chart during /optimize:
-  Each worker gets a step-line showing speedup over time.
-  A "frontier" line tracks the best-so-far across all workers.
-
-Plot C — stacked columns by round for /autopilot:
-  After each round, shows a column chart of per-worker speedups.
-
-Usage::
-
-    from kernel_code.worker_plots import render_live_lines, render_round_columns
+Two pure Rich renderers. Both return a Group ready to drop into Rich.Live
+or console.print. Colors match the live_display palette.
 """
 
 from __future__ import annotations
 
+from typing import Sequence
+
+from rich.console import Group
 from rich.text import Text
 
-_ACCENT = "#d77757"
+# Palette
+_CLAY = "#d77757"
 _SUCCESS = "#4eba65"
-_DIM = "#999999"
-_BLOCKS = "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588"
-_WORKER_COLORS = ["#22d3ee", "#4ade80", "#fbbf24", "#c084fc"]
+_DIM = "#7a7a7a"
+_GRID = "#3a3a3a"
+
+_WCOLORS = [
+    "#d77757", "#f5a850", "#4eba65", "#5a9ec9",
+    "#8b6fa8", "#c97b9b", "#6ec0a0", "#b8a050",
+]
+
+_FULL = "\u2588"
+_H_LINE = "\u2500"
+_V_LINE = "\u2502"
 
 
+def _worker_color(wid: int) -> str:
+    return _WCOLORS[wid % len(_WCOLORS)]
+
+
+def _best_so_far(points: Sequence[tuple[int, float, float]]) -> list[tuple[float, float]]:
+    """(round, speedup, t) -> [(t, best_so_far)]"""
+    out: list[tuple[float, float]] = []
+    best = 0.0
+    for _rnd, sp, t in sorted(points, key=lambda p: p[2]):
+        if sp > best:
+            best = sp
+        out.append((t, best))
+    return out
+
+
+# ═══════════════════════════════════════════════════════════
+# PLOT A — live multi-line (time x speedup)
+# ═══════════════════════════════════════════════════════════
 def render_live_lines(
     worker_speedups: dict[int, list[tuple[int, float, float]]],
     elapsed: float,
-    width: int = 50,
-    height: int = 8,
-) -> Text:
-    """Render live multi-line speedup chart (Plot A).
-
-    Args:
-        worker_speedups: {worker_id: [(round, speedup, time_s), ...]}
-        elapsed: total elapsed seconds
-        width: chart width in chars
-        height: chart height in rows
-    """
+    width: int = 55,
+    height: int = 9,
+) -> Group:
+    """Plot A — one step-line per worker plus global frontier."""
     if not worker_speedups:
-        return Text()
+        return Group(Text(""))
 
-    # Find ranges
-    all_speedups = [s for wdata in worker_speedups.values() for _, s, _ in wdata if s > 0]
-    if not all_speedups:
-        return Text()
+    per_worker = {wid: _best_so_far(pts) for wid, pts in worker_speedups.items()}
+    all_points = [(t, b, wid) for wid, pts in per_worker.items() for (t, b) in pts]
+    all_points.sort()
 
-    max_speedup = max(all_speedups) * 1.1
-    max_speedup = max(max_speedup, 1.1)  # at least show 1.0x line
-    frontier = max(all_speedups)
+    frontier: list[tuple[float, float]] = []
+    best = 0.0
+    for t, b, _wid in all_points:
+        if b > best:
+            best = b
+            frontier.append((t, best))
 
-    result = Text()
-    result.append(f"  WORKERS", style="bold white")
-    result.append(f"  best {frontier:.2f}\u00d7\n", style=f"bold {_SUCCESS}")
+    max_speedup = max(best, 1.2)
+    t_max = max(elapsed, 1.0)
 
-    # Build grid
-    grid = [[" " for _ in range(width)] for _ in range(height)]
+    def _x(t: float) -> int:
+        return min(width - 1, max(0, int(t / t_max * (width - 1))))
 
-    # Y axis
-    for y in range(height):
-        grid[y][6] = "\u2502"
-    # X axis
-    for x in range(6, width):
-        grid[height - 1][x] = "\u2500"
-    grid[height - 1][6] = "\u2514"
+    def _y(s: float) -> int:
+        return min(height - 1, max(0, int(s / max_speedup * (height - 1))))
 
-    # Y labels
-    for y_idx in [0, height // 2, height - 2]:
-        val = max_speedup * (1.0 - y_idx / (height - 1))
-        label = f"{val:4.1f}\u00d7"
-        for i, ch in enumerate(label[:5]):
-            if i < 6:
-                grid[y_idx][i] = ch
+    # grid[y][x] = (char, style) — y=0 is TOP
+    grid: list[list[tuple[str, str]]] = [
+        [(" ", "") for _ in range(width)] for _ in range(height)
+    ]
 
-    # 1.0x reference line
-    ref_y = int((1.0 - 1.0 / max_speedup) * (height - 2))
-    ref_y = max(0, min(height - 2, ref_y))
-    for x in range(7, width):
-        if grid[ref_y][x] == " ":
-            grid[ref_y][x] = "\u2504"  # dotted line at 1.0x
+    # 1.0x baseline
+    by = height - 1 - _y(1.0)
+    if 0 <= by < height:
+        for x in range(width):
+            if x % 3 != 0:
+                grid[by][x] = (_H_LINE, _GRID)
 
-    # Plot each worker's speedup trajectory
-    for wid, data in sorted(worker_speedups.items()):
-        if not data:
-            continue
-        color_idx = wid % len(_WORKER_COLORS)
+    def _plot(points: list[tuple[float, float]], style: str) -> None:
+        if not points:
+            return
+        prev_x, prev_y = 0, height - 1
+        for t, s in points:
+            x = _x(t)
+            y = height - 1 - _y(s)
+            for xi in range(prev_x, x + 1):
+                if grid[prev_y][xi][0] in (" ", _H_LINE):
+                    grid[prev_y][xi] = (_H_LINE, style)
+            lo, hi = sorted([prev_y, y])
+            for yi in range(lo, hi + 1):
+                if yi == y:
+                    grid[yi][x] = (_FULL, style)
+                elif grid[yi][x][0] in (" ", _H_LINE):
+                    grid[yi][x] = (_V_LINE, style)
+            prev_x, prev_y = x, y
+        for xi in range(prev_x + 1, width):
+            if grid[prev_y][xi][0] in (" ", _H_LINE):
+                grid[prev_y][xi] = (_H_LINE, style)
 
-        for i, (rnd, speedup, t) in enumerate(data):
-            if speedup <= 0:
-                continue
-            # Map time to x position
-            x = 7 + int(t / max(elapsed, 1) * (width - 9))
-            x = max(7, min(width - 2, x))
-            # Map speedup to y position
-            y = int((1.0 - speedup / max_speedup) * (height - 2))
-            y = max(0, min(height - 2, y))
-            grid[y][x] = "\u25cf"  # ●
+    for wid in sorted(per_worker):
+        _plot(per_worker[wid], _worker_color(wid))
+    _plot(frontier, _CLAY)
 
-    # Render grid
-    for row in grid:
-        line = "  " + "".join(row)
-        result.append(line + "\n")
+    parts: list = []
+    header = Text()
+    header.append("  WORKERS  ", style=f"bold {_CLAY}")
+    header.append(f"best {best:.2f}\u00d7", style="bold white")
+    header.append(f"  frontier across {len(per_worker)} workers", style=_DIM)
+    parts.append(header)
 
-    # X axis labels
-    mid_t = elapsed / 2
-    result.append(f"         0s")
-    result.append(f"{'':>{width // 3}}{mid_t:.0f}s")
-    result.append(f"{'':>{width // 3}}{elapsed:.0f}s\n")
+    for yi, row in enumerate(grid):
+        s_at = (height - 1 - yi) / (height - 1) * max_speedup
+        line = Text()
+        if yi % 2 == 0:
+            line.append(f" {s_at:4.1f}\u00d7 ", style=_DIM)
+        else:
+            line.append("       ")
+        line.append(_V_LINE, style=_DIM)
+        for ch, st in row:
+            line.append(ch, style=st or _DIM)
+        parts.append(line)
+
+    axis = Text()
+    axis.append("       \u2514" + _H_LINE * width, style=_DIM)
+    parts.append(axis)
+
+    xl = Text()
+    xl.append("        0s", style=_DIM)
+    xl.append(" " * max(0, width - 10))
+    xl.append(f"{int(elapsed)}s", style=_DIM)
+    parts.append(xl)
 
     # Legend
-    for wid, data in sorted(worker_speedups.items()):
-        if not data:
-            continue
-        color = _WORKER_COLORS[wid % len(_WORKER_COLORS)]
-        best = max(s for _, s, _ in data) if data else 0
-        result.append(f"  [{color}]\u25cf[/{color}] w{wid} {best:.2f}\u00d7")
-        if wid == max(worker_speedups.keys()):
-            result.append("\n")
-        else:
-            result.append("  ")
+    ranked = sorted(per_worker.items(),
+                    key=lambda kv: kv[1][-1][1] if kv[1] else 0,
+                    reverse=True)
+    for i, (wid, pts) in enumerate(ranked):
+        cur = pts[-1][1] if pts else 0.0
+        row = Text()
+        row.append("  \u25cf ", style=_worker_color(wid))
+        row.append(f"w{wid} {cur:.2f}\u00d7", style=f"bold {_worker_color(wid)}")
+        if i == 0 and cur > 0:
+            row.append(" \u2605", style=f"bold {_SUCCESS}")
+        parts.append(row)
 
-    return result
+    return Group(*parts)
 
 
+# ═══════════════════════════════════════════════════════════
+# PLOT C — stacked columns by round
+# ═══════════════════════════════════════════════════════════
 def render_round_columns(
     round_history: list[dict],
-    width: int = 50,
-    height: int = 10,
-) -> Text:
-    """Render stacked columns by round (Plot C).
-
-    Args:
-        round_history: list of round dicts with best_speedup
-    """
+    col_width: int = 8,
+    height: int = 9,
+) -> Group:
+    """Plot C — one column group per round, one bar per worker."""
     if not round_history:
-        return Text()
+        return Group(Text(""))
 
-    result = Text()
-    result.append("\n  BY ROUND\n", style="bold white")
+    wids: set[int] = set()
+    for r in round_history:
+        for pw in r.get("per_worker", []) or []:
+            wids.add(int(pw.get("id", 0)))
+    if not wids:
+        wids = {0}
+    worker_ids = sorted(wids)
+    n_w = len(worker_ids)
 
-    max_speedup = max(r.get("best_speedup", 0) for r in round_history)
-    max_speedup = max(max_speedup, 1.1)
+    max_speedup = max(
+        [r.get("best_speedup", 0.0) for r in round_history] + [1.2]
+    )
 
-    # Column chart using block characters
-    for y_level in range(height, 0, -1):
-        threshold = y_level / height * max_speedup
-        line = f"  {threshold:5.1f}\u00d7 \u2502"
+    def _bar_h(s: float) -> int:
+        if s <= 0:
+            return 0
+        return max(1, int(s / max_speedup * (height - 1)))
 
-        for i, rnd in enumerate(round_history):
-            speedup = rnd.get("best_speedup", 0)
-            if speedup >= threshold:
-                line += " \u2588\u2588"
+    parts: list = []
+    hdr = Text()
+    hdr.append("  BY ROUND  ", style=f"bold {_CLAY}")
+    hdr.append(f"{len(round_history)} rounds \u00b7 {n_w} workers", style=_DIM)
+    parts.append(hdr)
+
+    bar_w = max(1, (col_width - 2) // max(n_w, 1))
+
+    for yi in range(height - 1, -1, -1):
+        s_at = (yi / max(height - 1, 1)) * max_speedup
+        line = Text()
+        if (height - 1 - yi) % 2 == 0:
+            line.append(f" {s_at:4.1f}\u00d7 ", style=_DIM)
+        else:
+            line.append("       ")
+        line.append(_V_LINE, style=_DIM)
+
+        for rnd in round_history:
+            pw_by_id = {int(p.get("id", 0)): p.get("speedup", 0.0)
+                        for p in rnd.get("per_worker", []) or []}
+            line.append(" ")
+            if pw_by_id:
+                for wid in worker_ids:
+                    s = pw_by_id.get(wid, 0.0)
+                    bh = _bar_h(s)
+                    ch = _FULL if yi < bh else " "
+                    line.append(ch * bar_w, style=_worker_color(wid))
             else:
-                line += "   "
+                # Fallback: single bar from best_speedup
+                s = rnd.get("best_speedup", 0.0)
+                bh = _bar_h(s)
+                ch = _FULL if yi < bh else " "
+                line.append(ch * (col_width - 2), style=_CLAY)
+            line.append(" ")
+        parts.append(line)
 
-        result.append(line + "\n")
+    axis = Text()
+    axis.append("       \u2514", style=_DIM)
+    for _ in round_history:
+        axis.append(_H_LINE * col_width, style=_DIM)
+    parts.append(axis)
 
-    # X axis
-    result.append(f"        \u2514")
-    for i in range(len(round_history)):
-        result.append("\u2500\u2500\u2500")
-    result.append("\n")
-
-    # Round labels
-    result.append("         ")
-    for i, rnd in enumerate(round_history):
-        result.append(f"R{rnd.get('round', i + 1):<2}")
-    result.append("\n")
-
-    # Best per round
-    result.append("\n")
+    xl = Text("        ")
     for rnd in round_history:
-        num = rnd.get("round", "?")
-        speedup = rnd.get("best_speedup", 0)
-        strategy = rnd.get("strategy", "")[:25]
-        color = _SUCCESS if speedup > 1.0 else _DIM
-        result.append(f"  [{color}]R{num}: {speedup:.2f}\u00d7[/{color}]")
-        if strategy:
-            result.append(f"  [{_DIM}]{strategy}[/{_DIM}]")
-        result.append("\n")
+        label = f"r{rnd.get('round', '?')}"
+        xl.append(label.center(col_width), style=_DIM)
+    parts.append(xl)
 
-    return result
+    # Legend
+    best_by_wid: dict[int, float] = {wid: 0.0 for wid in worker_ids}
+    for r in round_history:
+        for pw in r.get("per_worker", []) or []:
+            wid = int(pw.get("id", 0))
+            s = float(pw.get("speedup", 0.0))
+            if s > best_by_wid.get(wid, 0.0):
+                best_by_wid[wid] = s
+    ranked = sorted(best_by_wid.items(), key=lambda kv: kv[1], reverse=True)
+    for i, (wid, bst) in enumerate(ranked):
+        row = Text()
+        row.append("  \u25a0 ", style=_worker_color(wid))
+        row.append(f"worker {wid}  {bst:.2f}\u00d7",
+                   style=f"bold {_worker_color(wid)}")
+        if i == 0 and bst > 0:
+            row.append("  \u2605", style=f"bold {_SUCCESS}")
+        parts.append(row)
+
+    return Group(*parts)
