@@ -130,27 +130,33 @@ def render_welcome(
 
     console.print()
 
-    # Monogram + title
-    title = Text()
-    title.append("  KC", style=f"bold {_ACCENT}")
-    title.append("  openkernel", style="bold white")
-    title.append(f"  v{_VERSION}", style=_DIM)
-    console.print(title)
+    # KC Monogram
+    monogram = [
+        "\u2588\u2588\u2557  \u2588\u2588\u2557 \u2588\u2588\u2588\u2588\u2588\u2588\u2557",
+        "\u2588\u2588\u2551 \u2588\u2588\u2554\u255d\u2588\u2588\u2554\u2550\u2550\u2550\u2550\u255d",
+        "\u2588\u2588\u2588\u2588\u2588\u2554\u255d \u2588\u2588\u2551     ",
+        "\u2588\u2588\u2554\u2550\u2588\u2588\u2557 \u2588\u2588\u2551     ",
+        "\u2588\u2588\u2551  \u2588\u2588\u2557\u255a\u2588\u2588\u2588\u2588\u2588\u2588\u2557",
+        "\u255a\u2550\u255d  \u255a\u2550\u255d \u255a\u2550\u2550\u2550\u2550\u2550\u255d",
+    ]
+    for line in monogram:
+        console.print(f"  [{_ACCENT}]{line}[/{_ACCENT}]")
 
-    # Tagline
-    console.print(f"  [{_DIM}]agent-driven triton & cuda kernel optimization[/{_DIM}]")
-    console.print()
+    # Title + version
+    console.print(f"  [bold white]kernel code[/bold white] [{_DIM}]v{_VERSION}[/{_DIM}]")
+    console.print(f"  [{_DIM}]agent-driven triton & cuda optimization[/{_DIM}]")
 
     # Specs table
-    key_dot = f"[green]\u2713[/green]" if hw.model_ok else f"[red]\u2717[/red]"
-    specs = Text()
-    specs.append(f"  {key_dot} {hw.model}", style="white")
-    specs.append(f"  \u00b7  ", style=_DIM)
-    specs.append(f"{hw.gpu}", style="white")
-    specs.append(f" ({hw.compute})", style=_DIM)
-    specs.append(f"  \u00b7  ", style=_DIM)
-    specs.append(f"{hw.backend}", style="white")
-    console.print(specs)
+    specs_table = Table(box=None, show_header=False, padding=(0, 2), expand=False)
+    specs_table.add_column("key", style=_DIM, width=12)
+    specs_table.add_column("value", style="white")
+    specs_table.add_row("gpu", f"{hw.gpu} \u00b7 {hw.sm}")
+    specs_table.add_row("compute", hw.compute)
+    specs_table.add_row("bandwidth", hw.bandwidth)
+    specs_table.add_row("backend", hw.backend)
+    key_dot = "[green]\u25cf[/green]" if hw.model_ok else "[red]\u25cf[/red]"
+    specs_table.add_row("model", f"{hw.model} {key_dot}")
+    console.print(specs_table)
     console.print()
 
     # MOTD card

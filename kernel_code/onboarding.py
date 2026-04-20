@@ -57,8 +57,11 @@ def run_onboarding(console: Console | None = None) -> dict:
     }
 
     try:
-        # Step 1: Welcome
-        _step_welcome(con)
+        # Step 1: Welcome — A2 hero card from welcome.py
+        from kernel_code.welcome import render_welcome, detect_hw, pick_motd
+        hw = detect_hw()  # pre-credential: fallback values
+        motd = pick_motd(returning=False)
+        render_welcome(con, returning=False, hw=hw, motd=motd)
 
         # Step 2: Detect credentials
         creds = _step_detect_credentials(con)
@@ -73,12 +76,8 @@ def run_onboarding(console: Console | None = None) -> dict:
         kernel_md_created = _step_kernel_md(con, creds)
         results["kernel_md_created"] = kernel_md_created
 
-        # Step 5: Quick demo
-        _step_quick_demo(con)
-        results["demo_ran"] = True
-
-        # Step 6: What's next
-        _step_whats_next(con)
+        # Steps 5+6 absorbed by welcome screen.
+        # Demo is opt-in via /optimize --mock after onboarding.
 
         results["completed"] = True
 

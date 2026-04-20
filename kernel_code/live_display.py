@@ -130,6 +130,8 @@ class LiveOptimizationDisplay:
         self._target_speedup: float | None = None
         self._round_markers: list[int] = []
         self._worker_states: list[dict] = []
+        self._worker_speedups: dict[int, list[tuple[int, float, float]]] = {}
+        self._show_plots: bool = True
 
     def start(self) -> None:
         self._start_time = time.time()
@@ -152,6 +154,15 @@ class LiveOptimizationDisplay:
 
     def update_workers(self, workers: list[dict]) -> None:
         self._worker_states = workers
+        # Capture per-worker speedup history for plot A
+        now = time.time() - self._start_time
+        for w in workers:
+            wid = w.get("id", 0)
+            rnd = w.get("round", 0)
+            speedup = w.get("speedup", 0.0)
+            history = self._worker_speedups.setdefault(wid, [])
+            if rnd > 0 and speedup > 0 and (not history or history[-1][0] < rnd):
+                history.append((rnd, speedup, now))
         self._refresh()
 
     def update_iteration(self, num: int, speedup: float, status: str, intent: str) -> None:
@@ -234,6 +245,14 @@ class LiveOptimizationDisplay:
             parts.append(tgt)
 
         parts.append(Text(""))
+
+        # Plot A: live worker speedup chart
+        if self._worker_speedups and self._show_plots:
+            from kernel_code.worker_plots import render_live_lines
+            plot = render_live_lines(self._worker_speedups, elapsed, width=min(width, 55))
+            if plot.plain.strip():
+                parts.append(plot)
+                parts.append(Text(""))
 
         # Workers
         if self._worker_states:
