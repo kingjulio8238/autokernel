@@ -1,0 +1,23 @@
+# GLM-5.1 — deep optimization for hard problems
+# Good for: problems requiring autonomous 8-hour reasoning
+# Cost: $1.40/$4.40 per M tokens
+
+backend: triton
+eval_mode: thorough
+max_iterations: 100
+max_retries_per_intent: 5
+stagnation_threshold: 10
+
+model:
+  provider: openai
+  model_id: z-ai/glm-5.1
+  temperature: 0.7
+  max_tokens: 16384
+
+modal:
+  gpu_type: L40S
+  timeout_seconds: 600
+
+capture_traces: true
+analytical_prescreen: true
+enable_deep_profiling: false

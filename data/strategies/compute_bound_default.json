@@ -1,0 +1,10 @@
+{
+  "id": "compute_bound_default",
+  "description": "For compute-bound problems (GEMM, conv, matmul): maximize arithmetic throughput via tiling, tensor core utilization, and optimal thread block geometry. Use large tile sizes (128x128 or 256x128), multi-stage software pipelining, and warp-level MMA instructions.",
+  "problem_types": ["gemm", "matmul", "convolution", "conv2d", "conv1d", "linear", "compute_bound", "batch_matmul"],
+  "backend": "triton",
+  "hardware_targets": ["nvidia_ampere", "nvidia_hopper"],
+  "success_history": [],
+  "failure_history": [],
+  "pareto_scores": {}
+}

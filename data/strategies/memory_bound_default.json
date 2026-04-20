@@ -1,0 +1,10 @@
+{
+  "id": "memory_bound_default",
+  "description": "For memory-bound problems (softmax, layernorm, elementwise, reduction): maximize bandwidth utilization via vectorized loads (float4), large BLOCK_SIZE (1024-2048), minimal shared memory usage, and single-pass algorithms. Prefer online/streaming computation patterns to reduce memory traffic.",
+  "problem_types": ["softmax", "layernorm", "rmsnorm", "elementwise", "reduction", "memory_bound", "gelu", "relu", "sigmoid", "dropout", "batchnorm"],
+  "backend": "triton",
+  "hardware_targets": ["nvidia_ampere", "nvidia_hopper"],
+  "success_history": [],
+  "failure_history": [],
+  "pareto_scores": {}
+}

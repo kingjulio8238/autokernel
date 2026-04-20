@@ -1,0 +1,15 @@
+{
+  "id": "triton_fused_attention",
+  "name": "Fused Attention (Triton)",
+  "trigger": "Attention, self-attention, multi-head attention, QKV, scaled dot-product attention",
+  "approach": "Fuse QK^T, softmax, and V multiplication into single kernel. Use online softmax for numerical stability. Tile along sequence dimension. Use shared memory for K/V cache.",
+  "backend": "triton",
+  "evidence": [],
+  "code_template": "import triton\nimport triton.language as tl\nimport torch\n\n@triton.jit\ndef fused_attention_kernel(\n    Q, K, V, Out,\n    stride_qb, stride_qh, stride_qm, stride_qk,\n    stride_kb, stride_kh, stride_kn, stride_kk,\n    stride_vb, stride_vh, stride_vn, stride_vk,\n    stride_ob, stride_oh, stride_om, stride_ok,\n    N_CTX, HEAD_DIM: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr):\n    pid_m = tl.program_id(0)\n    pid_bh = tl.program_id(1)\n    scale = 1.0 / tl.math.sqrt(HEAD_DIM.to(tl.float32))\n    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)\n    offs_n = tl.arange(0, BLOCK_N)\n    offs_d = tl.arange(0, HEAD_DIM)\n    q = tl.load(Q + pid_bh * stride_qh + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk,\n                mask=offs_m[:, None] < N_CTX)\n    m_i = tl.full([BLOCK_M], float('-inf'), dtype=tl.float32)\n    l_i = tl.zeros([BLOCK_M], dtype=tl.float32)\n    acc = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32)\n    for start_n in range(0, N_CTX, BLOCK_N):\n        n_offs = start_n + offs_n\n        k = tl.load(K + pid_bh * stride_kh + n_offs[None, :] * stride_kn + offs_d[:, None] * stride_kk,\n                    mask=n_offs[None, :] < N_CTX)\n        qk = tl.dot(q, k) * scale\n        m_new = tl.maximum(m_i, tl.max(qk, axis=1))\n        alpha = tl.exp(m_i - m_new)\n        p = tl.exp(qk - m_new[:, None])\n        l_i = l_i * alpha + tl.sum(p, axis=1)\n        acc = acc * alpha[:, None]\n        v = tl.load(V + pid_bh * stride_vh + n_offs[:, None] * stride_vn + offs_d[None, :] * stride_vk,\n                    mask=n_offs[:, None] < N_CTX)\n        acc += tl.dot(p.to(v.dtype), v)\n        m_i = m_new\n    acc = acc / l_i[:, None]\n    tl.store(Out + pid_bh * stride_oh + offs_m[:, None] * stride_om + offs_d[None, :] * stride_ok,\n             acc, mask=offs_m[:, None] < N_CTX)\n\nclass ModelNew(torch.nn.Module):\n    def __init__(self):\n        super().__init__()\n\n    def forward(self, Q, K, V):\n        B, H, N, D = Q.shape\n        Out = torch.empty_like(Q)\n        BLOCK_M, BLOCK_N = 64, 64\n        grid = (triton.cdiv(N, BLOCK_M), B * H)\n        fused_attention_kernel[grid](\n            Q, K, V, Out,\n            *Q.stride(), *K.stride(), *V.stride(), *Out.stride(),\n            N, HEAD_DIM=D, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N)\n        return Out",
+  "tags": ["attention", "transformer", "memory_bound", "fusion", "online_softmax"],
+  "auto_trigger": {
+    "bottleneck_types": ["compute_bound", "memory_bound"],
+    "problem_keywords": ["attention", "self-attention", "transformer", "qkv", "sdpa"],
+    "min_speedup_evidence": 1.5
+  }
+}

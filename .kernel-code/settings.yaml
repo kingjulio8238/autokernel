@@ -1,0 +1,7 @@
+default_backend: triton
+default_gpu: L40S
+max_budget: 5.0
+auto_save: true
+dashboard_port: 8050
+default_model: groq/llama-3.3-70b-versatile
+default_provider: groq

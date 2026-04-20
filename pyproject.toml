@@ -1,25 +1,19 @@
 [project]
-name = "autokernel"
+name = "openkernel-workspace"
 version = "0.1.0"
-description = "Recursive GPU kernel optimization via autoresearch"
+description = "Autonomous GPU kernel optimization engine + developer tools"
 readme = "README.md"
-requires-python = ">=3.10"
-dependencies = [
-    "kernelbench",
-    "matplotlib>=3.10.8",
-    "numpy>=2.2.6",
-    "pandas>=2.3.3",
-    "torch==2.9.1",
-    "triton",
-]
+requires-python = ">=3.11"
 
-[tool.uv.sources]
-torch = [
-    { index = "pytorch-cu128" },
-]
-kernelbench = { git = "https://github.com/ScalingIntelligence/KernelBench.git" }
+[tool.uv.workspace]
+members = ["openkernel", "kernel_code"]
 
-[[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
-explicit = true
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

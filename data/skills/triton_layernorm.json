@@ -1,0 +1,10 @@
+{
+  "id": "triton_fused_layernorm",
+  "name": "Fused LayerNorm (Triton)",
+  "trigger": "LayerNorm, layer_norm, normalization, RMSNorm",
+  "approach": "Single-pass online algorithm: compute mean and variance simultaneously. Fuse normalization + scale + bias into one kernel. Use Welford's algorithm for numerical stability. Vectorized loads for bandwidth.",
+  "backend": "triton",
+  "evidence": [],
+  "code_template": "import triton\nimport triton.language as tl\nimport torch\n\n@triton.jit\ndef layernorm_kernel(X, Y, W, B, stride, N, eps: tl.constexpr, BLOCK_SIZE: tl.constexpr):\n    row = tl.program_id(0)\n    offs = tl.arange(0, BLOCK_SIZE)\n    mask = offs < N\n    x = tl.load(X + row * stride + offs, mask=mask, other=0.0).to(tl.float32)\n    # Welford single-pass: mean and variance\n    mean = tl.sum(x, axis=0) / N\n    x_centered = tl.where(mask, x - mean, 0.0)\n    var = tl.sum(x_centered * x_centered, axis=0) / N\n    inv_std = 1.0 / tl.math.sqrt(var + eps)\n    x_hat = x_centered * inv_std\n    w = tl.load(W + offs, mask=mask, other=1.0)\n    b = tl.load(B + offs, mask=mask, other=0.0)\n    y = x_hat * w + b\n    tl.store(Y + row * stride + offs, y, mask=mask)\n\nclass ModelNew(torch.nn.Module):\n    def __init__(self, normalized_shape):\n        super().__init__()\n        self.weight = torch.nn.Parameter(torch.ones(normalized_shape))\n        self.bias = torch.nn.Parameter(torch.zeros(normalized_shape))\n        self.eps = 1e-5\n        self.normalized_shape = normalized_shape\n\n    def forward(self, x):\n        x_flat = x.view(-1, self.normalized_shape)\n        y = torch.empty_like(x_flat)\n        BLOCK_SIZE = triton.next_power_of_2(self.normalized_shape)\n        layernorm_kernel[(x_flat.shape[0],)](\n            x_flat, y, self.weight, self.bias,\n            x_flat.stride(0), self.normalized_shape,\n            eps=self.eps, BLOCK_SIZE=BLOCK_SIZE)\n        return y.view_as(x)",
+  "tags": ["layernorm", "rmsnorm", "normalization", "memory_bound", "online_algorithm", "welford"]
+}

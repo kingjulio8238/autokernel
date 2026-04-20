@@ -1,0 +1,15 @@
+{
+  "id": "triton_tiled_gemm",
+  "name": "Tiled GEMM (Triton)",
+  "trigger": "Matrix multiplication or GEMM-like operation, compute-bound for large matrices",
+  "approach": "Tiled GEMM with @triton.autotune over BLOCK_M/N/K in {64,128,256}. Use tl.dot for tensor core utilization. Accumulate in float64 for fp32 correctness (avoids atol=1e-4 failures from accumulation order). For large GEMMs (>2048): cuBLAS via torch.matmul is likely near-optimal — focus on dispatch overhead reduction instead.",
+  "backend": "triton",
+  "evidence": [],
+  "code_template": "import triton\nimport triton.language as tl\nimport torch\n\n@triton.autotune(\n    configs=[\n        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'BLOCK_K': 64}, num_stages=3, num_warps=8),\n        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 128, 'BLOCK_K': 64}, num_stages=4, num_warps=4),\n        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64, 'BLOCK_K': 64}, num_stages=4, num_warps=4),\n        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64, 'BLOCK_K': 64}, num_stages=4, num_warps=4),\n    ],\n    key=['M', 'N', 'K'],\n)\n@triton.jit\ndef matmul_kernel(A, B, C, M, N, K, stride_am, stride_ak, stride_bk, stride_bn, stride_cm, stride_cn,\n                  BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):\n    pid_m = tl.program_id(0)\n    pid_n = tl.program_id(1)\n    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)\n    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)\n    offs_k = tl.arange(0, BLOCK_K)\n    a_ptrs = A + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak\n    b_ptrs = B + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn\n    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)\n    for k in range(0, K, BLOCK_K):\n        a = tl.load(a_ptrs, mask=offs_k[None, :] + k < K, other=0.0)\n        b = tl.load(b_ptrs, mask=offs_k[:, None] + k < K, other=0.0)\n        acc += tl.dot(a, b)\n        a_ptrs += BLOCK_K * stride_ak\n        b_ptrs += BLOCK_K * stride_bk\n    c_ptrs = C + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn\n    mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)\n    tl.store(c_ptrs, acc, mask=mask)\n\nclass ModelNew(torch.nn.Module):\n    def __init__(self):\n        super().__init__()\n\n    def forward(self, A, B):\n        M, K = A.shape\n        _, N = B.shape\n        C = torch.empty((M, N), device=A.device, dtype=A.dtype)\n        grid = lambda meta: (triton.cdiv(M, meta['BLOCK_M']), triton.cdiv(N, meta['BLOCK_N']))\n        matmul_kernel[grid](A, B, C, M, N, K,\n                            A.stride(0), A.stride(1), B.stride(0), B.stride(1), C.stride(0), C.stride(1))\n        return C",
+  "tags": ["gemm", "matmul", "compute_bound", "tensor_cores", "tiling"],
+  "auto_trigger": {
+    "bottleneck_types": ["compute_bound"],
+    "problem_keywords": ["gemm", "matmul", "matrix", "linear", "mm"],
+    "min_speedup_evidence": 1.5
+  }
+}

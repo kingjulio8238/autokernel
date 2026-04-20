@@ -1,0 +1,21 @@
+# CUDA backend with thorough evaluation
+# Good for: CUDA kernel optimization, benchmarking
+# Cost: depends on model choice
+
+backend: cuda
+eval_mode: thorough
+max_iterations: 50
+max_retries_per_intent: 5
+
+model:
+  provider: groq
+  model_id: groq/llama-3.3-70b-versatile
+  temperature: 0.7
+  max_tokens: 8192
+
+modal:
+  gpu_type: L40S
+  timeout_seconds: 600
+
+capture_traces: true
+analytical_prescreen: true

@@ -1,98 +1,121 @@
-# autoresearch
+# openkernel
 
-![teaser](progress.png)
+Self-recursive GPU kernel optimization engine.
 
-*One day, frontier AI research used to be done by meat computers in between eating, sleeping, having other fun, and synchronizing once in a while using sound wave interconnect in the ritual of "group meeting". That era is long gone. Research is now entirely the domain of autonomous swarms of AI agents running across compute cluster megastructures in the skies. The agents claim that we are now in the 10,205th generation of the code base, in any case no one could tell if that's right or wrong as the "code" is now a self-modifying binary that has grown beyond human comprehension. This repo is the story of how it all began. -@karpathy, March 2026*.
+Give it a PyTorch operation and a target GPU -- it produces an optimized CUDA or Triton kernel through structured search with hardware profiler feedback.
 
-The idea: give an AI agent a small but real LLM training setup and let it experiment autonomously overnight. It modifies the code, trains for 5 minutes, checks if the result improved, keeps or discards, and repeats. You wake up in the morning to a log of experiments and (hopefully) a better model. The training code here is a simplified single-GPU implementation of [nanochat](https://github.com/karpathy/nanochat). The core idea is that you're not touching any of the Python files like you normally would as a researcher. Instead, you are programming the `program.md` Markdown files that provide context to the AI agents and set up your autonomous research org. The default `program.md` in this repo is intentionally kept as a bare bones baseline, though it's obvious how one would iterate on it over time to find the "research org code" that achieves the fastest research progress, how you'd add more agents to the mix, etc. A bit more context on this project is here in this [tweet](https://x.com/karpathy/status/2029701092347630069).
+## What It Does
 
-## How it works
+- **3-level hybrid search**: Strategy evolution selects *what* to optimize, a world model plans the approach, and a refinement loop implements and validates with profiler feedback. Strategies that work are extracted into a skill library that compounds across problems.
+- **Bring your own model (BYOM)**: Any LLM via OpenAI-compatible API. MiniMax M2.5 is the default. Claude, GLM, Kimi, Qwen all work. No lock-in.
+- **Cloud-native on Modal**: Compile, benchmark, and profile kernels on cloud GPUs (H100, A100, L40S). No local NVIDIA hardware required.
 
-The repo is deliberately kept small and only really has three files that matter:
-
-- **`prepare.py`** — fixed constants, one-time data prep (downloads training data, trains a BPE tokenizer), and runtime utilities (dataloader, evaluation). Not modified.
-- **`train.py`** — the single file the agent edits. Contains the full GPT model, optimizer (Muon + AdamW), and training loop. Everything is fair game: architecture, hyperparameters, optimizer, batch size, etc. **This file is edited and iterated on by the agent**.
-- **`program.md`** — baseline instructions for one agent. Point your agent here and let it go. **This file is edited and iterated on by the human**.
-
-By design, training runs for a **fixed 5-minute time budget** (wall clock, excluding startup/compilation), regardless of the details of your compute. The metric is **val_bpb** (validation bits per byte) — lower is better, and vocab-size-independent so architectural changes are fairly compared.
-
-If you are new to neural networks, this ["Dummy's Guide"](https://x.com/hooeem/status/2030720614752039185) looks pretty good for a lot more context.
-
-## Quick start
-
-**Requirements:** A single NVIDIA GPU (24GB+ VRAM), Python 3.10+, [uv](https://docs.astral.sh/uv/), CUDA toolkit with dev headers.
+## Quick Start
 
 ```bash
-# 1. Clone (replace <PAT> with your GitHub personal access token)
-git clone https://ghp_<PAT>@github.com/kingjulio8238/autokernel.git
-cd autokernel
-
-# 2. Install uv project manager (if you don't already have it)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 3. Install dependencies
-uv sync
-
-# 4. Install Python dev headers (needed for CUDA/Triton compilation)
-apt-get update && apt-get install -y python3.10-dev
-
-# 5. Verify setup
-uv run python -c "import torch; print(torch.cuda.get_device_name(0))"
-uv run python -c "from kernelbench.eval import eval_kernel_against_ref; print('OK')"
-
-# 6. Run the evaluation gate
-uv run python prepare.py
+pip install openkernel kernel-code
+export MINIMAX_API_KEY=your-key
+openkernel optimize --reference my_kernel.py --backend triton
 ```
 
-Gate passes when you see `status:correct` and a `speedup:` line in the output.
+Options:
 
-## Running the agent
-
-Simply spin up your Claude/Codex or whatever you want in this repo (and disable all permissions), then you can prompt something like:
-
-```
-Hi have a look at program.md and let's kick off a new experiment! let's do the setup first.
+```bash
+openkernel optimize --reference my_kernel.py --backend cuda --model claude-sonnet-4-20250514
+openkernel evaluate --kernel optimized.py --reference my_kernel.py --eval-mode thorough
+openkernel info
 ```
 
-The `program.md` file is essentially a super lightweight "skill".
+## kernel code
 
-## Project structure
+kernel code is the terminal-native developer tool built on top of openkernel. It wraps the optimization engine with a Textual TUI purpose-built for kernel engineers:
 
 ```
-prepare.py      — constants, data prep + runtime utilities (do not modify)
-train.py        — model, optimizer, training loop (agent modifies this)
-program.md      — agent instructions
-pyproject.toml  — dependencies
++---------------------------------------------------------+
+|  kernel code v0.1          [H100]  [Triton]  [L1#23]   |
++----------------------+----------------------------------+
+|                      |  Optimization Trajectory          |
+|   Chat / Agent       |  ████████████▓▓░░░  1.8x        |
+|   Panel              +----------------------------------+
+|                      |  Profiling Summary                |
+|   > Analyzing        |  Bottleneck: memory_bound         |
+|     reference...     |  Bandwidth:  72% of peak          |
+|                      |  L2 hit:     45% (poor)           |
+|                      +----------------------------------+
+|   Critic: "L2 hit    |  Experiment Log                   |
+|   rate improved to   |  #1  1.0x  keep   baseline        |
+|   78%. Next: try     |  #3  1.3x  keep   shared mem      |
+|   register blocking" |  #5  1.8x  keep   vectorized      |
++----------------------+----------------------------------+
+|  [d]ashboard  [k]ernel diff  [r]oofline  [q]uit        |
++---------------------------------------------------------+
 ```
 
-## Design choices
+Press `d` to open a web dashboard with roofline plots, 3D optimization landscapes, strategy trees, and side-by-side kernel diffs with performance annotations.
 
-- **Single file to modify.** The agent only touches `train.py`. This keeps the scope manageable and diffs reviewable.
-- **Fixed time budget.** Training always runs for exactly 5 minutes, regardless of your specific platform. This means you can expect approx 12 experiments/hour and approx 100 experiments while you sleep. There are two upsides of this design decision. First, this makes experiments directly comparable regardless of what the agent changes (model size, batch size, architecture, etc). Second, this means that autoresearch will find the most optimal model for your platform in that time budget. The downside is that your runs (and results) become not comparable to other people running on other compute platforms.
-- **Self-contained.** No external dependencies beyond PyTorch and a few small packages. No distributed training, no complex configs. One GPU, one file, one metric.
+```bash
+kernel-code optimize --reference my_kernel.py --backend triton --no-mock
+kernel-code dashboard
+```
 
-## Platform support
+## Supported Models
 
-This code currently requires that you have a single NVIDIA GPU. In principle it is quite possible to support CPU, MPS and other platforms but this would also bloat the code. I'm not 100% sure that I want to take this on personally right now. People can reference (or have their agents reference) the full/parent nanochat repository that has wider platform support and shows the various solutions (e.g. a Flash Attention 3 kernels fallback implementation, generic device support, autodetection, etc.), feel free to create forks or discussions for other platforms and I'm happy to link to them here in the README in some new notable forks section or etc.
+| Model | Provider | Input / Output (per M tokens) | Recommended For |
+|-------|----------|-------------------------------|-----------------|
+| **MiniMax M2.5** (default) | MiniMax | $0.30 / $1.20 | General use, sweeps |
+| GLM-5.1 | Zhipu AI | $1.40 / $4.40 | Deep optimization, hard problems |
+| Kimi K2.5 | Moonshot AI | $0.50 / $2.80 | Speed, parallel exploration |
+| Qwen3.5 397B | Alibaba | $0.20 / $0.80 | Budget, local inference |
+| Claude Sonnet 4 | Anthropic | $3.00 / $15.00 | Structured output, frontier fallback |
 
-Seeing as there seems to be a lot of interest in tinkering with autoresearch on much smaller compute platforms than an H100, a few extra words. If you're going to try running autoresearch on smaller computers (Macbooks etc.), I'd recommend one of the forks below. On top of this, here are some recommendations for how to tune the defaults for much smaller models for aspiring forks:
+All models are accessed via OpenAI-compatible APIs through litellm. Set the appropriate environment variable (`MINIMAX_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.) and pass `--model <model-id>`.
 
-1. To get half-decent results I'd use a dataset with a lot less entropy, e.g. this [TinyStories dataset](https://huggingface.co/datasets/karpathy/tinystories-gpt4-clean). These are GPT-4 generated short stories. Because the data is a lot narrower in scope, you will see reasonable results with a lot smaller models (if you try to sample from them after training).
-2. You might experiment with decreasing `vocab_size`, e.g. from 8192 down to 4096, 2048, 1024, or even - simply byte-level tokenizer with 256 possibly bytes after utf-8 encoding.
-3. In `prepare.py`, you'll want to lower `MAX_SEQ_LEN` a lot, depending on the computer even down to 256 etc. As you lower `MAX_SEQ_LEN`, you may want to experiment with increasing `DEVICE_BATCH_SIZE` in `train.py` slightly to compensate. The number of tokens per fwd/bwd pass is the product of these two.
-4. Also in `prepare.py`, you'll want to decrease `EVAL_TOKENS` so that your validation loss is evaluated on a lot less data.
-5. In `train.py`, the primary single knob that controls model complexity is the `DEPTH` (default 8, here). A lot of variables are just functions of this, so e.g. lower it down to e.g. 4.
-6. You'll want to most likely use `WINDOW_PATTERN` of just "L", because "SSSL" uses alternating banded attention pattern that may be very inefficient for you. Try it.
-7. You'll want to lower `TOTAL_BATCH_SIZE` a lot, but keep it powers of 2, e.g. down to `2**14` (~16K) or so even, hard to tell.
+## Supported Backends
 
-I think these would be the reasonable hyperparameters to play with. Ask your favorite coding agent for help and copy paste them this guide, as well as the full source code.
+openkernel supports **Triton** and **CUDA**. The kernel engineer chooses the backend; the engine applies backend-specific optimization strategies:
 
-## Notable forks
+- **Triton**: `@triton.autotune` parametric search, Proton profiling, shared memory tiling
+- **CUDA**: Warp-level primitives, Tensor Core MMA, CUTLASS CuTe templates, inline PTX
 
-- [miolini/autoresearch-macos](https://github.com/miolini/autoresearch-macos) (MacOS)
-- [trevin-creator/autoresearch-mlx](https://github.com/trevin-creator/autoresearch-mlx) (MacOS)
-- [jsegov/autoresearch-win-rtx](https://github.com/jsegov/autoresearch-win-rtx) (Windows)
+Both backends share strategies for fusion discovery, algorithmic improvements, and memory access pattern optimization.
 
-## License
+## Architecture
 
-MIT
+openkernel uses a 3-level hybrid search:
+
+1. **Outer loop -- Strategy evolution**: Maintains a Pareto frontier of optimization strategies. Strategies that produce results survive; dominated strategies are pruned. Successful strategies are persisted to a skill library for future problems.
+2. **Middle loop -- World model search**: An LLM-managed tree of optimization intents. Decouples *what* to optimize from *how* to implement it. If a good strategy produces buggy code, the strategy survives for retry.
+3. **Inner loop -- Refinement**: Generator produces kernel code, evaluates on Modal (compile + benchmark + profile), Critic diagnoses bottlenecks from profiler data, Generator produces an improved version. Repeat.
+
+Two LLM roles -- Generator and Critic -- produce structured, inspectable reasoning. The Critic reads hardware profiler output and provides specific diagnoses ("L2 hit rate 45%, restructure to coalesced access with BLOCK_K=64 tiles").
+
+See [docs/openkernel-design.md](docs/openkernel-design.md) for the full system design.
+
+## KernelBench
+
+openkernel is designed to hill-climb [KernelBench](https://github.com/KernelBench/KernelBench) (Stanford, ICML 2025) -- 250 problems across 4 difficulty levels. We benchmark against KernelBench and publish comparison results against other systems.
+
+Metrics tracked: `fast_p` at p={1.0, 1.5, 2.0}, geomean speedup, correctness rate, cost per kernel, iterations to convergence.
+
+Results will be published when available.
+
+## Contributing
+
+openkernel is open-core under the **Apache 2.0** license. Contributions are welcome.
+
+kernel code is the commercial product built on top of openkernel.
+
+## Docs
+
+| File | Description |
+|------|-------------|
+| [docs/pitch.md](docs/pitch.md) | Project pitch and market thesis |
+| [docs/openkernel-design.md](docs/openkernel-design.md) | Full system architecture (5 layers, search engine, memory system) |
+| [docs/kernel-code-design.md](docs/kernel-code-design.md) | kernel code product design (TUI, dashboards, trace capture) |
+| [docs/visualization-design.md](docs/visualization-design.md) | Dashboard and visualization specifications |
+| [docs/research-synthesis.md](docs/research-synthesis.md) | Research survey of kernel optimization systems |
+| [docs/five-layer-cake.md](docs/five-layer-cake.md) | Detailed breakdown of the 5-layer architecture |
+| [docs/data-and-integrations.md](docs/data-and-integrations.md) | Data pipeline and external integrations |
+| [docs/codebase-structure.md](docs/codebase-structure.md) | Repository layout and module organization |
+| [docs/build-plan.md](docs/build-plan.md) | Build plan and implementation phases |
+| [docs/gtm.md](docs/gtm.md) | Go-to-market strategy |

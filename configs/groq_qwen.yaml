@@ -1,0 +1,21 @@
+# Groq with Qwen3-32B (strong reasoning model)
+# Good for: kernel optimization requiring deeper reasoning
+# Cost: free (Groq free tier)
+
+backend: triton
+eval_mode: fast
+max_iterations: 10
+max_retries_per_intent: 5
+
+model:
+  provider: groq
+  model_id: groq/qwen/qwen3-32b
+  temperature: 0.7
+  max_tokens: 4096
+
+modal:
+  gpu_type: L40S
+  timeout_seconds: 300
+
+capture_traces: true
+analytical_prescreen: true
