@@ -33,6 +33,8 @@ import warnings
 # Suppress litellm's async task cleanup warnings
 warnings.filterwarnings("ignore", message=".*coroutine.*was never awaited.*")
 warnings.filterwarnings("ignore", message=".*Task was destroyed.*")
+# Suppress asyncio ERROR logs (litellm pending tasks)
+logging.getLogger("asyncio").setLevel(logging.CRITICAL)
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -194,7 +196,7 @@ class MetaOptimizer:
         bridge = KernelAgentBridge(
             reference_source=reference_source,
             model_name=model,
-            num_workers=4,
+            num_workers=self._settings.num_workers,
             max_rounds=self._goal.iterations_per_round,
             hardware=self._goal.hardware,
             live_display=self._live_display,

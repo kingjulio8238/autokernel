@@ -68,11 +68,11 @@ def parse_goal(text: str) -> ParsedGoal:
         goal.hardware = "L40S"
         goal.explicit.add("hardware")
 
-    # --- Backend ---
-    if "cuda" in text.lower() and "triton" not in text.lower():
+    # --- Backend: only match explicit "backend cuda" or "use triton", not device="cuda" ---
+    if re.search(r"\b(?:backend|using|use|with)\s+cuda\b", text.lower()):
         goal.backend = "cuda"
         goal.explicit.add("backend")
-    elif "triton" in text.lower():
+    elif re.search(r"\b(?:backend|using|use|with)\s+triton\b", text.lower()):
         goal.backend = "triton"
         goal.explicit.add("backend")
 

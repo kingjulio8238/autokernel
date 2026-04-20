@@ -2495,6 +2495,11 @@ class ModelNew(nn.Module):
         # Parse what the user gave us
         goal = parse_goal(text)
 
+        # Suppress asyncio noise from litellm
+        import logging as _logging
+        _logging.getLogger("asyncio").setLevel(_logging.CRITICAL)
+        _logging.getLogger("openkernel.llm.provider").setLevel(_logging.CRITICAL)
+
         # Fill from settings only what's truly implicit
         if not goal.file:
             ref_path = _PROJECT_ROOT / "reference.py"
