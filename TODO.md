@@ -2,6 +2,15 @@
 
 ## High Priority
 
+### Fix Plot A: worker speedups not captured in round JSON
+Worker `round_*.json` files don't contain speedup data because KernelAgent's local eval uses `subprocess` (PASS/FAIL), not our Modal eval which measures speedup. Plot A shows 0.00x for all workers. Fix: either have Modal eval write speedup back to round JSON, or capture speedup from the worker's PASS/FAIL stdout parsing.
+
+### Fix chart persistence across autopilot rounds
+The live display is recreated each round, so Plot A and Plot C reset instead of growing. Should maintain a single LiveOptimizationDisplay across all rounds that accumulates data. The autopilot creates a new KernelAgentBridge per round which creates fresh state.
+
+### Plot A X-axis time intervals
+Currently shows just "0s" and "Ns" at the ends. Should show intermediate time markers (30s, 60s, 90s, etc.) along the X-axis as the chart extends.
+
 ### Dynamic GPU selection for Modal eval
 Currently Modal's `@app.function(gpu="L40S")` is hardcoded at deploy time. The KE's `default_gpu` setting only affects LLM prompts (context files, hardware specs), NOT the actual GPU the kernel runs on. To support H100/A100 eval:
 - Option A: Deploy separate Modal functions per GPU (`eval_kernel_h100`, `eval_kernel_a100`)
@@ -38,6 +47,7 @@ Workers that start late (staggered spawn) begin mid-axis. Consider a synchronize
 - `_cmd_autopilot` method in shell.py (replaced by unified `/optimize`)
 - `_step_quick_demo` and `_step_whats_next` in onboarding.py (absorbed by welcome)
 - `_print_post_optimization_summary` in shell.py (replaced by kernel profile)
+- `_print_welcome` in shell.py (replaced by A2 hero)
 
 ### Episode-based context (Slate-inspired)
 Instead of lossy meta-reflect summaries between rounds, pass structured "episodes" (kernel code + profiling data + error traces) forward. Would improve carry-forward quality.
