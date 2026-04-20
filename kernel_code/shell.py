@@ -1754,9 +1754,9 @@ class KernelCodeShell:
         from kernel_code.run_log import RunLogger
         run_logger = RunLogger()
         run_logger.start_run(
-            command="/autopilot",
+            command="/optimize",
             config={
-                "command": "/autopilot",
+                "command": "/optimize",
                 "model": model,
                 "hardware": hw,
                 "backend": be,

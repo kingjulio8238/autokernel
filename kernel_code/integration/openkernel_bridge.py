@@ -71,7 +71,7 @@ class _CallbackOrchestrator(Orchestrator):
         self,
         reference_code: str,
         backend: str = "triton",
-        hardware: str = "H100",
+        hardware: str = "L40S",
     ) -> OptimizationResult:
         start_time = time.monotonic()
         tree = IntentTree(root_description=f"Optimize kernel for {hardware} ({backend})")
@@ -212,8 +212,8 @@ class OpenKernelBridge:
         session_id: str | None = None,
         *,
         problem_label: str = "custom kernel",
-        hardware: str = "H100",
-        backend: str = "triton",
+        hardware: str | None = None,
+        backend: str | None = None,
         hooks: "HookRegistry | None" = None,
         progress: "OptimizationProgress | None" = None,
         live_display: "LiveOptimizationDisplay | None" = None,
@@ -223,6 +223,12 @@ class OpenKernelBridge:
         self._config = config
         self._session_id = session_id or uuid.uuid4().hex[:12]
         self._problem_label = problem_label
+        # Resolve from settings if not explicitly passed
+        if hardware is None or backend is None:
+            from kernel_code.settings import load_settings
+            _s = load_settings()
+            hardware = hardware or _s.default_gpu
+            backend = backend or _s.default_backend
         self._hardware = hardware
         self._backend = backend
         self._hooks = hooks
