@@ -589,6 +589,14 @@ class KernelCodeShell:
             if stripped in ("1", "2", "3") and self._pending_next_steps:
                 self._pick_next_step(int(stripped))
                 return
+
+            # Handle action row shortcuts when no next steps pending
+            if stripped in ("1", "2", "3", "4") and not self._pending_next_steps:
+                _action_map = {"1": "/optimize", "2": "/skills", "3": "/dashboard", "4": "/help"}
+                cmd = _action_map.get(stripped, "")
+                if cmd:
+                    self._dispatch_command(cmd)
+                    return
             # Smart optimize: "optimize @file.py for H100 2x $10"
             if self._is_optimize_intent(stripped):
                 self._smart_optimize(stripped)
