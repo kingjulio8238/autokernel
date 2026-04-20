@@ -281,8 +281,6 @@ def render_welcome(
     )
     motd_panel = _motd_panel(motd)
     actions = _actions_row(returning)
-    prompt = Text()
-    prompt.append("\u25b8 ", style=f"bold {ACCENT}")
 
     con.print()
     con.print(top)
@@ -291,6 +289,4 @@ def render_welcome(
     con.print()
     con.print(Rule(style="dim"))
     con.print(actions)
-    con.print()
-    con.print(prompt)
     con.print()
