@@ -127,6 +127,19 @@ class MetaOptimizer:
             self._round_history.append(round_result)
             self._total_iterations += round_result.get("total", 0)
 
+            # Print plot C between rounds
+            if len(self._round_history) > 1:
+                try:
+                    from kernel_code.worker_plots import render_round_columns
+                    if self._live_display and self._live_display._live:
+                        self._live_display._live.stop()
+                    self._console.print(render_round_columns(self._round_history))
+                    if self._live_display:
+                        self._live_display._live = None
+                        self._live_display.start()
+                except Exception:
+                    pass
+
             # Update best
             round_best = round_result.get("best_speedup", 0.0)
             if round_best > self._best_speedup:
