@@ -151,6 +151,7 @@ if _HAS_PROMPT_TOOLKIT:
                     ("/doctor", "Environment health check"),
                     ("/setup", "Re-run onboarding"),
                     ("/theme", "Terminal theme info"),
+                    ("/clear", "Clear conversation and start fresh"),
                     ("/help", "Show all commands"),
                     ("/quit", "Exit kernel code"),
                 ]
@@ -354,6 +355,7 @@ class KernelCodeShell:
             "/profile": self._cmd_profile_ref,
             "/roofline": self._cmd_roofline,
             "/advisor": self._cmd_advisor,
+            "/clear": self._cmd_clear,
             "/help": self._cmd_help,
             "/quit": self._cmd_quit,
             "/exit": self._cmd_quit,
@@ -2531,6 +2533,52 @@ class ModelNew(nn.Module):
         )
         self._console.print(Syntax(diff_text, "diff", theme="monokai"))
         self._console.print()
+
+    def _cmd_clear(self, _args_str: str) -> None:
+        """/clear — clear conversation history and start fresh."""
+        # Clear conversation history
+        self._conversation = ConversationHistory()
+
+        # Clear session state
+        self._session_data = {}
+        self._runs = []
+        self._best_run = None
+        self._pending_next_steps = []
+        self._total_cost = 0.0
+
+        # Reset agent loop (forces re-creation with fresh context)
+        self._agent_loop = None
+
+        # Reset cost tracker
+        self._cost_tracker = CostTracker()
+
+        # New session ID
+        self._session_id = uuid.uuid4().hex[:8]
+
+        # Clear terminal
+        import subprocess
+        subprocess.run(["clear"], check=False)
+
+        # Re-render welcome
+        from kernel_code.welcome import (
+            render_welcome, detect_hw, pick_motd, recent_runs_from_sessions,
+        )
+        from kernel_code.settings import inject_api_keys as _inject
+        _inject(self._settings)
+        _hw = detect_hw(settings=self._settings)
+        _version = "0.1.0"
+        try:
+            import importlib.metadata
+            _version = importlib.metadata.version("openkernel")
+        except Exception:
+            pass
+        _motd = pick_motd(
+            returning=True,
+            last_version_seen=getattr(self._settings, "last_version_seen", None),
+            current_version=_version,
+            recent_runs=recent_runs_from_sessions(limit=3),
+        )
+        render_welcome(self._console, returning=True, hw=_hw, motd=_motd, version=_version)
 
     def _cmd_quit(self, _args_str: str) -> None:
         """/quit or /exit -- exit the shell."""
