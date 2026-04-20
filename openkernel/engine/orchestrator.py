@@ -202,7 +202,7 @@ class Orchestrator:
         self,
         reference_code: str,
         backend: str = "triton",
-        hardware: str = "H100",
+        hardware: str = "L40S",
     ) -> OptimizationResult:
         """Run the full world-model-guided optimization loop.
 

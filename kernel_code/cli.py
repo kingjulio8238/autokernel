@@ -115,8 +115,8 @@ def shell(ctx: click.Context, session: str | None) -> None:
 @click.option(
     "--gpu",
     type=click.Choice(["H100", "A100-80GB", "A100-40GB", "L40S"]),
-    default="H100",
-    help="GPU type for Modal eval.",
+    default=None,
+    help="GPU type for Modal eval (default: from settings).",
 )
 def optimize(
     reference: str | None,
