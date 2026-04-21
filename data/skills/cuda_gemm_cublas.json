@@ -1,0 +1,37 @@
+{
+  "id": "cuda_gemm_cublas",
+  "name": "GEMM via cuBLAS/cuBLASLt (CUDA)",
+  "trigger": "Standard dense GEMM, especially large matrices (>1024) where cuBLAS is near-optimal",
+  "approach": "For standard GEMM, calling cuBLASLt directly with pre-cached descriptors and algo heuristic search eliminates PyTorch dispatch overhead. For non-standard GEMM (batched, strided, fused epilogue), use CUTLASS CuTe templates. Focus on epilogue fusion (bias add, activation) into the GEMM output loop to avoid extra memory passes.",
+  "backend": "cuda",
+  "evidence": [
+    {
+      "problem": "L1/custom",
+      "speedup": 0.7494,
+      "hardware": "L40S",
+      "round": 3,
+      "strategy": "Switch to algorithmic change with fused operations and shared memory tiling.",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/custom",
+      "speedup": 0.9286,
+      "hardware": "L40S",
+      "round": 18,
+      "strategy": "explore persistent kernel design eliminating buffers with direct SM mapping and fused operations.",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    }
+  ],
+  "code_template": "import torch\nimport torch.nn as nn\nfrom torch.utils.cpp_extension import load_inline\n\ncuda_src = \"\"\"\n#include <torch/extension.h>\n#include <cublas_v2.h>\n\nstatic cublasHandle_t handle = nullptr;\n\ntorch::Tensor cublas_gemm(torch::Tensor A, torch::Tensor B) {\n    if (!handle) cublasCreate(&handle);\n    int M = A.size(0), K = A.size(1), N = B.size(1);\n    auto C = torch::empty({M, N}, A.options());\n    float alpha = 1.0f, beta = 0.0f;\n    // cuBLAS uses column-major: C = A @ B -> C^T = B^T @ A^T\n    cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,\n                N, M, K, &alpha,\n                B.data_ptr<float>(), N,\n                A.data_ptr<float>(), K,\n                &beta, C.data_ptr<float>(), N);\n    return C;\n}\n\"\"\"\n\ncpp_src = \"torch::Tensor cublas_gemm(torch::Tensor A, torch::Tensor B);\"\n\ngemm_module = load_inline(name='cublas_gemm', cpp_sources=cpp_src,\n                          cuda_sources=cuda_src, extra_ldflags=['-lcublas'],\n                          functions=['cublas_gemm'])\n\nclass ModelNew(nn.Module):\n    def __init__(self):\n        super().__init__()\n\n    def forward(self, A, B):\n        return gemm_module.cublas_gemm(A.contiguous(), B.contiguous())",
+  "tags": [
+    "gemm",
+    "matmul",
+    "compute_bound",
+    "cublas",
+    "cutlass",
+    "epilogue_fusion"
+  ],
+  "pitfalls": []
+}

@@ -65,6 +65,7 @@ _FIELD_TYPES: dict[str, type] = {
     "hf_token": str,
     "modal_token_id": str,
     "modal_token_secret": str,
+    "ollama_base_url": str,
 }
 
 
@@ -86,7 +87,7 @@ class KernelCodeSettings:
     max_rounds: int = 10              # max refinement rounds per worker
     iterations_per_round: int = 5     # iterations per autopilot round
     max_autopilot_rounds: int = 100   # safety cap (budget/time are the real limits)
-    engine: str = "kernel-agent"      # "kernel-agent" or "native"
+    engine: str = "kernel-agent"      # "kernel-agent", "kernel-agent-opt", or "native"
 
     # Budget
     max_budget: float | None = None   # per-session spending cap ($)
@@ -116,6 +117,7 @@ class KernelCodeSettings:
     hf_token: str | None = None
     modal_token_id: str | None = None
     modal_token_secret: str | None = None
+    ollama_base_url: str = "http://localhost:11434"
 
     # Internal: tracks which files were merged (in order)
     source_files: list[str] = field(default_factory=list)
@@ -297,6 +299,7 @@ _API_KEY_ENV_MAP = {
     "hf_token": "HF_TOKEN",
     "modal_token_id": "MODAL_TOKEN_ID",
     "modal_token_secret": "MODAL_TOKEN_SECRET",
+    "ollama_base_url": "OLLAMA_BASE_URL",
 }
 
 

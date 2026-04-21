@@ -151,6 +151,9 @@ if _HAS_PROMPT_TOOLKIT:
                     ("/doctor", "Environment health check"),
                     ("/setup", "Re-run onboarding"),
                     ("/theme", "Terminal theme info"),
+                    ("/analysis", "Analyze last optimization run"),
+                    ("/batch", "Run batch optimization across problems"),
+                    ("/checkpoint", "List/inspect checkpoints"),
                     ("/clear", "Clear conversation and start fresh"),
                     ("/help", "Show all commands"),
                     ("/quit", "Exit kernel code"),
@@ -169,6 +172,11 @@ if _HAS_PROMPT_TOOLKIT:
                     ("best", "Best optimized kernel"),
                     ("results", "Summary table + chart"),
                     ("run", "Details of run N"),
+                    ("sol", "SOL trajectory"),
+                    ("strategy", "Strategy timeline"),
+                    ("round", "Details of round N"),
+                    ("profile", "Profile metrics"),
+                    ("evidence", "Evidence summary"),
                 ]
                 for sub, desc in subs:
                     full = f"/show {sub}"
@@ -249,6 +257,8 @@ class KernelCodeShell:
         self._best_run: dict | None = None
         self._session_data: dict = {}
         self._total_cost: float = 0.0
+        self._last_batch_result = None
+        self._last_auto_result: Any = None  # Last AutoResult from /optimize --auto
         self._budget = BudgetTracker()
         self._cost_tracker = CostTracker()
         self._active_skill: dict | None = None
@@ -355,7 +365,10 @@ class KernelCodeShell:
             "/profile": self._cmd_profile_ref,
             "/roofline": self._cmd_roofline,
             "/advisor": self._cmd_advisor,
+            "/batch": self._cmd_batch,
+            "/analysis": self._cmd_analysis,
             "/clear": self._cmd_clear,
+            "/checkpoint": self._cmd_checkpoint,
             "/help": self._cmd_help,
             "/quit": self._cmd_quit,
             "/exit": self._cmd_quit,
@@ -856,11 +869,11 @@ class KernelCodeShell:
         self._console.print()
 
     def _cmd_show(self, args_str: str) -> None:
-        """/show best | results | run N"""
+        """/show best | results | run N | sol | strategy | round N | profile | evidence"""
         tokens = args_str.strip().split()
         if not tokens:
             self._console.print(
-                "[dim]Usage:[/dim] /show best | results | run N"
+                "[dim]Usage:[/dim] /show best | results | run N | sol | strategy | round N | profile | evidence"
             )
             return
 
@@ -875,12 +888,24 @@ class KernelCodeShell:
                 run_num = int(tokens[1])
                 self._show_run(run_num)
             except ValueError:
-                self._console.print(
-                    "[red]Error:[/red] run number must be an integer."
-                )
+                self._console.print("[red]Error:[/red] run number must be an integer.")
+        elif sub == "sol":
+            self._show_sol()
+        elif sub == "strategy":
+            self._show_strategy()
+        elif sub == "round" and len(tokens) >= 2:
+            try:
+                round_num = int(tokens[1])
+                self._show_round_detail(round_num)
+            except ValueError:
+                self._console.print("[red]Error:[/red] round number must be an integer.")
+        elif sub == "profile":
+            self._show_profile()
+        elif sub == "evidence":
+            self._show_evidence()
         else:
             self._console.print(
-                "[dim]Usage:[/dim] /show best | results | run N"
+                "[dim]Usage:[/dim] /show best | results | run N | sol | strategy | round N | profile | evidence"
             )
 
     def _cmd_compare(self, _args_str: str) -> None:
@@ -1014,6 +1039,11 @@ class KernelCodeShell:
                 "Display summary table of current session",
             ),
             ("/show run N", "Display details of run N"),
+            ("/show sol", "Display SOL trajectory from last run"),
+            ("/show strategy", "Display strategy progression timeline"),
+            ("/show round N", "Display detailed metrics for round N"),
+            ("/show profile", "Display profiling metrics from last run"),
+            ("/show evidence", "Display skill evidence rankings"),
             (
                 "/compare",
                 "Compare current best to baseline (side-by-side)",
@@ -1064,6 +1094,11 @@ class KernelCodeShell:
             ("/models", "Browse & select LLM models"),
             ("/advisor", "Show 3 next optimization suggestions"),
             ("/theme", "Show/change terminal theme"),
+            ("/analysis [log_file]", "Analyze completed run (issues, recommendations)"),
+            ("/batch run DIR [--budget N]", "Run batch optimization on multiple kernels"),
+            ("/batch results", "Show last batch results dashboard"),
+            ("/checkpoint list", "List saved optimization checkpoints"),
+            ("/checkpoint inspect N", "Inspect checkpoint for round N"),
             ("/help", "Show this help message"),
             ("/quit, /exit", "Exit the shell"),
         ]
@@ -1455,6 +1490,9 @@ class KernelCodeShell:
     def _has_provider_key(self, provider: str, env_key: str) -> bool:
         """Check if an API key is configured for a provider."""
         import os
+        # Ollama is local — always available if server is running
+        if provider == "ollama":
+            return True
         # Check env var (non-empty string)
         env_val = os.environ.get(env_key or "")
         if env_val:
@@ -1824,6 +1862,8 @@ class KernelCodeShell:
                 stop_reason=result.stop_reason if 'result' in dir() else "interrupted"
             )
 
+        self._last_auto_result = result
+
         # --- Results ---
         self._console.print()
         if result.target_reached:
@@ -1835,19 +1875,26 @@ class KernelCodeShell:
                 f"  [white]Best: {result.best_speedup:.2f}x "
                 f"(target: {target:.1f}x)[/white]"
             )
+        _r_s = "" if result.rounds_completed == 1 else "s"
+        _i_s = "" if result.total_iterations == 1 else "s"
         self._console.print(
-            f"  [white]{result.rounds_completed} rounds, "
-            f"{result.total_iterations} iterations, "
+            f"  [white]{result.rounds_completed} round{_r_s}, "
+            f"{result.total_iterations} iteration{_i_s}, "
             f"${result.total_cost_usd:.2f}, "
             f"{int(result.elapsed_seconds)}s[/white]"
         )
 
-        if result.best_kernel:
+        if result.best_kernel and result.best_speedup > 1.02:
             out_name = "reference_optimized.py"
             out_path = _PROJECT_ROOT / out_name
             out_path.write_text(result.best_kernel)
             self._console.print(
                 f"  [#4ade80]Best kernel saved: {out_name}[/#4ade80]"
+            )
+        elif result.best_kernel:
+            self._console.print(
+                f"  [#999999]No kernel beat baseline (best {result.best_speedup:.2f}x) "
+                f"— reference_optimized.py unchanged.[/#999999]"
             )
 
         # Finalize run log
@@ -2435,25 +2482,64 @@ class ModelNew(nn.Module):
             kernel_source = reference_source.replace("def ref_kernel(", "def kernel_function(")
             pf = "gpumode"
 
-        self._console.print("  \u23bf  [#999999]Evaluating on Modal...[/#999999]")
+        self._console.print("  \u23bf  [#999999]Evaluating on Modal (5 trials for stability)...[/#999999]")
 
+        # Multi-trial baseline: run N times, take median + report variance
+        trials = []
         try:
             import modal
             eval_fn = modal.Function.from_name("openkernel-eval", "eval_kernel_on_gpu")
-            result = eval_fn.remote(
-                kernel_source=kernel_source,
-                reference_source=reference_source,
-                eval_mode="fast",
-                problem_format=pf,
-            )
+            for i in range(5):
+                r = eval_fn.remote(
+                    kernel_source=kernel_source,
+                    reference_source=reference_source,
+                    eval_mode="fast",
+                    problem_format=pf,
+                )
+                if r.get("ref_runtime_us", 0) > 0:
+                    trials.append(r)
         except Exception as exc:
             self._console.print(f"  [#ff6b80]Profile failed: {exc}[/#ff6b80]")
             return
 
-        # Store profile for use in subsequent /optimize
+        if not trials:
+            self._console.print(f"  [#ff6b80]Profile failed: no valid measurements[/#ff6b80]")
+            return
+
+        # Compute median + variance of reference runtime
+        import statistics
+        ref_times = [t.get("ref_runtime_us", 0.0) for t in trials]
+        ref_median = statistics.median(ref_times)
+        ref_stdev = statistics.stdev(ref_times) if len(ref_times) > 1 else 0.0
+        ref_cv = (ref_stdev / ref_median * 100) if ref_median > 0 else 0.0
+
+        # Use median trial as the representative result
+        if ref_median in ref_times:
+            mid_idx = ref_times.index(ref_median)
+        else:
+            mid_idx = len(trials) // 2
+        result = trials[mid_idx]
+        result["ref_runtime_us"] = ref_median
+        result["ref_runtime_stdev_us"] = ref_stdev
+        result["ref_runtime_cv_pct"] = ref_cv
+        result["ref_trials"] = len(trials)
+
         self._last_profile = result
 
-        # Display profile
+        # Warn if variance is high (measurement noise dominates)
+        if ref_cv > 20:
+            self._console.print(
+                f"  [#ffc107]! High baseline variance: "
+                f"median={ref_median:.0f}\u03bcs \u00b1 {ref_stdev:.0f}\u03bcs ({ref_cv:.0f}% CV) \u2014 "
+                f"kernel too small, launch overhead dominates[/#ffc107]"
+            )
+            self._console.print(
+                f"  [#999999]  Speedup measurements will be unreliable below ~{ref_stdev*2:.0f}\u03bcs delta[/#999999]"
+            )
+
+        # Display profile — this is the initial reference-vs-reference
+        # baseline characterization (no candidate kernel yet), so skip the
+        # Speedup/delta rows and just show the reference runtime.
         from kernel_code.kernel_profile import render_kernel_profile
         render_kernel_profile(
             speedup=result.get("speedup", 0.0),
@@ -2462,6 +2548,7 @@ class ModelNew(nn.Module):
             profile=result.get("profile", {}),
             hardware=self._settings.default_gpu,
             console=self._console,
+            is_baseline=True,
         )
 
         # Show guidance
@@ -2477,12 +2564,14 @@ class ModelNew(nn.Module):
 
         args = args_str.strip().lower()
         if "--me" in args:
-            # Show user's best kernel on the roofline
+            # Show user's best kernel on the roofline with measured profile data
             best = self._best_run.get("speedup", 0.0) if self._best_run else 0.0
+            profile = self._best_run.get("profile", {}) if self._best_run else {}
             render_roofline(
                 self._console, view="me",
                 user_speedup=best, user_label="your kernel",
                 hardware=self._settings.default_gpu,
+                profile=profile,
             )
         elif "--mem" in args:
             render_roofline(
@@ -2534,6 +2623,31 @@ class ModelNew(nn.Module):
         self._console.print(Syntax(diff_text, "diff", theme="monokai"))
         self._console.print()
 
+    def _cmd_analysis(self, args_str: str) -> None:
+        """/analysis [log_file] — analyze a completed optimization run."""
+        from pathlib import Path
+        from kernel_code.run_analysis import analyze_run
+
+        log_path = args_str.strip()
+
+        if not log_path:
+            # Auto-detect most recent run log
+            runs_dir = Path(".kernel-code/runs")
+            if runs_dir.is_dir():
+                logs = sorted(runs_dir.glob("*_smart.log"), key=lambda p: p.name, reverse=True)
+                if logs:
+                    log_path = str(logs[0])
+                    self._console.print(f"  [dim]Analyzing latest run: {logs[0].name}[/dim]")
+                else:
+                    self._console.print("[dim]No run logs found. Run /optimize first.[/dim]")
+                    return
+            else:
+                self._console.print("[dim]No runs directory found.[/dim]")
+                return
+
+        report = analyze_run(log_path)
+        self._console.print(report)
+
     def _cmd_clear(self, _args_str: str) -> None:
         """/clear — clear conversation history and start fresh."""
         # Clear conversation history
@@ -2579,6 +2693,160 @@ class ModelNew(nn.Module):
             recent_runs=recent_runs_from_sessions(limit=3),
         )
         render_welcome(self._console, returning=True, hw=_hw, motd=_motd, version=_version)
+
+    def _cmd_checkpoint(self, args_str: str) -> None:
+        """/checkpoint list | inspect N"""
+        tokens = args_str.strip().split()
+        if not tokens:
+            self._console.print(
+                "[dim]Usage:[/dim] /checkpoint list | inspect N"
+            )
+            return
+
+        sub = tokens[0].lower()
+
+        if sub == "list":
+            self._checkpoint_list()
+        elif sub == "inspect" and len(tokens) >= 2:
+            try:
+                round_num = int(tokens[1])
+                self._checkpoint_inspect(round_num)
+            except ValueError:
+                self._console.print("[red]Error:[/red] round number must be an integer.")
+        else:
+            self._console.print(
+                "[dim]Usage:[/dim] /checkpoint list | inspect N"
+            )
+
+    def _checkpoint_list(self) -> None:
+        """List all saved checkpoints."""
+        import json
+        from pathlib import Path
+
+        ckpt_dir = Path(os.environ.get("OPENKERNEL_CHECKPOINT_DIR", ""))
+        if not ckpt_dir.is_dir():
+            self._console.print("[dim]No checkpoint directory configured.[/dim]")
+            self._console.print(
+                "[dim]Set OPENKERNEL_CHECKPOINT_DIR env var to enable checkpointing.[/dim]"
+            )
+            return
+
+        # Find all round_*.json files
+        round_files = sorted(ckpt_dir.glob("round_*.json"))
+        if not round_files:
+            self._console.print(f"[dim]No checkpoints in {ckpt_dir}[/dim]")
+            return
+
+        from rich.table import Table
+
+        table = Table(
+            title=f"Checkpoints ({ckpt_dir.name})",
+            show_header=True,
+            header_style="bold white",
+            border_style="dim",
+        )
+        table.add_column("Round", justify="right", width=6)
+        table.add_column("Best Speedup", justify="right", width=12)
+        table.add_column("LLM Cost", justify="right", width=8)
+        table.add_column("Strategy", width=30)
+        table.add_column("Iterations", justify="right", width=10)
+
+        for rf in round_files:
+            try:
+                data = json.loads(rf.read_text())
+                rnd = data.get("round_num", "?")
+                speedup = data.get("best_speedup", 0.0)
+                cost = data.get("total_cost_usd", 0.0)
+                strategy = data.get("current_strategy", "")
+                iters = data.get("total_iterations", 0)
+
+                # Highlight best
+                sp_style = "[bold #4eba65]" if speedup == max(
+                    json.loads(f.read_text()).get("best_speedup", 0.0)
+                    for f in round_files
+                ) else ""
+
+                table.add_row(
+                    str(rnd),
+                    f"{speedup:.2f}x",
+                    f"${cost:.2f}",
+                    (strategy[:28] + "\u2026") if len(strategy) > 28 else strategy,
+                    str(iters),
+                )
+            except (json.JSONDecodeError, Exception):
+                table.add_row(rf.stem, "[red]corrupt[/red]", "?", "?", "?")
+
+        self._console.print()
+        self._console.print(table)
+
+        # Show meta info
+        meta_path = ckpt_dir / "checkpoint_meta.json"
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text())
+                self._console.print(
+                    f"  [dim]Latest: round {meta.get('latest_round', '?')}, "
+                    f"best {meta.get('best_speedup', 0.0):.2f}x[/dim]"
+                )
+            except Exception:
+                pass
+
+        self._console.print()
+
+    def _checkpoint_inspect(self, round_num: int) -> None:
+        """Inspect a specific checkpoint."""
+        import json
+        from pathlib import Path
+
+        ckpt_dir = Path(os.environ.get("OPENKERNEL_CHECKPOINT_DIR", ""))
+        if not ckpt_dir.is_dir():
+            self._console.print("[dim]No checkpoint directory configured.[/dim]")
+            return
+
+        round_file = ckpt_dir / f"round_{round_num:03d}.json"
+        if not round_file.exists():
+            self._console.print(f"[red]Checkpoint for round {round_num} not found.[/red]")
+            return
+
+        try:
+            data = json.loads(round_file.read_text())
+        except json.JSONDecodeError:
+            self._console.print(f"[red]Checkpoint file is corrupt.[/red]")
+            return
+
+        from rich.table import Table
+
+        table = Table(
+            title=f"Checkpoint \u2014 Round {round_num}",
+            show_header=False,
+            border_style="dim",
+        )
+        table.add_column("Key", style="dim", width=20)
+        table.add_column("Value", ratio=1)
+
+        table.add_row("Round", str(data.get("round_num", "?")))
+        table.add_row("Best Speedup", f"[bold]{data.get('best_speedup', 0.0):.2f}x[/bold]")
+        table.add_row("LLM Cost", f"${data.get('total_cost_usd', 0.0):.2f}")
+        table.add_row("Iterations", str(data.get("total_iterations", 0)))
+        table.add_row("Strategy", str(data.get("current_strategy", "")))
+
+        # Show round history summary
+        opt_log = data.get("optimization_log", [])
+        if opt_log:
+            table.add_row("Log Rounds", str(len(opt_log)))
+            speedups = [r.get("speedup", 0.0) for r in opt_log if r.get("speedup", 0.0) > 0]
+            if speedups:
+                table.add_row("Speedup Range", f"{min(speedups):.2f}x \u2014 {max(speedups):.2f}x")
+
+        # Show if best kernel exists
+        kernel = data.get("best_kernel", "")
+        if kernel:
+            lines = kernel.count("\n") + 1
+            table.add_row("Best Kernel", f"{lines} lines")
+
+        self._console.print()
+        self._console.print(table)
+        self._console.print()
 
     def _cmd_quit(self, _args_str: str) -> None:
         """/quit or /exit -- exit the shell."""
@@ -2751,6 +3019,99 @@ class ModelNew(nn.Module):
         self._console.print(f"  \u23bf  [#999999]Profiling reference...[/#999999]")
         self._cmd_profile_ref("")
 
+        # --- Abort if profile produced no valid baseline ---
+        last_prof_ok = getattr(self, "_last_profile", {}) or {}
+        if last_prof_ok.get("ref_runtime_us", 0.0) <= 0.0:
+            self._console.print()
+            self._console.print(
+                "  [#ff6b80]Aborting optimize:[/#ff6b80] "
+                "[white]baseline profile did not produce a valid runtime measurement.[/white]"
+            )
+            self._console.print(
+                "  [#999999]Check Modal connectivity, that the reference runs standalone, "
+                "and that dtypes are supported on the target GPU.[/#999999]"
+            )
+            return
+
+        # --- Unwinnable problem pre-check ---
+        try:
+            from kernel_code.problem_classifier import classify_problem
+            ref_src = (_PROJECT_ROOT / "reference.py").read_text()
+            classif = classify_problem(ref_src)
+            last_prof = getattr(self, "_last_profile", {}) or {}
+            ref_us = last_prof.get("ref_runtime_us", 0.0)
+            ref_cv = last_prof.get("ref_runtime_cv_pct", 0.0)
+
+            warnings_list = []
+            if ref_us > 0 and ref_us < 50:
+                warnings_list.append(
+                    f"Reference runtime is only {ref_us:.0f}\u03bcs \u2014 kernel launch "
+                    f"overhead (~10-50\u03bcs) dominates actual work."
+                )
+            if ref_cv > 20:
+                warnings_list.append(
+                    f"Baseline variance is {ref_cv:.0f}% CV \u2014 measurements are unreliable."
+                )
+            if classif.is_launch_bound_likely:
+                warnings_list.append(
+                    f"Classified as launch-bound ({classif.op_type.value}, "
+                    f"~{classif.estimated_tensor_elements:,} elements). "
+                    f"PyTorch's fused elementwise kernels are already near-optimal at this size."
+                )
+
+            if warnings_list:
+                self._console.print()
+                self._console.print("  [#ffc107]\u26a0  Unwinnable problem warning:[/#ffc107]")
+                for w in warnings_list:
+                    self._console.print(f"     [#ffc107]\u2022 {w}[/#ffc107]")
+                self._console.print(
+                    "  [#999999]Expected outcome: optimization will likely not beat baseline. "
+                    "Continuing wastes budget.[/#999999]"
+                )
+                self._console.print()
+                confirm = self._console.input(
+                    "  [#ffc107]Continue anyway? (y/n): [/#ffc107]"
+                ).strip().lower()
+                if confirm not in ("y", "yes"):
+                    self._console.print("  [#999999]Cancelled \u2014 try a larger / more complex kernel.[/#999999]")
+                    return
+        except Exception:
+            pass  # Non-critical
+
+        # --- Backend suggestion based on classifier ---
+        # Some problem types have a strong backend preference. Histograms and
+        # scatter-heavy ops are CUDA-native; Triton's int64 atomics have sharp
+        # edges. Suggest (don't silently override) — classifier pattern-matching
+        # is imperfect, the user keeps final say. Skip if user explicitly set
+        # the backend (respected intent).
+        try:
+            patterns = " ".join(getattr(classif, "detected_patterns", []) or [])
+            is_atomic_heavy = "bincount" in patterns or "scatter-add" in patterns
+            backend_was_explicit = "backend" in getattr(goal, "explicit", set())
+            if is_atomic_heavy and goal.backend == "triton" and not backend_was_explicit:
+                self._console.print()
+                self._console.print(
+                    "  [#22d3ee]Backend suggestion:[/#22d3ee] "
+                    "[white]this looks like a histogram / scatter-add problem.[/white]"
+                )
+                self._console.print(
+                    "  [#999999]Triton's int64 atomics can be finicky here; "
+                    "CUDA has native atomicAdd and typically converges faster.[/#999999]"
+                )
+                confirm = self._console.input(
+                    "  [#22d3ee]Switch backend to CUDA? (y/n) [/#22d3ee]"
+                ).strip().lower()
+                if confirm in ("y", "yes"):
+                    goal.backend = "cuda"
+                    self._console.print("  [#4eba65]Backend set to CUDA.[/#4eba65]")
+                else:
+                    self._console.print(
+                        "  [#999999]Keeping Triton. If all workers fail, "
+                        "try CUDA next run.[/#999999]"
+                    )
+        except Exception:
+            pass  # Non-critical
+
         # --- Run autopilot ---
         from kernel_code.goal_spec import GoalSpec
         from kernel_code.auto_optimizer import MetaOptimizer
@@ -2760,7 +3121,7 @@ class ModelNew(nn.Module):
             target_speedup=goal.target_speedup,
             max_budget_usd=goal.budget_usd,
             max_time_seconds=goal.time_limit_seconds or None,
-            max_rounds=self._settings.max_autopilot_rounds,
+            max_rounds=self._settings.max_rounds,
             reference_path=str(_PROJECT_ROOT / "reference.py"),
             hardware=goal.hardware,
             backend=goal.backend,
@@ -2803,26 +3164,39 @@ class ModelNew(nn.Module):
                 stop_reason=result.stop_reason if 'result' in dir() else "interrupted"
             )
 
-        # --- Results ---
-        from kernel_code.kernel_profile import render_kernel_profile
-        render_kernel_profile(
-            speedup=result.best_speedup,
-            console=self._console,
-        )
+        self._last_auto_result = result
 
+        # --- Result summary (compact) ---
+        self._console.print()
         if result.target_reached:
             self._console.print(
                 f"  [bold #4eba65]TARGET REACHED: {result.best_speedup:.2f}x[/bold #4eba65]"
             )
         else:
             self._console.print(
-                f"  [white]Best: {result.best_speedup:.2f}x (target: {goal.target_speedup:.1f}x)[/white]"
+                f"  [white]Best: {result.best_speedup:.2f}x "
+                f"(target: {goal.target_speedup:.1f}x) "
+                f"\u00b7 {result.rounds_completed} round{'' if result.rounds_completed == 1 else 's'} "
+                f"\u00b7 ${result.total_cost_usd:.2f} "
+                f"\u00b7 {int(result.elapsed_seconds)}s[/white]"
             )
 
-        if result.best_kernel:
+        if result.best_kernel and result.best_speedup > 1.02:
             out_path = _PROJECT_ROOT / "reference_optimized.py"
             out_path.write_text(result.best_kernel)
-            self._console.print(f"  [#4eba65]Saved: reference_optimized.py[/#4eba65]")
+            self._console.print(f"  [#4eba65]Saved:[/#4eba65] reference_optimized.py")
+        elif result.best_kernel:
+            self._console.print(
+                f"  [#999999]No kernel beat baseline (best {result.best_speedup:.2f}x) "
+                f"— reference_optimized.py unchanged.[/#999999]"
+            )
+
+        if result.evidence_added > 0:
+            self._console.print(
+                f"  [#4eba65]Evidence:[/#4eba65] {result.evidence_added} entries added to skill library"
+            )
+
+        self._console.print(f"  \u23bf  [#999999]/diff \u00b7 /show sol \u00b7 /show strategy \u00b7 /analysis[/#999999]")
 
         run_logger.end_run(
             best_speedup=result.best_speedup,
@@ -2831,8 +3205,29 @@ class ModelNew(nn.Module):
             total_cost=result.total_cost_usd,
         )
 
-        self._console.print(f"  \u23bf  [#999999]/diff to see changes[/#999999]")
-        self._console.print(f"  \u23bf  [#999999]Run log: {run_logger.log_path}[/#999999]")
+        # Log file path for /analysis reference
+        try:
+            self._console.print(f"  ⎿  [#999999]Run log: {run_logger.log_path}[/#999999]")
+        except Exception:
+            pass
+
+        # --- Post-optimization charts (all at bottom) ---
+        self._console.print()
+        try:
+            from kernel_code.worker_plots import render_round_columns
+            if len(result.round_history) > 1:
+                self._console.print(render_round_columns(result.round_history))
+        except Exception:
+            pass
+
+        try:
+            from kernel_code.sol_plots import render_sol_trajectory, render_strategy_timeline
+            if result.round_history:
+                self._console.print(render_sol_trajectory(result.round_history))
+                self._console.print(render_strategy_timeline(result.round_history))
+        except Exception:
+            pass
+
         self._console.print()
 
     def _handle_inline_optimize(self, text: str) -> None:
@@ -3821,105 +4216,6 @@ def get_init_inputs():
     # Display helpers
     # ------------------------------------------------------------------
 
-    def _print_welcome(self) -> None:
-        """Print the welcome banner — Claude Code style."""
-        self._console.print()
-        self._console.print(
-            "  [bold #d77757]openkernel[/bold #d77757] [#999999]v0.1[/#999999]"
-        )
-        self._console.print()
-
-        # Problem
-        ref_path = _PROJECT_ROOT / "reference.py"
-        problem_label = ""
-        if ref_path.is_file():
-            first_lines = ref_path.read_text().split("\n", 5)
-            for line in first_lines:
-                if "KernelBench" in line or "Problem" in line:
-                    problem_label = line.strip().strip('"').strip("'").strip()
-                    break
-        if problem_label:
-            self._console.print(f"  [bold white]{problem_label}[/bold white]")
-        else:
-            self._console.print("  [#ffc107]No problem loaded[/#ffc107] \u2014 run [bold]/problem 1.5[/bold]")
-
-        # Sub-info via ⎿
-        hw = self._settings.default_gpu
-        be = self._settings.default_backend
-        model_name = self._settings.default_model
-        from kernel_code.settings import _API_KEY_ENV_MAP
-        env_key = _API_KEY_ENV_MAP.get(f"{self._settings.default_provider}_api_key", "")
-        has_key = self._has_provider_key(self._settings.default_provider, env_key)
-        key_sym = "\u2713" if has_key else "\u2717"
-        key_color = "#4eba65" if has_key else "#ff6b80"
-
-        self._console.print(
-            f"  \u23bf  [{key_color}]{key_sym}[/{key_color}] "
-            f"[white]{model_name}[/white]  [#999999]\u00b7[/#999999]  "
-            f"[white]{hw}[/white]  [#999999]\u00b7[/#999999]  "
-            f"[white]{be}[/white]"
-        )
-
-        # Context + skills
-        context_parts = []
-        if self._kernel_config and self._kernel_config.source_path:
-            from kernel_code.kernel_config import load_hardware_context, load_backend_context, load_pitfalls
-            ctx_count = 1  # KERNEL.md
-            if load_hardware_context(hw): ctx_count += 1
-            if load_backend_context(be): ctx_count += 1
-            if load_pitfalls(): ctx_count += 1
-            context_parts.append(f"{ctx_count} context files")
-
-        n_skills = len(self._skill_library)
-        if n_skills:
-            context_parts.append(f"{n_skills} skills")
-
-        if self._settings.max_budget is not None:
-            context_parts.append(f"${self._settings.max_budget:.2f} budget")
-
-        if context_parts:
-            self._console.print(f"  \u23bf  [#999999]{' \u00b7 '.join(context_parts)}[/#999999]")
-
-        self._console.print()
-        self._console.print(
-            "  [#999999]Type [bold white]/help[/bold white] for commands, or ask a question.[/#999999]"
-        )
-        self._console.print()
-
-    def _print_post_optimization_summary(
-        self,
-        best_speedup: float,
-        kept: int,
-        total: int,
-        cost: float,
-        session_total: float | None = None,
-    ) -> None:
-        """Print the post-optimization summary block."""
-        self._console.print()
-
-        # Summary line
-        summary = Text()
-        summary.append("Best: ", style="dim")
-        summary.append(f"{best_speedup:.2f}x", style="bold green")
-        summary.append(" | ", style="dim")
-        summary.append(f"{kept}/{total} kept", style="dim")
-        summary.append(" | ", style="dim")
-        summary.append(
-            self._cost_tracker.format_summary(), style="dim"
-        )
-        self._console.print(summary)
-
-        # Dashboard link
-        url = f"http://localhost:8050/session/{self._session_id}"
-        self._console.print(f"  Dashboard: [cyan]{url}[/cyan]")
-
-        # Hint
-        self._console.print()
-        self._console.print(
-            "[dim]Type a question about the results, or /help for commands.[/dim]"
-        )
-        self._console.print()
-
     def _show_best(self) -> None:
         """Display the best kernel with syntax highlighting."""
         if self._best_run is None:
@@ -4004,10 +4300,151 @@ def get_init_inputs():
             f"[bold green]{best_speedup:.2f}x[/bold green]",
         )
         summary_table.add_row(
-            "Est. cost", f"${self._total_cost:.2f}"
+            "Est. LLM cost", f"${self._total_cost:.2f}"
         )
 
         self._console.print(summary_table)
+        self._console.print()
+
+    def _show_sol(self) -> None:
+        """Display SOL trajectory from last optimization run."""
+        if not self._last_auto_result or not self._last_auto_result.round_history:
+            self._console.print("[dim]No SOL data. Run /optimize first.[/dim]")
+            return
+        try:
+            from kernel_code.sol_plots import render_sol_trajectory
+            self._console.print()
+            self._console.print(render_sol_trajectory(self._last_auto_result.round_history))
+            self._console.print()
+        except Exception as exc:
+            self._console.print(f"[red]Error rendering SOL trajectory: {exc}[/red]")
+
+    def _show_strategy(self) -> None:
+        """Display strategy progression timeline from last run."""
+        if not self._last_auto_result or not self._last_auto_result.round_history:
+            self._console.print("[dim]No strategy data. Run /optimize first.[/dim]")
+            return
+        try:
+            from kernel_code.sol_plots import render_strategy_timeline
+            self._console.print()
+            self._console.print(render_strategy_timeline(self._last_auto_result.round_history))
+            self._console.print()
+        except Exception as exc:
+            self._console.print(f"[red]Error rendering strategy timeline: {exc}[/red]")
+
+    def _show_round_detail(self, round_num: int) -> None:
+        """Display full details of a specific optimization round."""
+        if not self._last_auto_result or not self._last_auto_result.round_history:
+            self._console.print("[dim]No round data. Run /optimize first.[/dim]")
+            return
+
+        rounds = self._last_auto_result.round_history
+        target = None
+        for r in rounds:
+            if r.get("round") == round_num:
+                target = r
+                break
+
+        if target is None:
+            self._console.print(f"[red]Round {round_num} not found. Available: 1-{len(rounds)}[/red]")
+            return
+
+        from rich.table import Table
+
+        table = Table(
+            title=f"Round {round_num} Details",
+            show_header=False,
+            border_style="dim",
+        )
+        table.add_column("Key", style="dim", width=20)
+        table.add_column("Value", ratio=1)
+
+        table.add_row("Speedup", f"[bold]{target.get('speedup', 0.0):.2f}x[/bold]")
+        table.add_row("Status", str(target.get("status", "unknown")))
+        table.add_row("Strategy", str(target.get("strategy", "")))
+        table.add_row("Bottleneck", str(target.get("bottleneck", "unknown")))
+        table.add_row("Method Applied", str(target.get("method_applied", "")))
+        table.add_row("Cost", f"${target.get('cost_usd', 0.0):.2f}")
+
+        profile = target.get("profile", {})
+        if isinstance(profile, dict):
+            sol = profile.get("sol_score", 0.0)
+            if sol > 0:
+                table.add_row("SOL Score", f"[#22d3ee]{sol:.3f}[/#22d3ee]")
+            bw = profile.get("bandwidth_utilization_pct", 0.0)
+            if bw > 0:
+                table.add_row("BW Utilization", f"{bw:.1f}%")
+            compute = profile.get("compute_utilization_pct", 0.0)
+            if compute > 0:
+                table.add_row("Compute Util", f"{compute:.1f}%")
+            occ = profile.get("occupancy", 0.0)
+            if occ > 0:
+                table.add_row("Occupancy", f"{occ:.2f}")
+            oi = profile.get("operational_intensity", 0.0)
+            if oi > 0:
+                table.add_row("Op Intensity", f"{oi:.2f} FLOP/byte")
+            runtime = profile.get("runtime_us", 0.0)
+            if runtime > 0:
+                table.add_row("Kernel Runtime", f"{runtime:.1f} us")
+            ref_runtime = profile.get("ref_runtime_us", 0.0)
+            if ref_runtime > 0:
+                table.add_row("Ref Runtime", f"{ref_runtime:.1f} us")
+
+        self._console.print()
+        self._console.print(table)
+        self._console.print()
+
+    def _show_profile(self) -> None:
+        """Display profile metrics from the last optimization run."""
+        if not self._last_auto_result or not self._last_auto_result.round_history:
+            self._console.print("[dim]No profile data. Run /optimize first.[/dim]")
+            return
+
+        rounds = self._last_auto_result.round_history
+        # Find last round with profile data
+        last_profile = None
+        last_round_num = 0
+        for r in reversed(rounds):
+            profile = r.get("profile", {})
+            if isinstance(profile, dict) and profile.get("runtime_us", 0) > 0:
+                last_profile = profile
+                last_round_num = r.get("round", 0)
+                break
+
+        if not last_profile:
+            self._console.print("[dim]No profile metrics available.[/dim]")
+            return
+
+        from rich.table import Table
+        from kernel_code.sol_metrics import format_sol_summary
+
+        table = Table(
+            title=f"Profile Metrics (Round {last_round_num})",
+            show_header=False,
+            border_style="dim",
+        )
+        table.add_column("Metric", style="dim", width=22)
+        table.add_column("Value", ratio=1)
+
+        sol = last_profile.get("sol_score", 0.0)
+        table.add_row("SOL Score", f"[bold #22d3ee]{sol:.3f}[/bold #22d3ee]" if sol > 0 else "[dim]N/A[/dim]")
+        table.add_row("BW Utilization", f"{last_profile.get('bandwidth_utilization_pct', 0.0):.1f}%")
+        table.add_row("Compute Utilization", f"{last_profile.get('compute_utilization_pct', 0.0):.1f}%")
+        table.add_row("Occupancy", f"{last_profile.get('occupancy', 0.0):.2f}")
+        table.add_row("Op Intensity", f"{last_profile.get('operational_intensity', 0.0):.2f} FLOP/byte")
+        table.add_row("Kernel Runtime", f"{last_profile.get('runtime_us', 0.0):.1f} us")
+        table.add_row("Ref Runtime", f"{last_profile.get('ref_runtime_us', 0.0):.1f} us")
+
+        summary = format_sol_summary(
+            sol_score=sol,
+            bw_sol=last_profile.get("bandwidth_utilization_pct", 0.0),
+            compute_sol=last_profile.get("compute_utilization_pct", 0.0),
+            speedup=last_profile.get("ref_runtime_us", 0.0) / max(last_profile.get("runtime_us", 1.0), 0.001),
+        )
+
+        self._console.print()
+        self._console.print(table)
+        self._console.print(f"  {summary}")
         self._console.print()
 
     def _show_run(self, run_num: int) -> None:
@@ -4242,4 +4679,159 @@ def get_init_inputs():
             cols.add_row(left_panel, right_panel)
             self._console.print(cols)
 
+        self._console.print()
+
+    # ------------------------------------------------------------------
+    # /batch command
+    # ------------------------------------------------------------------
+
+    def _cmd_batch(self, args_str: str) -> None:
+        """/batch run DIR [--budget N] | /batch results"""
+        tokens = args_str.strip().split()
+        if not tokens:
+            self._console.print(
+                "[dim]Usage:[/dim] /batch run <directory> [--budget N] | /batch results"
+            )
+            return
+
+        sub = tokens[0].lower()
+
+        if sub == "run" and len(tokens) >= 2:
+            self._run_batch(tokens[1:])
+        elif sub == "results":
+            self._show_batch_results()
+        else:
+            self._console.print(
+                "[dim]Usage:[/dim] /batch run <directory> [--budget N] | /batch results"
+            )
+
+    def _run_batch(self, tokens: list[str]) -> None:
+        """Run batch optimization across a directory of problem files."""
+        from pathlib import Path
+        from kernel_code.batch_optimizer import BatchOptimizer, BatchResult
+        from kernel_code.batch_plots import render_batch_dashboard
+        from kernel_code.goal_spec import GoalSpec
+
+        problem_dir = Path(tokens[0])
+        if not problem_dir.is_dir():
+            self._console.print(f"[red]Directory not found: {problem_dir}[/red]")
+            return
+
+        # Parse optional --budget flag
+        budget = 1.00
+        for i, t in enumerate(tokens[1:], 1):
+            if t == "--budget" and i + 1 < len(tokens):
+                try:
+                    budget = float(tokens[i + 1])
+                except ValueError:
+                    pass
+
+        problems = sorted(problem_dir.glob("*.py"))
+        if not problems:
+            self._console.print(f"[red]No .py files found in {problem_dir}[/red]")
+            return
+
+        self._console.print(
+            f"\n  [bold #22d3ee]Batch optimization:[/bold #22d3ee] "
+            f"{len(problems)} problems from {problem_dir}\n"
+            f"  Budget: ${budget:.2f} per problem\n"
+        )
+
+        goal = GoalSpec(
+            target_speedup=2.0,
+            max_budget_usd=budget,
+            max_rounds=3,
+            hardware=self._settings.gpu_type if hasattr(self._settings, 'gpu_type') else "L40S",
+            model=self._settings.default_model,
+        )
+
+        batch = BatchOptimizer(
+            problem_dir=problem_dir,
+            goal_template=goal,
+            settings=self._settings,
+        )
+
+        result = batch.run_all()
+        self._last_batch_result = result
+
+        # Render dashboard
+        self._console.print()
+        self._console.print(render_batch_dashboard(result.to_dict()))
+        self._console.print()
+
+    def _show_batch_results(self) -> None:
+        """Display last batch optimization results."""
+        if not hasattr(self, '_last_batch_result') or self._last_batch_result is None:
+            self._console.print("[dim]No batch results. Run /batch run <dir> first.[/dim]")
+            return
+
+        from kernel_code.batch_plots import render_batch_dashboard
+        self._console.print()
+        self._console.print(render_batch_dashboard(self._last_batch_result.to_dict()))
+        self._console.print()
+
+    # ------------------------------------------------------------------
+    # /show evidence
+    # ------------------------------------------------------------------
+
+    def _show_evidence(self) -> None:
+        """Display skill evidence rankings from accumulated optimization data."""
+        from openkernel.memory.skill_library import SkillLibrary
+        from kernel_code.evidence_tracker import compute_skill_priority
+
+        lib = SkillLibrary()
+        lib.load()
+
+        skills = lib.all_skills
+        if not skills:
+            self._console.print("[dim]No skills loaded.[/dim]")
+            return
+
+        # Compute priorities and sort
+        ranked = sorted(
+            [(s, compute_skill_priority(s)) for s in skills],
+            key=lambda x: x[1],
+            reverse=True,
+        )
+
+        # Filter to skills with evidence
+        with_evidence = [(s, p) for s, p in ranked if s.evidence]
+
+        from rich.table import Table
+
+        table = Table(
+            title="Skill Evidence Rankings",
+            show_header=True,
+            header_style="bold white",
+            border_style="dim",
+        )
+        table.add_column("Skill", style="white", width=28)
+        table.add_column("Priority", justify="right", width=8)
+        table.add_column("Evidence", justify="right", width=8)
+        table.add_column("Avg Speedup", justify="right", width=11)
+        table.add_column("Hardware", width=16)
+
+        if with_evidence:
+            for skill, priority in with_evidence[:15]:  # Top 15
+                avg_sp = 0.0
+                speedups = [e.get("speedup", 0) for e in skill.evidence if e.get("speedup", 0) > 0]
+                if speedups:
+                    avg_sp = sum(speedups) / len(speedups)
+
+                hw_set = set(e.get("hardware", "") for e in skill.evidence if e.get("hardware"))
+                hw_str = ", ".join(sorted(hw_set)[:3]) if hw_set else "\u2014"
+
+                table.add_row(
+                    skill.name,
+                    f"{priority:.1f}",
+                    str(len(skill.evidence)),
+                    f"{avg_sp:.2f}x" if avg_sp > 0 else "\u2014",
+                    hw_str,
+                )
+        else:
+            table.add_row("[dim]No evidence yet[/dim]", "\u2014", "0", "\u2014", "\u2014")
+
+        self._console.print()
+        self._console.print(table)
+        self._console.print(f"  [dim]Total skills: {len(skills)} | With evidence: {len(with_evidence)}[/dim]")
         self._console.print()

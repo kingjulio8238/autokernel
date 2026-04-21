@@ -180,6 +180,10 @@ class VerificationWorker:
         # History for LLM context
         self.history = deque(maxlen=history_size)
 
+        # Dev logging: last LLM prompt/response for thought capture
+        self._last_prompt: str = ""
+        self._last_response: str = ""
+
         # Setup logging early so it is available for any error paths
         self._setup_logging()
 
@@ -387,12 +391,17 @@ class VerificationWorker:
                 # GPU Mode: kernel_function() is already the right format
                 wrapped_code = kernel_code
 
-            eval_fn = modal.Function.from_name("openkernel-eval", "eval_kernel_on_gpu")
+            # Route to GPU-specific Modal function based on hardware setting
+            from kernel_code.gpu_functions import GPU_FUNCTION_MAP
+            gpu_type = os.environ.get("OPENKERNEL_GPU_TYPE", "L40S")
+            fn_name = GPU_FUNCTION_MAP.get(gpu_type, "eval_kernel_on_gpu")
+            eval_fn = modal.Function.from_name("openkernel-eval", fn_name)
             result = eval_fn.remote(
                 kernel_source=wrapped_code,
                 reference_source=reference_code,
                 eval_mode="fast",
                 problem_format=problem_format,
+                gpu_type=gpu_type,
             )
 
             correct = result.get("correct", False)
@@ -416,21 +425,20 @@ class VerificationWorker:
         """
         Call the LLM provider for the configured model.
 
-        Args:
-            messages: List of message dicts with 'role' and 'content'
-            **kwargs: Additional parameters for the API call
-
-        Returns:
-            Generated response text
+        Captures prompt and response on instance for dev logging.
         """
         if not self.provider:
             raise RuntimeError(f"No provider available for model {self.openai_model}")
+
+        # Capture prompt for dev logging
+        self._last_prompt = messages[-1].get("content", "") if messages else ""
 
         # Add high_reasoning_effort to kwargs if set
         if self.high_reasoning_effort:
             kwargs["high_reasoning_effort"] = True
 
         response = self.provider.get_response(self.openai_model, messages, **kwargs)
+        self._last_response = response.content
         return response.content
 
     def _refine_kernel(
@@ -477,6 +485,10 @@ class VerificationWorker:
                 messages = [{"role": "user", "content": prompt}]
                 response_text = self._call_llm(messages, max_tokens=8192)
 
+                # Store for dev logging
+                self._last_prompt = prompt
+                self._last_response = response_text
+
                 # Extract refined kernel from response
                 refined_kernel = self._extract_code_from_response(
                     response_text,
@@ -508,9 +520,14 @@ class VerificationWorker:
         return kernel_code
 
     def _log_round(
-        self, round_num: int, success: bool, kernel_code: str, stdout: str, stderr: str
+        self, round_num: int, success: bool, kernel_code: str, stdout: str, stderr: str,
+        prompt: str = "", response: str = "",
     ):
-        """Log the results of a verification round."""
+        """Log the results of a verification round.
+
+        In dev mode (OPENKERNEL_DEV_LOG=1), also saves full LLM prompt
+        and response for analysis.
+        """
         round_data = {
             "round": round_num,
             "timestamp": datetime.now().isoformat(),
@@ -519,6 +536,28 @@ class VerificationWorker:
             "stdout": stdout,
             "stderr": stderr,
         }
+
+        # Dev mode: append full LLM thoughts to per-run log file
+        if os.environ.get("OPENKERNEL_DEV_LOG") == "1" and (prompt or response):
+            run_id = os.environ.get("OPENKERNEL_RUN_ID", "unknown")
+            log_file = Path(f".kernel-code/dev_logs/run_{run_id}.jsonl")
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            thought_data = {
+                "type": "worker",
+                "round": round_num,
+                "timestamp": datetime.now().isoformat(),
+                "worker_id": self.worker_id,
+                "model": self.openai_model,
+                "prompt": prompt,
+                "response": response,
+                "extracted_kernel_length": len(kernel_code) if kernel_code else 0,
+                "success": success,
+            }
+            try:
+                with open(log_file, "a") as f:
+                    f.write(json.dumps(thought_data) + "\n")
+            except Exception:
+                pass  # Don't break optimization for logging
 
         # Save to log file
         round_log_file = self.log_dir / f"round_{round_num}.json"
@@ -586,7 +625,8 @@ class VerificationWorker:
             )
 
             if violation:
-                self._log_round(round_num + 1, False, current_kernel, "", violation)
+                self._log_round(round_num + 1, False, current_kernel, "", violation,
+                                prompt=self._last_prompt, response=self._last_response)
                 error_info = {
                     "stdout": "",
                     "stderr": violation,
@@ -601,7 +641,8 @@ class VerificationWorker:
                 continue
 
             # Log round
-            self._log_round(round_num + 1, success, current_kernel, stdout, stderr)
+            self._log_round(round_num + 1, success, current_kernel, stdout, stderr,
+                            prompt=self._last_prompt, response=self._last_response)
 
             if success:
                 self.logger.info(

@@ -55,16 +55,11 @@ _GPU_MAP = {
 # ---------------------------------------------------------------------------
 
 
-@app.function(
-    gpu="L40S",
-    timeout=600,
-    retries=0,
-)
-def eval_kernel_on_gpu(
+def _eval_kernel_impl(
     kernel_source: str,
     reference_source: str,
     eval_mode: str = "fast",
-    problem_format: str = "auto",  # "auto", "kernelbench", "gpumode"
+    problem_format: str = "auto",
     correctness_trials: int = 5,
     perf_trials_fast: int = 10,
     perf_trials_thorough: int = 100,
@@ -110,6 +105,7 @@ def eval_kernel_on_gpu(
                 correctness_trials=correctness_trials,
                 num_perf_trials=num_perf_trials,
                 tmpdir=tmpdir,
+                gpu_type=gpu_type,
             )
         else:
             result = _run_eval(
@@ -120,6 +116,7 @@ def eval_kernel_on_gpu(
                 correctness_trials=correctness_trials,
                 num_perf_trials=num_perf_trials,
                 tmpdir=tmpdir,
+                gpu_type=gpu_type,
             )
     except Exception as exc:
         result = {
@@ -136,6 +133,80 @@ def eval_kernel_on_gpu(
     return result
 
 
+# ---------------------------------------------------------------------------
+# GPU-specific Modal functions — each deploys with a different GPU type.
+# Clients select the correct function via gpu_type at runtime.
+# Note: KernelBench leaderboard standardizes on L40S. Results on other GPUs
+# are not directly comparable to the leaderboard.
+# ---------------------------------------------------------------------------
+
+@app.function(gpu="L40S", timeout=600, retries=0)
+def eval_kernel_on_gpu(
+    kernel_source: str, reference_source: str, eval_mode: str = "fast",
+    problem_format: str = "auto", correctness_trials: int = 5,
+    perf_trials_fast: int = 10, perf_trials_thorough: int = 100,
+    gpu_type: str = "L40S",
+) -> dict[str, Any]:
+    """Evaluate kernel on L40S (default, KernelBench standard)."""
+    return _eval_kernel_impl(
+        kernel_source, reference_source, eval_mode, problem_format,
+        correctness_trials, perf_trials_fast, perf_trials_thorough, gpu_type,
+    )
+
+
+@app.function(gpu="H100", timeout=600, retries=0)
+def eval_kernel_h100(
+    kernel_source: str, reference_source: str, eval_mode: str = "fast",
+    problem_format: str = "auto", correctness_trials: int = 5,
+    perf_trials_fast: int = 10, perf_trials_thorough: int = 100,
+    gpu_type: str = "H100",
+) -> dict[str, Any]:
+    """Evaluate kernel on H100."""
+    return _eval_kernel_impl(
+        kernel_source, reference_source, eval_mode, problem_format,
+        correctness_trials, perf_trials_fast, perf_trials_thorough, gpu_type,
+    )
+
+
+@app.function(gpu="A100-80GB", timeout=600, retries=0)
+def eval_kernel_a100_80gb(
+    kernel_source: str, reference_source: str, eval_mode: str = "fast",
+    problem_format: str = "auto", correctness_trials: int = 5,
+    perf_trials_fast: int = 10, perf_trials_thorough: int = 100,
+    gpu_type: str = "A100-80GB",
+) -> dict[str, Any]:
+    """Evaluate kernel on A100-80GB."""
+    return _eval_kernel_impl(
+        kernel_source, reference_source, eval_mode, problem_format,
+        correctness_trials, perf_trials_fast, perf_trials_thorough, gpu_type,
+    )
+
+
+@app.function(gpu="A100", timeout=600, retries=0)
+def eval_kernel_a100_40gb(
+    kernel_source: str, reference_source: str, eval_mode: str = "fast",
+    problem_format: str = "auto", correctness_trials: int = 5,
+    perf_trials_fast: int = 10, perf_trials_thorough: int = 100,
+    gpu_type: str = "A100-40GB",
+) -> dict[str, Any]:
+    """Evaluate kernel on A100-40GB."""
+    return _eval_kernel_impl(
+        kernel_source, reference_source, eval_mode, problem_format,
+        correctness_trials, perf_trials_fast, perf_trials_thorough, gpu_type,
+    )
+
+
+# Map GPU type strings to Modal function names for runtime lookup.
+# Keep in sync with kernel_code/gpu_functions.py (canonical source).
+# Duplicated here because Modal containers cannot import kernel_code.
+_GPU_FUNCTION_MAP = {
+    "L40S": "eval_kernel_on_gpu",
+    "H100": "eval_kernel_h100",
+    "A100-80GB": "eval_kernel_a100_80gb",
+    "A100-40GB": "eval_kernel_a100_40gb",
+}
+
+
 def _run_eval(
     *,
     ref_path: str,
@@ -145,6 +216,7 @@ def _run_eval(
     correctness_trials: int,
     num_perf_trials: int,
     tmpdir: str,
+    gpu_type: str = "L40S",
 ) -> dict[str, Any]:
     """Core evaluation logic — compile, check correctness, benchmark.
 
@@ -262,7 +334,8 @@ def _run_eval(
 
     # ---- Profile data (basic CUDA event metrics) ----
     profile = _collect_basic_profile(
-        kernel_model, get_inputs, device, ref_runtime_us, kernel_runtime_us
+        kernel_model, get_inputs, device, ref_runtime_us, kernel_runtime_us,
+        gpu_type=gpu_type,
     )
 
     return {
@@ -283,6 +356,7 @@ def _run_eval_gpumode(
     correctness_trials: int,
     num_perf_trials: int,
     tmpdir: str,
+    gpu_type: str = "L40S",
 ) -> dict[str, Any]:
     """Eval for GPU Mode format: ref_kernel() + kernel_function()."""
     import importlib.util
@@ -319,29 +393,33 @@ def _run_eval_gpumode(
             "error": "Missing ref_kernel or kernel_function",
         }
 
-    # Generate inputs
+    # Generate inputs — WORKLOAD_SPEC takes precedence, else auto-scale probe.
+    workload_spec = getattr(ref_mod, "WORKLOAD_SPEC", None)
     try:
-        import inspect
-        sig = inspect.signature(generate_input)
-        params = list(sig.parameters.keys())
-        if "seed" in params:
-            data = generate_input(1024, seed=42)
-        elif len(params) >= 2:
-            data = generate_input(1024, 42)
+        if isinstance(workload_spec, dict):
+            data, workload_size = _build_inputs_from_spec(
+                generate_input, workload_spec, device
+            )
+            print(f"[workload] from WORKLOAD_SPEC: size={workload_size} kwargs={workload_spec}")
         else:
-            data = generate_input(1024)
+            if workload_spec is not None:
+                print(
+                    f"[workload] WORKLOAD_SPEC present but not a dict "
+                    f"(got {type(workload_spec).__name__}); falling back to probe"
+                )
+            data, workload_size, ref_probe_us = _auto_scale_probe(
+                generate_input, ref_kernel, device
+            )
+            print(
+                f"[workload] auto-scale picked size={workload_size} "
+                f"(ref={ref_probe_us:.1f}μs)"
+            )
     except Exception as exc:
         return {
             "status": "error", "correct": False, "speedup": 0.0,
             "runtime_us": 0.0, "ref_runtime_us": 0.0,
-            "error": f"generate_input failed: {exc}",
+            "error": f"generate_input failed: {exc}\n{traceback.format_exc()}",
         }
-
-    # Move to device
-    if isinstance(data, tuple):
-        data = tuple(x.to(device) if isinstance(x, torch.Tensor) else x for x in data)
-    elif isinstance(data, torch.Tensor):
-        data = data.to(device)
 
     # Detect calling convention: tuple (GPU Mode) or unpacked args (LLM-generated)
     def _call_kernel(fn, data):
@@ -397,13 +475,173 @@ def _run_eval_gpumode(
     kernel_us = _median(kernel_times) * 1e6
     speedup = ref_us / kernel_us if kernel_us > 0 else 0.0
 
+    # Collect SOL-flavoured profile so downstream sees real compute/bandwidth
+    # utilization and a bottleneck classification. We profile the REFERENCE
+    # kernel because workload flops/bytes are invariant across implementations;
+    # candidate runtime (kernel_us) is what we combine with them for SOL.
+    gpumode_profile: dict[str, Any] = {}
+    try:
+        def _ref_model_adapter(*inputs):
+            if len(inputs) == 1:
+                return ref_kernel(inputs[0])
+            return ref_kernel(inputs)
+
+        def _gpumode_get_inputs():
+            return [data]
+
+        gpumode_profile = _collect_basic_profile(
+            model=_ref_model_adapter,
+            get_inputs=_gpumode_get_inputs,
+            device=device,
+            ref_runtime_us=ref_us,
+            kernel_runtime_us=kernel_us,
+            gpu_type=gpu_type,
+        )
+    except Exception as exc:
+        gpumode_profile = {"error": f"profiling failed: {exc}"}
+
     return {
         "status": "correct", "correct": True,
         "speedup": round(speedup, 4),
         "runtime_us": round(kernel_us, 2),
         "ref_runtime_us": round(ref_us, 2),
-        "profile": {}, "error": None,
+        "workload_size": workload_size,
+        "profile": gpumode_profile, "error": None,
     }
+
+
+def _move_to_device(data: Any, device: Any) -> Any:
+    """Move a tensor / tuple-of-tensors payload onto the target device."""
+    import torch
+
+    if isinstance(data, tuple):
+        return tuple(
+            x.to(device) if isinstance(x, torch.Tensor) else x for x in data
+        )
+    if isinstance(data, list):
+        return [x.to(device) if isinstance(x, torch.Tensor) else x for x in data]
+    if isinstance(data, torch.Tensor):
+        return data.to(device)
+    return data
+
+
+def _call_generate_input(generate_input, size: int, extra_kwargs: dict | None = None):
+    """Call generate_input respecting its signature.
+
+    Backwards-compatible with the three legacy shapes:
+      - generate_input(size)
+      - generate_input(size, seed)           (positional)
+      - generate_input(size, seed=42)        (keyword)
+    When extra_kwargs are supplied (WORKLOAD_SPEC path), they are filtered
+    to parameters the signature actually accepts so stray metadata keys
+    like "notes" or "shape_hint" don't blow up the call.
+    """
+    import inspect
+
+    sig = inspect.signature(generate_input)
+    params = sig.parameters
+    param_names = list(params.keys())
+    accepts_var_kw = any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+
+    kwargs: dict = {}
+    if extra_kwargs:
+        for key, value in extra_kwargs.items():
+            if key == "size":
+                continue  # passed positionally
+            if accepts_var_kw or key in param_names:
+                kwargs[key] = value
+
+    if "seed" in param_names and "seed" not in kwargs and not extra_kwargs:
+        kwargs["seed"] = 42
+
+    try:
+        return generate_input(size, **kwargs)
+    except TypeError:
+        # Signature is positional-only like generate_input(size, seed).
+        # Fall back to the legacy branching.
+        if "seed" in param_names:
+            seed_val = kwargs.get("seed", 42)
+            return generate_input(size, seed=seed_val)
+        if len(param_names) >= 2:
+            return generate_input(size, 42)
+        return generate_input(size)
+
+
+def _build_inputs_from_spec(generate_input, spec: dict, device: Any):
+    """Build inputs from an explicit WORKLOAD_SPEC dict.
+
+    Returns (data_on_device, size). Extra metadata keys in spec are
+    filtered out against generate_input's signature.
+    """
+    size = int(spec.get("size", 1024))
+    data = _call_generate_input(generate_input, size, extra_kwargs=spec)
+    return _move_to_device(data, device), size
+
+
+def _auto_scale_probe(generate_input, ref_kernel, device: Any):
+    """Probe geometric sizes, pick the first whose ref runtime ≥ 200μs.
+
+    If none hit the threshold, use the largest probe size. Returns
+    (data_on_device, size, ref_runtime_us) where data is already on device.
+    """
+    import torch
+
+    probe_sizes = [1024, 65536, 1_048_576]
+    threshold_us = 200.0
+
+    last_data = None
+    last_size = probe_sizes[-1]
+    last_ref_us = 0.0
+
+    for size in probe_sizes:
+        try:
+            raw = _call_generate_input(generate_input, size)
+        except Exception as exc:
+            print(f"[workload] probe size={size} generate_input failed: {exc}")
+            continue
+
+        data = _move_to_device(raw, device)
+
+        # Warmup
+        try:
+            with torch.no_grad():
+                ref_kernel(data)
+            torch.cuda.synchronize()
+        except Exception as exc:
+            print(f"[workload] probe size={size} warmup failed: {exc}")
+            continue
+
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        try:
+            with torch.no_grad():
+                ref_kernel(data)
+        except Exception as exc:
+            print(f"[workload] probe size={size} measure failed: {exc}")
+            continue
+        end.record()
+        torch.cuda.synchronize()
+        ref_us = start.elapsed_time(end) * 1000.0  # ms → μs
+
+        last_data = data
+        last_size = size
+        last_ref_us = ref_us
+
+        if ref_us >= threshold_us:
+            return data, size, ref_us
+
+    if last_data is None:
+        # Every probe failed — fall back to legacy hardcoded size so the
+        # caller's except handler can at least surface a generate_input error.
+        data = _move_to_device(
+            _call_generate_input(generate_input, 1024), device
+        )
+        return data, 1024, 0.0
+
+    return last_data, last_size, last_ref_us
 
 
 def _benchmark_fn(fn, num_trials: int) -> list[float]:
@@ -483,12 +721,97 @@ def _median(values: list[float]) -> float:
     return s[mid]
 
 
+# ---------------------------------------------------------------------------
+# SOL metrics — inlined from kernel_code/sol_metrics.py + kernel_code/
+# optimization_gate.py::GPU_SPECS. Duplicated because Modal containers
+# cannot import kernel_code (see note at _GPU_FUNCTION_MAP above).
+# Keep peaks in sync with kernel_code/optimization_gate.py:GPU_SPECS.
+# ---------------------------------------------------------------------------
+
+_SOL_GPU_SPECS = {
+    "H100":      {"peak_tflops_fp16":  989, "bandwidth_gb_s": 3350},
+    "A100-80GB": {"peak_tflops_fp16":  312, "bandwidth_gb_s": 2039},
+    "A100-40GB": {"peak_tflops_fp16":  312, "bandwidth_gb_s": 1555},
+    "L40S":      {"peak_tflops_fp16":  183, "bandwidth_gb_s":  864},
+    "B200":      {"peak_tflops_fp16": 2250, "bandwidth_gb_s": 8000},
+}
+
+
+def _sol_theoretical_min_us(total_flops: int, total_bytes: int, specs: dict) -> float:
+    if total_flops <= 0 and total_bytes <= 0:
+        return 0.0
+    peak_tflops = specs.get("peak_tflops_fp16", 0)
+    peak_bw_gb_s = specs.get("bandwidth_gb_s", 0)
+    compute_min_us = (total_flops / (peak_tflops * 1e6)) if total_flops > 0 and peak_tflops > 0 else 0.0
+    memory_min_us = (total_bytes / (peak_bw_gb_s * 1e3)) if total_bytes > 0 and peak_bw_gb_s > 0 else 0.0
+    if compute_min_us > 0 and memory_min_us > 0:
+        return max(compute_min_us, memory_min_us)
+    return compute_min_us or memory_min_us
+
+
+def _sol_compute_sol_score(
+    kernel_runtime_us: float,
+    ref_runtime_us: float,
+    total_flops: int,
+    total_bytes: int,
+    gpu_type: str,
+) -> float:
+    import math
+    if kernel_runtime_us <= 0 or ref_runtime_us <= 0:
+        return 0.0
+    specs = _SOL_GPU_SPECS.get(gpu_type)
+    if not specs:
+        speedup = ref_runtime_us / kernel_runtime_us
+        return min(1.0, 0.5 * speedup)
+    theoretical_min_us = _sol_theoretical_min_us(total_flops, total_bytes, specs)
+    if theoretical_min_us <= 0:
+        speedup = ref_runtime_us / kernel_runtime_us
+        return min(1.0, 0.5 * speedup)
+    if kernel_runtime_us >= ref_runtime_us:
+        ratio = ref_runtime_us / kernel_runtime_us
+        return max(0.0, 0.5 * ratio)
+    if kernel_runtime_us <= theoretical_min_us:
+        return 1.0
+    log_progress = math.log(ref_runtime_us / kernel_runtime_us)
+    log_total = math.log(ref_runtime_us / theoretical_min_us)
+    if log_total <= 0:
+        return 0.5
+    return 0.5 + 0.5 * min(1.0, log_progress / log_total)
+
+
+def _sol_compute_bandwidth_sol(total_bytes: int, runtime_us: float, gpu_type: str) -> float:
+    if total_bytes <= 0 or runtime_us <= 0:
+        return 0.0
+    specs = _SOL_GPU_SPECS.get(gpu_type)
+    if not specs:
+        return 0.0
+    peak_bw_gb_s = specs.get("bandwidth_gb_s", 0)
+    if peak_bw_gb_s <= 0:
+        return 0.0
+    achieved_gb_s = (total_bytes / 1e9) / (runtime_us / 1e6)
+    return min(100.0, (achieved_gb_s / peak_bw_gb_s) * 100)
+
+
+def _sol_compute_compute_sol(total_flops: int, runtime_us: float, gpu_type: str) -> float:
+    if total_flops <= 0 or runtime_us <= 0:
+        return 0.0
+    specs = _SOL_GPU_SPECS.get(gpu_type)
+    if not specs:
+        return 0.0
+    peak_tflops = specs.get("peak_tflops_fp16", 0)
+    if peak_tflops <= 0:
+        return 0.0
+    achieved_tflops = (total_flops / 1e12) / (runtime_us / 1e6)
+    return min(100.0, (achieved_tflops / peak_tflops) * 100)
+
+
 def _collect_basic_profile(
     model: Any,
     get_inputs: Any,
     device: Any,
     ref_runtime_us: float,
     kernel_runtime_us: float,
+    gpu_type: str = "L40S",
 ) -> dict[str, Any]:
     """Collect basic profiling data using torch.profiler inside the Modal container.
 
@@ -505,8 +828,14 @@ def _collect_basic_profile(
         "occupancy": 0.0,
         "bandwidth_utilization": 0.0,
         "compute_utilization": 0.0,
+        "total_flops": 0,
+        "total_bytes": 0,
+        "operational_intensity": 0.0,
         "top_stalls": [],
         "raw_metrics": {},
+        "sol_score": 0.0,
+        "compute_util": 0.0,
+        "bandwidth_util": 0.0,
     }
 
     try:
@@ -518,14 +847,17 @@ def _collect_basic_profile(
         with profile(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
             record_shapes=True,
+            with_flops=True,
+            profile_memory=True,
             with_stack=False,
         ) as prof:
             with torch.no_grad():
                 model(*inputs)
 
         # Extract key metrics from profiler events
+        events = prof.key_averages()
         cuda_events = [
-            e for e in prof.key_averages()
+            e for e in events
             if e.device_type is not None
             and hasattr(e, "self_cuda_time_total")
             and e.self_cuda_time_total > 0
@@ -548,19 +880,89 @@ def _collect_basic_profile(
                 ],
             }
 
+            # Extract FLOPs from profiler events
+            total_flops = sum(
+                e.flops for e in events
+                if hasattr(e, "flops") and e.flops and e.flops > 0
+            )
+            profile_result["total_flops"] = total_flops
+
+            # Estimate memory I/O from input/output tensor sizes.
+            # self_cuda_memory_usage tracks allocations, not actual I/O,
+            # so tensor-based estimation is more reliable for OI calculation.
+            total_bytes = 0
+            for inp in inputs:
+                if isinstance(inp, torch.Tensor):
+                    total_bytes += inp.nelement() * inp.element_size()  # read
+            # Run once to capture output size for write estimate
+            try:
+                with torch.no_grad():
+                    out = model(*inputs)
+                if isinstance(out, torch.Tensor):
+                    total_bytes += out.nelement() * out.element_size()  # write
+                elif isinstance(out, (tuple, list)):
+                    for o in out:
+                        if isinstance(o, torch.Tensor):
+                            total_bytes += o.nelement() * o.element_size()
+            except Exception:
+                # Conservative fallback: assume output size ≈ input size
+                for inp in inputs:
+                    if isinstance(inp, torch.Tensor):
+                        total_bytes += inp.nelement() * inp.element_size()
+            profile_result["total_bytes"] = total_bytes
+
+            # Operational intensity: FLOPs / bytes
+            if total_bytes > 0 and total_flops > 0:
+                profile_result["operational_intensity"] = total_flops / total_bytes
+
             # Heuristic bottleneck classification from timing ratios
-            # Real classification comes from the profiler orchestrator
             if ref_runtime_us > 0 and kernel_runtime_us > 0:
                 ratio = kernel_runtime_us / ref_runtime_us
-                # If kernel is much slower, likely memory-bound (unoptimized access)
                 if ratio > 1.5:
                     profile_result["bottleneck_type"] = "memory_bound"
                 elif ratio < 0.8:
                     profile_result["bottleneck_type"] = "compute_bound"
 
+            # Refine bottleneck using OI if available
+            oi = profile_result["operational_intensity"]
+            if oi > 0:
+                # Ridge point varies by GPU — use L40S as default
+                ridge_oi = 106  # L40S: 91.6 TFLOPS / 864 GB/s ≈ 106 FLOP/byte
+                if oi < ridge_oi * 0.3:
+                    profile_result["bottleneck_type"] = "memory_bound"
+                elif oi > ridge_oi * 0.7:
+                    profile_result["bottleneck_type"] = "compute_bound"
+
     except Exception:
         # Profiling is best-effort; don't fail the eval
         pass
+
+    # ---- SOL metrics (runtime-relative + peak-relative) ----
+    total_flops = profile_result.get("total_flops", 0) or 0
+    total_bytes = profile_result.get("total_bytes", 0) or 0
+
+    sol_score = _sol_compute_sol_score(
+        kernel_runtime_us, ref_runtime_us, total_flops, total_bytes, gpu_type,
+    )
+    compute_util = _sol_compute_compute_sol(total_flops, kernel_runtime_us, gpu_type)
+    bandwidth_util = _sol_compute_bandwidth_sol(total_bytes, kernel_runtime_us, gpu_type)
+
+    profile_result["sol_score"] = sol_score
+    profile_result["compute_util"] = compute_util
+    profile_result["bandwidth_util"] = bandwidth_util
+    # Keep the existing contract keys populated so downstream consumers that
+    # read bandwidth_utilization / compute_utilization stay in sync.
+    profile_result["bandwidth_utilization"] = bandwidth_util
+    profile_result["compute_utilization"] = compute_util
+
+    if compute_util == 0 and bandwidth_util == 0:
+        profile_result["bottleneck_type"] = "unknown"
+    elif compute_util > bandwidth_util:
+        profile_result["bottleneck_type"] = "compute-bound"
+    elif bandwidth_util > compute_util:
+        profile_result["bottleneck_type"] = "memory-bound"
+    else:
+        profile_result["bottleneck_type"] = "balanced"
 
     return profile_result
 
@@ -590,8 +992,8 @@ class EvalWorker:
         perf_trials_thorough: int = 100,
         gpu_type: str = "L40S",
     ) -> dict[str, Any]:
-        """Delegate to the standalone function."""
-        return eval_kernel_on_gpu.local(
+        """Delegate to the implementation function."""
+        return _eval_kernel_impl(
             kernel_source=kernel_source,
             reference_source=reference_source,
             eval_mode=eval_mode,

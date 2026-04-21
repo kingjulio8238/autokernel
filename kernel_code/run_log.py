@@ -53,7 +53,7 @@ class RunLogger:
         cmd_name = command.lstrip("/").split()[0] if command else "run"
         self._log_path = _RUNS_DIR / f"{ts}_{cmd_name}.log"
         self._start_time = time.time()
-        self._config = config
+        self._config = {**config, "command": command}
         self._iterations = []
         self._entries = []
 
@@ -67,8 +67,26 @@ class RunLogger:
         status: str,
         intent: str,
         error: str = "",
+        profile: dict | None = None,
     ) -> None:
         """Log an iteration result."""
+        profile_entry: dict = {}
+        if profile:
+            _PROFILE_KEYS = (
+                "sol_score",
+                "compute_util",
+                "bandwidth_util",
+                "bottleneck_type",
+                "total_flops",
+                "total_bytes",
+                "operational_intensity",
+                "cache_efficiency",
+                "occupancy",
+            )
+            for key in _PROFILE_KEYS:
+                if key in profile:
+                    profile_entry[key] = profile[key]
+
         entry = {
             "iteration": num,
             "speedup": speedup,
@@ -76,11 +94,19 @@ class RunLogger:
             "intent": intent,
             "error": error[:200] if error else "",
             "elapsed": round(time.time() - self._start_time, 1),
+            "profile": profile_entry,
         }
         self._iterations.append(entry)
 
         status_sym = {"keep": "✓", "discard": "✗", "error": "!", "compile_error": "!"}.get(status, "?")
-        line = f"  [{entry['elapsed']:>6.1f}s] #{num:>2} {speedup:>6.2f}x {status_sym} {status:<14} {intent[:50]}"
+        sol_score = profile_entry.get("sol_score") if profile_entry else None
+        if sol_score is not None:
+            line = (
+                f"  [{entry['elapsed']:>6.1f}s] #{num:>2} SOL {float(sol_score):.2f} "
+                f"({speedup:.2f}x) {status_sym} {status:<14} {intent[:50]}"
+            )
+        else:
+            line = f"  [{entry['elapsed']:>6.1f}s] #{num:>2} {speedup:>6.2f}x {status_sym} {status:<14} {intent[:50]}"
         if error:
             line += f"\n           ERROR: {error[:100]}"
         self._log(line)
@@ -111,7 +137,7 @@ class RunLogger:
         kept = sum(1 for it in self._iterations if it["status"] == "keep")
         total = len(self._iterations)
         self._log(f"  Iterations:    {kept}/{total} kept")
-        self._log(f"  Cost:          ${total_cost:.2f}")
+        self._log(f"  LLM Cost:      ${total_cost:.2f}")
         self._log(f"  Elapsed:       {int(elapsed)}s")
         if stop_reason:
             self._log(f"  Stop reason:   {stop_reason}")
@@ -126,6 +152,7 @@ class RunLogger:
             "iterations": self._iterations,
             "best_speedup": best_speedup,
             "total_cost": total_cost,
+            "cost_note": "LLM tokens only; GPU compute billed separately via Modal",
             "elapsed_seconds": round(elapsed, 1),
             "stop_reason": stop_reason,
         }
@@ -151,7 +178,7 @@ class RunLogger:
         self._log(f"  Model:     {config.get('model', '?')}")
         self._log(f"  Hardware:  {config.get('hardware', '?')}")
         self._log(f"  Backend:   {config.get('backend', '?')}")
-        self._log(f"  Reference: {config.get('reference', '?')}")
+        self._log(f"  Reference: {config.get('reference') or config.get('file', '?')}")
         if config.get("target"):
             self._log(f"  Target:    {config['target']}x")
         if config.get("budget"):

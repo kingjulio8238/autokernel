@@ -278,12 +278,17 @@ class LLMProvider:
     ) -> str:
         import litellm
 
+        # O-series models (o1, o3, o4) only support temperature=1
+        model_id = self._config.model_id
+        is_o_series = any(model_id.startswith(p) for p in ("o1", "o3", "o4"))
+
         kwargs: dict[str, Any] = {
-            "model": self._config.model_id,
+            "model": model_id,
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": self._config.temperature,
             "max_tokens": self._config.max_tokens,
         }
+        if not is_o_series:
+            kwargs["temperature"] = self._config.temperature
         if self._api_key:
             kwargs["api_key"] = self._api_key
         if self._api_base:
@@ -305,13 +310,17 @@ class LLMProvider:
     async def _litellm_stream(self, prompt: str) -> AsyncIterator[str]:
         import litellm
 
+        model_id = self._config.model_id
+        is_o_series = any(model_id.startswith(p) for p in ("o1", "o3", "o4"))
+
         kwargs: dict[str, Any] = {
-            "model": self._config.model_id,
+            "model": model_id,
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": self._config.temperature,
             "max_tokens": self._config.max_tokens,
             "stream": True,
         }
+        if not is_o_series:
+            kwargs["temperature"] = self._config.temperature
         if self._api_key:
             kwargs["api_key"] = self._api_key
         if self._api_base:

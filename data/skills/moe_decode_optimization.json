@@ -1,0 +1,68 @@
+{
+  "id": "moe_decode_optimization",
+  "name": "MoE Decode Optimization (Warp Decode)",
+  "trigger": "MoE decode, mixture of experts inference, expert routing decode, autoregressive, token generation, batch_size_1, small batch, decode throughput, warp decode, warp_decode",
+  "approach": "For small-batch MoE decode, flip the parallelism axis from experts to outputs. Traditional MoE decode has 8 stages (5 are bookkeeping). Warp decode compresses to 3: Route \u2192 Warp compute \u2192 Write. Each warp owns one output neuron, streams weight rows for all top-k experts, accumulates in private FP32 registers, reduces via __shfl_xor_sync butterfly (no SMEM, no barriers, no buffers). Two fused kernels: (1) moe_gate_up_3d_batched \u2014 each warp loads gate+up weight rows, streams input activation (read once, reused for both projections), warp-level reduction, applies SiLU(gate)*up, writes one intermediate value. (2) moe_down_3d_batched \u2014 each warp loops over all top-k routed experts, loads down-projection weight rows, folds routing weight into running FP32 accumulator, final __shfl_xor_sync butterfly reduction. Achieves 1.84x decode throughput and 1.4x closer to FP32 ground truth (by eliminating intermediate MXFP8 quantization).",
+  "backend": "cuda",
+  "evidence": [
+    {
+      "problem": "L1/custom",
+      "speedup": 0.7674,
+      "hardware": "L40S",
+      "round": 4,
+      "strategy": "Explore Level 3 parallelism axis adjustment, optimize fundamental decomposition strategy.",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/custom",
+      "speedup": 0.923,
+      "hardware": "L40S",
+      "round": 11,
+      "strategy": "Redesign parallel execution axis to eliminate synchronization overhead and buffer redundancies.",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/custom",
+      "speedup": 0.9286,
+      "hardware": "L40S",
+      "round": 18,
+      "strategy": "explore persistent kernel design eliminating buffers with direct SM mapping and fused operations.",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/reduction",
+      "speedup": 0.2114,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "memory_bound",
+      "sol_score": 0.0
+    }
+  ],
+  "code_template": null,
+  "tags": [
+    "MoE",
+    "decode",
+    "warp_decode",
+    "inference",
+    "small_batch",
+    "warp_per_output",
+    "shfl_xor_sync",
+    "stage_elimination",
+    "buffer_elimination",
+    "embarrassingly_parallel"
+  ],
+  "pitfalls": [
+    "Warp decode is ONLY for small-batch decode \u2014 prefill and large-batch inference still benefit from expert-centric grouped GEMM",
+    "The parallelism axis flip (experts \u2192 outputs) eliminates 5 of 8 traditional stages (gather, pad, quantize, scatter, reduce) but requires complete kernel rewrite",
+    "Each warp must be fully independent \u2014 no shared mutable state between warps, all accumulation in private registers",
+    "__shfl_xor_sync compiles to PTX shfl.sync.bfly instruction which bypasses shared memory entirely \u2014 no L1 round-trips, no bank conflicts, no explicit barriers",
+    "Warp decode sustains 3.95 TB/s of 6.8 TB/s peak (58%) on B200 \u2014 the gap is from random access patterns in expert routing (non-contiguous expert IDs like 5, 8, 14, 19)",
+    "Activations stay in BF16 and accumulators in FP32 throughout \u2014 do NOT quantize activations to MXFP8 for decode (this is what gives the 1.4x accuracy improvement)",
+    "Input activation vector is read once and reused for both gate and up projections \u2014 fusing these two projections is critical for bandwidth efficiency",
+    "Scales linearly: doubling output dimension doubles independent warps with no added synchronization"
+  ]
+}

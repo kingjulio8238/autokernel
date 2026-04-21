@@ -59,8 +59,14 @@ def render_kernel_profile(
     profile: dict | None = None,
     hardware: str = "L40S",
     console: Console | None = None,
+    is_baseline: bool = False,
 ) -> None:
-    """Render kernel profile inline using Claude Code visual language."""
+    """Render kernel profile inline using Claude Code visual language.
+
+    When ``is_baseline=True`` the call is a reference-vs-reference baseline
+    characterization: the Speedup headline and Runtime delta row are omitted
+    and a single Reference runtime line is shown instead.
+    """
     c = console or Console()
     prof = profile or {}
 
@@ -68,15 +74,26 @@ def render_kernel_profile(
     c.print(f"  [bold white]\u2500\u2500 Kernel Profile \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500[/bold white]")
     c.print()
 
-    # Speedup headline
-    if speedup > 1.0:
+    if is_baseline:
+        # Reference-vs-reference baseline: no speedup/delta to show.
+        if ref_runtime_us > 0:
+            c.print(
+                f"  [bold white]Reference[/bold white]   "
+                f"[white]{ref_runtime_us:.0f}μs[/white]   "
+                f"[{_DIM}](5-trial mean)[/{_DIM}]"
+            )
+        else:
+            c.print(f"  [bold white]Reference[/bold white]   [{_DIM}]runtime unavailable[/{_DIM}]")
+    elif speedup > 1.0:
         c.print(f"  [bold white]Speedup[/bold white]   [{_SUCCESS}]{speedup:.2f}x[/{_SUCCESS}]", end="")
     elif speedup > 0:
         c.print(f"  [bold white]Speedup[/bold white]   [{_WARNING}]{speedup:.2f}x[/{_WARNING}]", end="")
     else:
         c.print(f"  [bold white]Speedup[/bold white]   [{_ERROR}]no correct kernel[/{_ERROR}]", end="")
 
-    if ref_runtime_us > 0 and kernel_runtime_us > 0:
+    if is_baseline:
+        pass  # Reference line above already ended with a newline.
+    elif ref_runtime_us > 0 and kernel_runtime_us > 0:
         c.print(f"  [{_DIM}]({ref_runtime_us:.0f}\u03bcs \u2192 {kernel_runtime_us:.0f}\u03bcs)[/{_DIM}]")
     else:
         c.print()
@@ -112,7 +129,7 @@ def render_kernel_profile(
         c.print(f"  \u23bf  [{_DIM}]{' \u00b7 '.join(sub_parts)}[/{_DIM}]")
 
     # Before/after
-    if ref_runtime_us > 0 and kernel_runtime_us > 0:
+    if not is_baseline and ref_runtime_us > 0 and kernel_runtime_us > 0:
         delta_pct = (kernel_runtime_us - ref_runtime_us) / ref_runtime_us * 100
         delta_color = _SUCCESS if delta_pct < 0 else _ERROR
         c.print()

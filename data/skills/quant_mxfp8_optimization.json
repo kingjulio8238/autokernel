@@ -1,0 +1,39 @@
+{
+  "id": "quant_mxfp8_optimization",
+  "name": "MXFP8 Quantization Optimization",
+  "trigger": "MXFP8, FP8, quantize, dequantize, block_scale, microscaling, E4M3, E8M0, mixed precision, int8, fp4",
+  "approach": "MXFP8 uses FP8E4M3 elements with FP8E8M0 scale factors applied per 32-element block. Key optimizations: (1) Fuse quantization into kernel prologues/epilogues to avoid separate quant pass \u2014 quantization overhead can be 76% of matmul time. (2) Produce scale factors in hardware-compatible layout (tcgen05.mma expects specific TMEM layout). (3) Use hardware block-scaled MMA on Blackwell (tcgen05.mma...block_scale) which handles dequantization in tensor cores. (4) On Hopper, pipeline dequantization with CUDA cores while tensor cores run next MMA. (5) For quantization kernels, target 6+ TB/s bandwidth on B200 using cp.async.bulk (intra-SM instructions), avoid TMA swizzling overhead. (6) Fuse non-transposed + transposed output for backward pass in single quantization kernel.",
+  "backend": "any",
+  "evidence": [
+    {
+      "problem": "L1/custom",
+      "speedup": 0.8969,
+      "hardware": "L40S",
+      "round": 6,
+      "strategy": "utilize hardware-native instructions and specialized tensor cores to accelerate kernel execution.",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    }
+  ],
+  "code_template": null,
+  "tags": [
+    "MXFP8",
+    "FP8",
+    "quantization",
+    "block_scale",
+    "microscaling",
+    "E4M3",
+    "E8M0",
+    "dequantization",
+    "mixed_precision"
+  ],
+  "pitfalls": [
+    "Quantization overhead can be 76% of matmul time on Blackwell if not fused \u2014 always fuse quant into kernel prologue/epilogue",
+    "TransformerEngine/TorchAO quantization kernels only achieve 4.5 TB/s \u2014 custom kernels can reach 6.2+ TB/s using cp.async.bulk",
+    "MXFP8 scale factor layout for tcgen05.mma is unintuitive (not simple M x N/32) \u2014 producing wrong layout requires reshaping which kills performance",
+    "On Blackwell, CUDA core FP32 throughput (80 TFLOPS) is 1/56th of FP8 tensor core throughput (4500 TFLOPS) \u2014 dequantization in CUDA cores takes 1.76x the matmul time",
+    "32-block scaling means absolute_max is computed per 32 elements, cast_to_fp8e8m0 rounds UP to nearest power of 2 and min-clamps to 2^-127",
+    "Fused quantization kernel should output both non-transposed and transposed results for forward+backward pass efficiency",
+    "MXFP8 training loss matches BF16 within 0.04% when using E4M3 elements + E8M0 scales + round-to-nearest-even"
+  ]
+}

@@ -31,7 +31,11 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from kernel_code.live_display import LiveOptimizationDisplay
+    from kernel_code.optimization_log import OptimizationLog
     from kernel_code.run_log import RunLogger
+
+from kernel_code.optimization_gate import is_removable_kernel
+from kernel_code.problem_classifier import classify_problem
 
 logger = logging.getLogger(__name__)
 
@@ -45,16 +49,66 @@ def _detect_dtype_simple(code: str) -> str:
     return "float32"
 
 
-def _modal_eval(kernel_code: str, reference_code: str, problem_format: str = "auto") -> dict:
-    """Evaluate a kernel via Modal remote GPU."""
+def _strip_dead_code(code: str) -> str:
+    """Remove dead code the LLM often adds: __main__ blocks, inline tests.
+
+    Keeps kernel + wrapper function only. Safety net for the prompt instruction.
+    """
+    if not code:
+        return code
+
+    # Remove `if __name__ == "__main__":` block and everything after
+    lines = code.split("\n")
+    cleaned = []
+    skip_until_dedent = False
+    main_indent = 0
+
+    for line in lines:
+        stripped = line.lstrip()
+        if stripped.startswith("if __name__"):
+            skip_until_dedent = True
+            main_indent = len(line) - len(stripped)
+            continue
+        if skip_until_dedent:
+            # Still inside __main__ block if indented more than its header
+            if line.strip() == "" or (len(line) - len(line.lstrip())) > main_indent:
+                continue
+            # Dedented back — stop skipping
+            skip_until_dedent = False
+        cleaned.append(line)
+
+    # Remove trailing blank lines
+    while cleaned and not cleaned[-1].strip():
+        cleaned.pop()
+
+    return "\n".join(cleaned) + "\n"
+
+
+from kernel_code.gpu_functions import GPU_FUNCTION_MAP as _GPU_FUNCTION_MAP
+
+
+def _modal_eval(
+    kernel_code: str,
+    reference_code: str,
+    problem_format: str = "auto",
+    gpu_type: str = "L40S",
+) -> dict:
+    """Evaluate a kernel via Modal remote GPU.
+
+    Routes to the correct GPU-specific Modal function based on gpu_type.
+    KernelBench leaderboard standardizes on L40S — other GPU results
+    are not directly comparable.
+    """
     import modal
 
-    eval_fn = modal.Function.from_name("openkernel-eval", "eval_kernel_on_gpu")
+    fn_name = _GPU_FUNCTION_MAP.get(gpu_type, "eval_kernel_on_gpu")
+    eval_fn = modal.Function.from_name("openkernel-eval", fn_name)
     result = eval_fn.remote(
         kernel_source=kernel_code,
         reference_source=reference_code,
         eval_mode="fast",
         problem_format=problem_format,
+        gpu_type=gpu_type,
     )
     return result
 
@@ -73,6 +127,7 @@ class KernelAgentBridge:
         run_logger: "RunLogger | None" = None,
         use_modal: bool = True,
         problem_format: str = "auto",  # "auto", "kernelbench", "gpumode"
+        optimization_log: "OptimizationLog | None" = None,
     ) -> None:
         self._reference = reference_source
         self._model_name = model_name
@@ -83,6 +138,7 @@ class KernelAgentBridge:
         self._run_logger = run_logger
         self._use_modal = use_modal
         self._problem_format = problem_format
+        self._optimization_log = optimization_log
         self._per_worker_latest: list[dict] = []
 
         # Start from global best if provided (for multi-round autopilot)
@@ -155,8 +211,11 @@ class KernelAgentBridge:
         self_contained_ref = make_self_contained(problem)
         self._self_contained_ref = self_contained_ref
 
+        # --- Classify problem type (used for strategy selection + skill matching) ---
+        classification = classify_problem(self._reference)
+
         # --- Few-shot: find a working solution for a similar problem ---
-        few_shot = self._find_few_shot_example(ref_path)
+        few_shot = self._find_few_shot_example(ref_path, classification=classification)
 
         # --- Best kernel carry-forward from previous round ---
         prev_kernel = os.environ.get("OPENKERNEL_BEST_KERNEL", "")
@@ -171,8 +230,38 @@ class KernelAgentBridge:
             f"- Use the EXACT same dtypes as the reference implementation\n"
             f"- The kernel must be correct: torch.allclose(ref, kernel, rtol=1e-2, atol=1e-2)\n"
             f"- Output dtype must match reference output dtype\n"
-            f"- Do NOT hardcode bfloat16 or float16 — use the input tensor's dtype"
+            f"- Do NOT hardcode bfloat16 or float16 — use the input tensor's dtype\n"
+            f"\n"
+            f"PERFORMANCE REQUIREMENTS:\n"
+            f"- MUST use @triton.autotune with 4+ configs varying BLOCK_SIZE "
+            f"(256, 512, 1024, 2048) and num_warps (2, 4, 8)\n"
+            f"- For memory-bound kernels (elementwise, reductions, norms), "
+            f"prioritize vectorized loads and coalesced access\n"
+            f"- Do NOT include shape/dtype/device validation in kernel_function — "
+            f"inputs are pre-validated by the test harness\n"
+            f"- Do NOT include if __name__ == '__main__' blocks or test code — "
+            f"only the kernel and its Python wrapper\n"
+            f"- Keep comments minimal — one-line description per function max, "
+            f"no multi-paragraph docstrings"
         )
+
+        # --- Deterministic gate: skip trivial kernels ---
+        if is_removable_kernel(self._reference):
+            logger.warning("Removable kernel detected — skipping optimization")
+            if self._live_display:
+                self._live_display.print_permanent(
+                    "  [yellow]Skipped: trivial kernel (identity/memcpy/view-only)[/yellow]"
+                )
+            return {
+                "success": False,
+                "kernel_code": "",
+                "speedup": 0.0,
+                "error": "Removable kernel — optimization skipped",
+                "elapsed": 0.0,
+            }
+
+        # Inject classification context (classification computed earlier for few-shot)
+        problem_desc += f"\n\n{classification.to_context_string()}"
 
         # Add few-shot example if available
         if few_shot:
@@ -192,6 +281,15 @@ class KernelAgentBridge:
                 f"Focus on: vectorized loads, autotune configs, memory coalescing."
             )
 
+        # Add optimization trajectory context if available
+        if self._optimization_log and self._optimization_log.rounds:
+            problem_desc += (
+                f"\n\n## OPTIMIZATION TRAJECTORY\n"
+                f"Previous rounds of optimization have been attempted. "
+                f"Study what worked and what didn't, then try a DIFFERENT approach:\n"
+                f"{self._optimization_log.to_context_string(max_rounds=5)}"
+            )
+
         # Build format-appropriate test code (uses self-contained ref)
         problem.reference_code = self_contained_ref
         test_code = build_test_code(problem)
@@ -205,6 +303,12 @@ class KernelAgentBridge:
 
         # Configure workers with Modal eval and callbacks
         self._configure_agent(agent)
+
+        # Pass classification context to live display
+        if self._live_display and hasattr(self._live_display, '_problem_tier'):
+            self._live_display._problem_tier = classification.tier.value
+            self._live_display._problem_type = classification.op_type.value
+            self._live_display._is_memory_bound = classification.is_memory_bound_likely
 
         # Report phase
         if self._live_display:
@@ -316,17 +420,29 @@ class KernelAgentBridge:
                     speedup = 0.0
                     if rounds > 0:
                         try:
-                            latest = max(round_files, key=lambda p: p.name)
-                            data = json.loads(latest.read_text())
-                            # Parse speedup: check top-level field first, then stdout
-                            speedup = float(data.get("speedup", 0.0))
-                            if speedup == 0.0:
-                                import re as _re
-                                stdout = data.get("stdout", "")
-                                sp_match = _re.search(r"Speedup:\s*([\d.]+)x", stdout)
-                                if sp_match:
-                                    speedup = float(sp_match.group(1))
-                            if data.get("success"):
+                            import re as _re
+                            # Scan all rounds for best speedup (for Plot A),
+                            # but use the LATEST round's success for worker status
+                            best_speedup = 0.0
+                            latest_success = False
+                            for rf in sorted(round_files, key=lambda p: p.name):
+                                try:
+                                    data = json.loads(rf.read_text())
+                                    sp = float(data.get("speedup", 0.0))
+                                    if sp == 0.0:
+                                        stdout = data.get("stdout", "")
+                                        sp_match = _re.search(r"Speedup:\s*([\d.]+)x", stdout)
+                                        if sp_match:
+                                            sp = float(sp_match.group(1))
+                                    if sp > best_speedup:
+                                        best_speedup = sp
+                                    # Track latest round's success (sorted order
+                                    # means last iteration = most recent file)
+                                    latest_success = bool(data.get("success"))
+                                except Exception:
+                                    continue
+                            speedup = best_speedup
+                            if latest_success:
                                 status = "passed"
                                 action = f"correct ({speedup:.2f}x)" if speedup > 0 else "correct kernel found"
                         except Exception:
@@ -351,9 +467,11 @@ class KernelAgentBridge:
                     })
             if self._live_display:
                 self._live_display.update_workers(worker_states)
-            # Capture for round-summary plot
+            # Capture for round-summary plot. Profile populated later after
+            # the final Modal eval — we only have per-worker speedup here from
+            # KernelAgent's round files (no profile in those).
             self._per_worker_latest = [
-                {"id": w["id"], "speedup": w.get("speedup", 0.0)}
+                {"id": w["id"], "speedup": w.get("speedup", 0.0), "profile": {}}
                 for w in worker_states
             ]
 
@@ -389,6 +507,10 @@ class KernelAgentBridge:
 
         # If successful, eval on Modal for speedup measurement
         kernel_code = result.get("kernel_code", "")
+
+        # Strip dead code the model often adds (defensive cleanup)
+        kernel_code = _strip_dead_code(kernel_code)
+
         speedup = 0.0
 
         profile = {}
@@ -405,7 +527,11 @@ class KernelAgentBridge:
                 else:
                     eval_code = kernel_code
 
-                eval_result = _modal_eval(eval_code, self._self_contained_ref, problem_format=self._resolved_format)
+                eval_result = _modal_eval(
+                    eval_code, self._self_contained_ref,
+                    problem_format=self._resolved_format,
+                    gpu_type=self._hardware,
+                )
                 if eval_result.get("correct"):
                     speedup = eval_result.get("speedup", 0.0)
                     ref_runtime_us = eval_result.get("ref_runtime_us", 0.0)
@@ -424,15 +550,56 @@ class KernelAgentBridge:
                     strategy = os.environ.get("OPENKERNEL_CURRENT_STRATEGY", "")
                     intent = strategy[:50] if strategy else f"round {self._iteration_count + 1}"
 
+                    # Compute SOL score for live display
+                    _sol = 0.0
+                    if profile and ref_runtime_us > 0 and kernel_runtime_us > 0:
+                        try:
+                            from kernel_code.sol_metrics import compute_sol_score
+                            _sol = compute_sol_score(
+                                kernel_runtime_us=kernel_runtime_us,
+                                ref_runtime_us=ref_runtime_us,
+                                total_flops=profile.get("total_flops", 0),
+                                total_bytes=profile.get("total_bytes", 0),
+                                gpu_type=self._hardware,
+                            )
+                        except Exception:
+                            pass
+
                     self._live_display.update_iteration(
                         num=self._iteration_count + 1,
                         speedup=speedup,
                         status=status,
                         intent=intent,
+                        sol_score=_sol,
                     )
+                    # Pass profile metrics to live display
+                    if hasattr(self._live_display, 'update_profile') and profile:
+                        self._live_display.update_profile(
+                            bw_pct=profile.get("bandwidth_utilization", 0.0) * 100,
+                            compute_pct=profile.get("compute_utilization", 0.0) * 100,
+                        )
                     self._iteration_count += 1
             except Exception as exc:
                 logger.warning("Modal eval of final kernel failed: %s", exc)
+
+        # Attach the final Modal profile to the winning worker's per-worker
+        # entry (identified by worker_id or highest speedup fallback). Only
+        # one profile exists per round — KernelAgent's per-round JSON files
+        # don't include profiling data, so non-winning workers get {}.
+        winning_id = result.get("worker_id")
+        if profile and self._per_worker_latest:
+            target = None
+            if winning_id is not None:
+                for w in self._per_worker_latest:
+                    if w.get("id") == winning_id:
+                        target = w
+                        break
+            if target is None:
+                target = max(
+                    self._per_worker_latest,
+                    key=lambda w: w.get("speedup", 0.0) or 0.0,
+                )
+            target["profile"] = profile
 
         return {
             "success": result.get("success", False),
@@ -447,13 +614,14 @@ class KernelAgentBridge:
             "per_worker": self._per_worker_latest,
         }
 
-    def _find_few_shot_example(self, ref_path: Path) -> str:
+    def _find_few_shot_example(self, ref_path: Path, classification: Any = None) -> str:
         """Find a relevant Triton code example for the problem.
 
-        Three-level search:
+        Four-level search:
         1. Exact solution (GPU Mode benchmarks with solutions/correct/)
-        2. Skill template match (10 skills with code_template by problem type)
-        3. Generic Triton pattern (vectoradd as universal example)
+        2. KernelBook match from HuggingFace (25K PyTorch→Triton pairs)
+        3. Skill template match (10 skills with code_template by problem type)
+        4. Generic Triton pattern (vectoradd as universal example)
         """
         # Level 1: Exact solution from benchmark
         for search_dir in [ref_path.parent, ref_path.parent.parent]:
@@ -463,17 +631,37 @@ class KernelAgentBridge:
                     if sol.suffix == ".py" and "triton" in sol.name.lower():
                         return sol.read_text()
 
-        # Level 2: Match skills library by problem keywords
+        # Level 2: KernelBook match from HuggingFace
+        try:
+            from kernel_code.kernelbook import find_similar_example
+            kb_match = find_similar_example(self._reference)
+            if kb_match:
+                return kb_match
+        except Exception:
+            pass  # KernelBook unavailable — continue to skill match
+
+        # Level 3: Match skills library by problem keywords + classification boost
         ref_code = self._reference.lower()
         skills_dir = Path(__file__).resolve().parent.parent.parent / "data" / "skills"
         if skills_dir.is_dir():
             import json as _json
+            # Use passed classification or compute fresh
+            try:
+                if classification is None:
+                    classification = classify_problem(self._reference)
+                op_type = classification.op_type.value
+                tier = classification.tier.value
+                is_mem = classification.is_memory_bound_likely
+            except Exception:
+                op_type = ""
+                tier = ""
+                is_mem = None
+
             best_skill = None
             best_score = 0
             for skill_file in skills_dir.glob("*.json"):
                 try:
                     skill = _json.loads(skill_file.read_text())
-                    # Score by keyword match
                     keywords = skill.get("tags", [])
                     trigger_kw = skill.get("auto_trigger", {}).get("problem_keywords", [])
                     all_kw = keywords + trigger_kw
@@ -482,7 +670,24 @@ class KernelAgentBridge:
                     is_triton = backend == "triton" or "triton" in skill.get("id", "")
                     score = sum(1 for kw in all_kw if kw in ref_code)
                     if is_triton:
-                        score += 5  # strongly prefer triton examples
+                        score += 5
+
+                    # Classification boost: +3 for matching op_type in tags
+                    if op_type:
+                        tags_lower = [t.lower() for t in keywords]
+                        if op_type in tags_lower:
+                            score += 3
+                    # Hardware match boost: +2 for matching hardware in tags
+                    hw_lower = self._hardware.lower()
+                    if any(hw_lower in t.lower() for t in keywords):
+                        score += 2
+                    # Memory/compute bound match: +2
+                    if is_mem is not None:
+                        if is_mem and "memory_bound" in [t.lower() for t in keywords]:
+                            score += 2
+                        elif not is_mem and "compute_bound" in [t.lower() for t in keywords]:
+                            score += 2
+
                     if score > best_score and skill.get("code_template"):
                         best_score = score
                         best_skill = skill
@@ -507,3 +712,4 @@ class KernelAgentBridge:
             # Send self-contained reference so Modal has all dependencies
             os.environ["OPENKERNEL_REFERENCE_CODE"] = self._self_contained_ref
             os.environ["OPENKERNEL_PROBLEM_FORMAT"] = self._resolved_format
+            os.environ["OPENKERNEL_GPU_TYPE"] = self._hardware

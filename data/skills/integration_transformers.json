@@ -1,0 +1,24 @@
+{
+  "id": "integration_transformers",
+  "name": "Transformers Model Integration",
+  "trigger": "transformers, Qwen, LLaMA, Gemma, model, language model, LLM inference",
+  "approach": "Inject custom kernels into transformers models by patching specific layer modules. Walk model.named_modules() to find target layers (e.g., RMSNorm in decoder layers). For models like Qwen3-8B with 65 RMSNorm modules across 32 layers, patching provides cumulative speedup. Register kernels as PyTorch custom ops for torch.compile compatibility. Use model.config for hidden_size, num_layers.",
+  "backend": "any",
+  "evidence": [],
+  "code_template": "def patch_transformers_rmsnorm(model, custom_rmsnorm_fn):\n    \"\"\"Patch all RMSNorm modules in a transformers model.\"\"\"\n    patched = 0\n    for name, module in model.named_modules():\n        if type(module).__name__ in ('LlamaRMSNorm', 'Qwen2RMSNorm', 'GemmaRMSNorm', 'RMSNorm'):\n            eps = getattr(module, 'variance_epsilon', getattr(module, 'eps', 1e-6))\n            def make_forward(mod, _eps):\n                def forward(hidden_states):\n                    return custom_rmsnorm_fn(hidden_states, mod.weight, _eps)\n                return forward\n            module.forward = make_forward(module, eps)\n            patched += 1\n    return patched",
+  "tags": [
+    "transformers",
+    "integration",
+    "module_patching",
+    "LLM",
+    "inference",
+    "RMSNorm"
+  ],
+  "pitfalls": [
+    "Different model families use different RMSNorm class names (LlamaRMSNorm, Qwen2RMSNorm, etc.)",
+    "Epsilon attribute name varies: variance_epsilon (LLaMA/Qwen) vs eps (generic)",
+    "Speedup scales with sequence length \u2014 1.58x at 128 tokens but 2.47x at 8192 tokens",
+    "RMSNorm is typically ~5% of total compute \u2014 a 2x kernel speedup yields ~5% end-to-end",
+    "Must handle both float16 and bfloat16 \u2014 check model.config.torch_dtype"
+  ]
+}

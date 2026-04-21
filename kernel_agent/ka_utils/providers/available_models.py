@@ -18,6 +18,7 @@ from kernel_agent.ka_utils.providers.model_config import ModelConfig
 from kernel_agent.ka_utils.providers.openai_provider import OpenAIProvider
 from kernel_agent.ka_utils.providers.anthropic_provider import AnthropicProvider
 from kernel_agent.ka_utils.providers.relay_provider import RelayProvider
+from kernel_agent.ka_utils.providers.ollama_provider import OllamaProvider
 
 
 # Registry of all available models (external/OSS version)
@@ -94,5 +95,26 @@ AVAILABLE_MODELS = [
         name="gpt-5-2",
         provider_classes=[RelayProvider],
         description="GPT-5.2 flagship model (Dec 2025) - Note the name is different from the OpenAI model",
+    ),
+    # Ollama / Self-hosted Models
+    ModelConfig(
+        name="KernelLLM",
+        provider_classes=[OllamaProvider],
+        description="facebook/KernelLLM - Llama 3.1 8B fine-tuned on 25K Triton pairs (20.2 pass@1 on KernelBench L1)",
+    ),
+    ModelConfig(
+        name="ollama/KernelLLM",
+        provider_classes=[OllamaProvider],
+        description="facebook/KernelLLM via Ollama - Triton kernel specialist",
+    ),
+    ModelConfig(
+        name="ollama/codellama",
+        provider_classes=[OllamaProvider],
+        description="CodeLlama via Ollama - general code generation",
+    ),
+    ModelConfig(
+        name="ollama/deepseek-coder-v2",
+        provider_classes=[OllamaProvider],
+        description="DeepSeek Coder V2 via Ollama - strong coding model",
     ),
 ]

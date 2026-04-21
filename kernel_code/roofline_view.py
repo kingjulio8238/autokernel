@@ -31,10 +31,21 @@ _LANDMARKS = [
     ("cuBLAS", 200.0, 0.85),
 ]
 
-# L40S specs
-_PEAK_TFLOPS = 91.6  # fp32
-_PEAK_BW = 864  # GB/s
-_RIDGE_OI = _PEAK_TFLOPS * 1000 / _PEAK_BW  # ~106 FLOP/byte
+# Hardware specs: (peak_tflops_fp32, peak_bandwidth_gbs)
+# All values are fp32 for consistent roofline comparison
+_HW_SPECS: dict[str, tuple[float, float]] = {
+    "L40S": (91.6, 864),         # fp32 / GDDR6X
+    "H100": (756.0, 3350),      # fp32 dense / HBM3 (SXM5)
+    "A100-80GB": (156.0, 2039),  # fp32 / HBM2e
+    "A100-40GB": (156.0, 1555),  # fp32 / HBM2
+}
+
+
+def _get_hw_specs(hardware: str) -> tuple[float, float, float]:
+    """Get (peak_tflops, peak_bw_gbs, ridge_oi) for hardware."""
+    peak_tflops, peak_bw = _HW_SPECS.get(hardware, _HW_SPECS["L40S"])
+    ridge_oi = peak_tflops * 1000 / peak_bw  # FLOP/byte
+    return peak_tflops, peak_bw, ridge_oi
 
 
 def render_roofline(
@@ -43,8 +54,17 @@ def render_roofline(
     user_speedup: float = 0.0,
     user_label: str = "your kernel",
     hardware: str = "L40S",
+    profile: dict | None = None,
 ) -> None:
-    """Render an ASCII roofline plot."""
+    """Render an ASCII roofline plot.
+
+    Args:
+        profile: Optional profile dict from Modal eval containing
+                 'operational_intensity', 'total_flops', 'total_bytes'.
+                 When provided, uses measured OI for exact kernel placement.
+    """
+    peak_tflops, peak_bw, ridge_oi = _get_hw_specs(hardware)
+
     console.print()
     console.print(
         f"  [bold white]\u2500\u2500 Roofline ({hardware}) "
@@ -68,7 +88,7 @@ def render_roofline(
     grid[height - 1][4] = "\u2514"  # corner
 
     # Draw roofline: memory slope + compute ceiling
-    ridge_x = int(4 + (_ridge_to_x(_RIDGE_OI) * (width - 6)))
+    ridge_x = int(4 + (_ridge_to_x(ridge_oi) * (width - 6)))
     ridge_x = min(ridge_x, width - 2)
 
     # Memory slope (left side)
@@ -83,7 +103,7 @@ def render_roofline(
         grid[ceiling_y][x] = "\u2500"  # flat ceiling
 
     # Label the ceiling
-    _place_label(grid, 0, ridge_x + 2, f"{_PEAK_TFLOPS:.0f} TFLOPs", width)
+    _place_label(grid, 0, ridge_x + 2, f"{peak_tflops:.0f} TFLOPs", width)
 
     # Plot landmarks
     for name, oi, frac in _LANDMARKS:
@@ -94,10 +114,14 @@ def render_roofline(
         grid[y][x] = "\u25cf"  # ●
 
     # Plot user kernel
+    oi_measured = False
     if user_speedup > 0 and view == "me":
-        # Estimate OI and fraction from speedup
+        # Use measured OI from profile if available, else estimate
+        user_oi = 1.0  # default heuristic
+        if profile and profile.get("operational_intensity", 0) > 0:
+            user_oi = profile["operational_intensity"]
+            oi_measured = True
         user_frac = min(0.9, user_speedup * 0.08)
-        user_oi = 1.0  # default for unknown
         x = int(4 + (_ridge_to_x(user_oi) * (width - 6)))
         y = height - 2 - int(user_frac * (height - 3))
         x = max(5, min(width - 2, x))
@@ -119,7 +143,12 @@ def render_roofline(
 
     # Legend
     if view == "me" and user_speedup > 0:
-        console.print(f"  [{_SUCCESS}]\u2605[/{_SUCCESS}] {user_label} ({user_speedup:.2f}x)")
+        oi_note = "measured OI" if oi_measured else "estimated OI"
+        oi_val = f" · OI={user_oi:.1f}" if oi_measured else ""
+        console.print(
+            f"  [{_SUCCESS}]\u2605[/{_SUCCESS}] {user_label} "
+            f"({user_speedup:.2f}x{oi_val}) [{_DIM}]{oi_note}[/{_DIM}]"
+        )
 
     # Landmark legend
     legend = Text()
@@ -131,7 +160,7 @@ def render_roofline(
     console.print(legend)
 
     if view == "mem":
-        console.print(f"\n  [{_DIM}]Memory roof: {_PEAK_BW} GB/s  |  Ridge point: {_RIDGE_OI:.0f} FLOP/byte[/{_DIM}]")
+        console.print(f"\n  [{_DIM}]Memory roof: {peak_bw} GB/s  |  Ridge point: {ridge_oi:.0f} FLOP/byte[/{_DIM}]")
 
     console.print()
 

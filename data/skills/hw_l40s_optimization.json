@@ -1,0 +1,22 @@
+{
+  "id": "hw_l40s_optimization",
+  "name": "L40S Architecture Optimization",
+  "trigger": "L40S, sm_89, Ada Lovelace, compute_89",
+  "approach": "Target L40S architecture: 142 SMs, 100KB shared memory per SM, 864 GB/s GDDR6X bandwidth, 183 TFLOPS FP16. Lower bandwidth than A100/H100 makes memory-bound kernels harder to optimize. Focus on compute-bound optimizations, register blocking, and minimizing memory traffic. Grid multiples of 142.",
+  "backend": "any",
+  "evidence": [],
+  "code_template": null,
+  "tags": [
+    "L40S",
+    "Ada_Lovelace",
+    "sm_89",
+    "hardware_specific",
+    "GDDR6X",
+    "KernelBench_standard"
+  ],
+  "pitfalls": [
+    "L40S is the KernelBench leaderboard standard GPU \u2014 results on other GPUs are not directly comparable",
+    "GDDR6X bandwidth (864 GB/s) is much lower than HBM \u2014 memory-bound kernels benefit less from optimization",
+    "Shared memory per SM is 100KB \u2014 significantly less than H100 (192KB), plan tiles accordingly"
+  ]
+}

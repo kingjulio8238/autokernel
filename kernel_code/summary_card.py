@@ -73,7 +73,7 @@ def render_optimization_summary(
     content.append_text(_metric_row("Best Speedup", f"{best_speedup:.2f}x", "bold #4ade80", f"(iter {best_iteration})"))
     content.append_text(_metric_row("Kept / Total", f"{kept_count} / {total_count}", "bold white", f"({pct:.0f}%)"))
     if cost_summary:
-        content.append_text(_metric_row("Cost", cost_summary, "bold white"))
+        content.append_text(_metric_row("LLM Cost", cost_summary, "bold white"))
     if elapsed_seconds > 0:
         mins = int(elapsed_seconds) // 60
         secs = int(elapsed_seconds) % 60

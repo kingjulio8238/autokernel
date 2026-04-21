@@ -1,0 +1,461 @@
+# kernel+ Plan
+
+Multi-phase roadmap to take the kernel optimization harness from "works on one problem" to "respectable on KernelBench." Living doc — update phase status and RESULTS column as work completes.
+
+## Terminology
+
+- **kernel+** — the agent harness (meta-optimizer + bridge + orchestrator + skill library). The research/capability layer.
+- **kernel_code** — the TUI/CLI product layer that wraps kernel+. User-facing.
+- **SOL** — Speed of Light = achieved / hardware peak. Bounded [0, 1]. Hardware-normalized, problem-normalized. The metric kernel engineers use internally.
+
+## North-star metric
+
+**Mean SOL on KernelBench L1** (primary), with secondary cuts by tier, P90, solved-rate @ SOL ≥ 0.3, geomean speedup, correctness rate.
+
+Replaces vs-reference speedup as the primary optimization target. Speedup survives as a debug-column secondary metric during the transitional phase.
+
+## Targets
+
+| Milestone   | Mean SOL (L1) | Solved-rate @ SOL ≥ 0.3 | Notes                                       |
+|-------------|---------------|-------------------------|---------------------------------------------|
+| Week 1      | 0.25 – 0.35   | ≥ 20%                   | Beats naive baseline; approaches o1 rates   |
+| Month 1     | 0.40 – 0.50   | ≥ 40%                   | Respectable; approaches Cursor's 0.56 median |
+| Stretch     | ≈ 0.56        | ≥ 55%                   | Matches Cursor median; expand to L2         |
+
+### Baselines (cite when reporting results)
+
+- Cursor multi-agent kernels (H200, 235 proprietary problems): median SOL 0.56, peak 0.97. [blog](https://cursor.com/blog/multi-agent-kernels)
+- OpenAI o1 on KernelBench: 10% L1, 24% L2, 12% L3 solved.
+- DeepSeek R1 on KernelBench: 12% L1, 36% L2, 2% L3 solved.
+- Stanford KernelBench leaderboard SOTA: <20% combined. [leaderboard](https://scalingintelligence.stanford.edu/KernelBenchLeaderboard/)
+- Sakana AI (retracted, then rebuilt robustly): [robust-kbench](https://github.com/SakanaAI/robust-kbench). Lesson: strict verification, no sandbox exploits, deterministic inputs, flag absurd speedups as suspicious.
+
+## Cross-cutting execution pattern: work-team + review-team per phase
+
+Every phase runs this loop:
+
+```
+1. Plan   → lead decomposes phase into independent tasks
+2. Work   → spawn N work agents in parallel, one per task, into a team
+3. Review → once work reports in, spawn M review agents in parallel (read-only, Explore type)
+4. Gate   → review agents must all report "no blocking issues"
+            If blocking issues: spawn fix agents, re-review, repeat
+            If clean: phase closed, merge to main, update RESULTS row
+5. Next   → advance to next phase
+```
+
+Rules:
+- **Parallel-by-default**: work and review agents always run concurrently. Serial work only when there's a hard file-level conflict.
+- **Read-only reviews**: review agents use the `Explore` subagent type. They produce reports, not edits.
+- **Concrete review rubric**: every phase ships a written review rubric (see per-phase sections below) so reviewers aren't guessing what to check.
+- **No phase advance without green review**: if reviews flag blocking issues, fix and re-review before moving on. Non-blocking improvements can be deferred with a TODO.
+- **RESULTS log**: every completed phase adds a row to the RESULTS table at the bottom with mean SOL before/after, cost, elapsed wall time, and link to the run log.
+
+---
+
+## Phase 0 — SOL Instrumentation
+
+**Status:** not started
+**Estimate:** 3 days
+**Depends on:** nothing
+**Unlocks:** Phase 1, Phase 2
+
+### Goal
+
+SOL flows end-to-end from Modal eval → profile dict → run log → plots → UI. Every iteration record in `.kernel-code/runs/*.log` carries real `sol_score`, `compute_util`, `bandwidth_util`, `occupancy`. Plots stop using the `0.5 × speedup` fallback.
+
+### Root cause from audit
+
+- Modal's `_collect_basic_profile()` returns flops/bytes but not `sol_score`.
+- `KernelAgentBridge` computes SOL in-memory for UI display only (never merges back to profile dict).
+- `RunLogger.log_iteration()` accepts no profile param.
+- JSON summaries and plots fall back to `sol = 0.5 × speedup`.
+
+### Work agents (parallel, into team `phase-0-sol`)
+
+- **`modal-sol`** — `modal_infra/app.py`: compute `sol_score` inside `_collect_basic_profile()` using hardware peaks already defined (L40S 183 TFLOPS / 864 GB/s; H100 989 / 3350; A100-80GB 312 / 2039; B200 2250 / 8000). Include in returned profile dict. Handle missing flops/bytes gracefully (SOL = 0.0, don't crash).
+- **`logger-sol`** — `kernel_code/run_log.py`: extend `log_iteration()` to accept optional `profile: dict | None = None`; merge relevant keys (`sol_score`, `compute_util`, `bandwidth_util`, `occupancy`, `cache_efficiency`, `bottleneck_type`) into the iteration entry. Backwards-compatible: existing callers pass nothing, behave as before.
+- **`plumbing-sol`** — `kernel_code/auto_optimizer.py` + `kernel_code/integration/kernel_agent_bridge.py`: thread per-iteration profile from `round_result["per_worker"]` (or equivalent) into `log_iteration()`. Ensure the bridge emits profile data (not just speedup) in its round result.
+
+### Review agents (parallel, into team `phase-0-review`)
+
+- **`review-correctness`** — Explore type. Check: does a known memory-bound op (e.g., LayerNorm on 4M elements) produce a SOL value in the expected range (0.3-0.7)? Does a compute-bound op (a GEMM if available) differentiate correctly? Walk the SOL formula in `sol_metrics.py` and verify against a hand-computed roofline.
+- **`review-edge-cases`** — Explore type. What happens when:
+  - Profile is missing entirely (kernel failed to compile)?
+  - `ref_runtime_us` is 0? Division by zero in SOL calc?
+  - Hardware unknown to the peak table? Does it fall back gracefully?
+  - NaN or negative utilization reaches plots?
+- **`review-regression`** — Explore type. Check: does a fresh `/optimize` run on `reference_layernorm.py` (backed-up old reference) still produce the expected output structure? Does `tests/test_workload_spec.py` still pass? Any existing tests in `tests/` for run_log or auto_optimizer — do they still pass?
+
+### Review rubric
+
+| Dimension         | Bar to clear                                                              |
+|-------------------|---------------------------------------------------------------------------|
+| Functionality     | A fresh run produces non-zero `sol_score` in the run-log JSON             |
+| Numerical sanity  | LayerNorm SOL in [0.2, 0.8], GEMM SOL in [0.2, 0.95]                      |
+| Edge cases        | Missing profile, zero runtime, unknown hardware all handled gracefully    |
+| Backwards-compat  | Old run logs still parse; `log_iteration()` callers without profile work  |
+| No regressions    | Phase 2 UX catalog's existing surfaces still render (no template errors)  |
+
+### Gate decision
+
+Once all 3 review agents report no blocking issues, Phase 0 is closed and Phase 1 can begin. Non-blocking issues get logged to the tail of this file as TODOs.
+
+---
+
+## Phase 1 — Benchmark Harness
+
+**Status:** not started
+**Estimate:** 4-5 days
+**Depends on:** Phase 0
+**Unlocks:** Phase 3 (all measurement-driven work)
+
+### Goal
+
+Run a full KernelBench L1 + L2 + GPU MODE sweep on demand / nightly. Store results in a leaderboard. Produce a one-line summary: `Mean SOL 0.31 on KernelBench L1 (42/100 solved, $187 cost, 1h 52m wall).`
+
+### Suite
+
+- KernelBench L1: 100 problems
+- KernelBench L2: 100 problems
+- GPU MODE: 8 problems (regression check on every commit to `kernel_code/`)
+- Total: 208 problems
+- Budget: $0.50/problem = $100-150/sweep
+- Wall time target: ≤ 2 hours with parallelism
+
+### Sub-phase DAG
+
+Phase 1 is broken into four rounds. Each round gates on clean reviews before advancing. Within a round, all work agents run in parallel.
+
+```
+Round A (foundation, 3 parallel)
+├── 1.0a kb-smoke
+├── 1.0b schema
+└── 1.0c problem-spec
+    → review (3 agents)
+
+Round B (loaders + storage, 5 parallel)
+├── 1.1a kb-l1-loader
+├── 1.1b kb-l2-loader
+├── 1.1c gpumode-loader
+├── 1.2a leaderboard-writer
+└── 1.2b leaderboard-reader
+    → review (3 agents)
+
+Round C (runner + reporting, 4 parallel)
+├── 1.3  batch-runner
+├── 1.4a metrics
+├── 1.4b markdown-report
+└── 1.4c regression-detector
+    → review (4 agents)
+
+Round D (integration, sequential)
+├── 1.5 dry-run (10-problem subset)
+│   → review (2 agents)
+└── 1.6 full-sweep (208 problems — the Phase 1 deliverable)
+    → review (2 agents)
+```
+
+### Round A — Foundation (3 work agents parallel)
+
+| ID    | Agent         | Deliverable | Acceptance |
+|-------|---------------|-------------|------------|
+| 1.0a  | `kb-smoke`    | `scripts/kb_smoke.py` — runs `kernelbench.dataset[0]` through `shell.py:_cmd_profile_ref`'s kernelbench branch on Modal. | Exit code 0. Prints SOL > 0, speedup, correctness for one L1 problem. |
+| 1.0b  | `schema`      | `results/leaderboard/SCHEMA.md` + `results/leaderboard/_example.json`. Fields: `problem_id, problem_name, tier, hardware, date, kernel_hash, model, speedup, sol_score, compute_util, bandwidth_util, bottleneck_type, correct, cost_usd, elapsed_s, stop_reason, config_hash`. | Markdown readable; sample JSON parses; every field documented with type + example. |
+| 1.0c  | `problem-spec`| `openkernel/benchmarks/problem_spec.py` — `ProblemSpec` dataclass: `id, name, tier, source, reference_source, workload_spec, expected_dtype`. | Import works; one unit test passes. |
+
+**Round A review rubric:**
+- `review-smoke`: can kb-smoke be trusted as a regression gate? Does it catch real breakage or just import errors?
+- `review-schema`: field coverage complete? Any future reporting need we can't serve?
+- `review-spec`: interface flexible enough to hold kernelbench AND gpumode without forcing awkward coercions?
+
+**Round A gate:** `kb-smoke` passes on Modal with current harness. If it fails, blockers must be fixed before Round B (otherwise batch-runner builds on quicksand).
+
+### Round B — Loaders + Storage (5 work agents parallel)
+
+| ID    | Agent               | Deliverable | Acceptance |
+|-------|---------------------|-------------|------------|
+| 1.1a  | `kb-l1-loader`      | `openkernel/benchmarks/kb_l1.py:load_l1() -> list[ProblemSpec]` | `len(load_l1()) == 100`; each spec has reference_source populated. |
+| 1.1b  | `kb-l2-loader`      | `openkernel/benchmarks/kb_l2.py:load_l2() -> list[ProblemSpec]` | `len(load_l2()) == 100`. |
+| 1.1c  | `gpumode-loader`    | `openkernel/benchmarks/gpumode_loader.py:load_gpumode() -> list[ProblemSpec]` — the 8 problems under `data/benchmarks/gpumode/`. | `len(load_gpumode()) == 8`; reference.py source captured for each. |
+| 1.2a  | `leaderboard-writer`| `openkernel/benchmarks/leaderboard_writer.py:write_record(spec, result) -> Path`. Atomic temp+rename under `results/leaderboard/YYYY-MM-DD/`. | Two concurrent writes don't corrupt; crash mid-write leaves no partial file. |
+| 1.2b  | `leaderboard-reader`| `openkernel/benchmarks/leaderboard_reader.py`: `load_all()`, `filter(tier=, date_range=, hardware=)`, `latest_per_problem()`. | 3 unit tests on fake data pass. |
+
+**Round B review rubric:**
+- `review-loaders`: all 208 problems across the 3 loaders produce valid `ProblemSpec` instances; no missing `reference_source`, no dupes.
+- `review-writer`: atomic under concurrent access; schema-valid records only (validates against 1.0b schema).
+- `review-reader`: filter/sort correctness on fake data; handles empty/missing dates gracefully.
+
+**Round B gate:** all 208 loaders + both storage APIs pass their unit tests. Writer produces schema-compliant records.
+
+### Round C — Runner + Reporting (4 work agents parallel)
+
+| ID    | Agent                 | Deliverable | Acceptance |
+|-------|-----------------------|-------------|------------|
+| 1.3   | `batch-runner`        | `kernel_code/batch_optimizer.py:run_suite(specs, hardware, budget_per_problem, concurrency)`. Parallel execution, per-problem budget, resumable (skip if today's leaderboard row exists), graceful budget overage. | 10-spec fake run produces 10 leaderboard rows; mid-run Ctrl-C leaves clean state; re-run skips completed. |
+| 1.4a  | `metrics`             | `scripts/score_suite.py` CLI. Computes mean SOL (correct only), P50, P90, solved-rate @ SOL ≥ 0.3, correctness rate, geomean speedup, per-tier cuts. | `--date YYYY-MM-DD --hardware L40S` emits JSON scores. |
+| 1.4b  | `markdown-report`     | `scripts/emit_report.py` → `results/reports/YYYY-MM-DD.md`. Headline + per-tier + baseline comparison (Cursor 0.56 median, o1 10% L1, R1 12% L1, Stanford SOTA <20%). | Report reads well, cites baselines, includes day-over-day trend if available. |
+| 1.4c  | `regression-detector` | `scripts/check_regressions.py`. Compares today vs last N days (default 7), flags problems where SOL dropped > 0.05 from N-day max. | Exit code 1 if regressions found (CI-hookable); markdown list of regressions emitted. |
+
+**Round C review rubric:**
+- `review-runner`: budget/concurrency/resume correctness — highest-risk component. Ctrl-C mid-suite recoverable? Budget overage graceful?
+- `review-metrics`: formulas match KernelBench paper definitions. Per-tier aggregation correct. SOL-only (correct kernels) not polluted by incorrect.
+- `review-report-quality`: readable for a KE skimming it. Actionable. Baselines cited.
+- `review-regression-alerts`: false-positive rate acceptable on synthetic noise data.
+
+**Round C gate:** batch-runner drives a 10-spec fake suite end-to-end, metrics + report + regression all run off the produced leaderboard without error.
+
+### Round D — Integration (sequential)
+
+| ID   | Agent       | Deliverable | Acceptance |
+|------|-------------|-------------|------------|
+| 1.5  | `dry-run`   | Run 10-problem subset on Modal L40S (3 L1 + 3 L2 + 4 gpumode), write leaderboard, emit report. | Wall time ≤ 15min; cost ≤ $10; all 10 rows in leaderboard; report markdown committed at `results/reports/`. |
+| 1.6  | `full-sweep`| Run all 208 problems on Modal L40S with $0.50/problem cap. Emit report. Update `KERNEL_PLUS_PLAN.md` RESULTS row with Phase 1's first real mean SOL number. | Full sweep completes; report committed; RESULTS row populated. |
+
+**Round D.5 review rubric (before 1.6):**
+- `review-dry-run-correctness`: silent failures? Did any problem report "success" but produce no kernel?
+- `review-cost-model`: extrapolating from dry-run, full-sweep cost ≤ $300? If higher, reduce concurrency or tighten per-problem budget.
+
+**Round D.6 review rubric (final Phase 1 gate):**
+- `review-first-baseline`: is our number defensible? Any reward-hacking risk (Sakana lesson — absurd speedups should be flagged and manually audited)?
+- `review-report-citable`: format matches Cursor / KernelBench publication so side-by-side comparison is straightforward.
+
+### Agent count per round
+
+| Round | Work | Review | Total tasks |
+|-------|------|--------|-------------|
+| A     | 3    | 3      | 6           |
+| B     | 5    | 3      | 8           |
+| C     | 4    | 4      | 8           |
+| D.5   | 1    | 2      | 3           |
+| D.6   | 1    | 2      | 3           |
+| **Total** | **14** | **14** | **28** |
+
+Never more than 5 work agents concurrent per round → file conflict surface is low.
+
+### Critical path
+
+- **Round A blocker:** 1.0a `kb-smoke`. If KernelBench integration is broken on current harness, all downstream rounds are blocked until fixed. Fast-fail early.
+- **Round B blocker:** 1.2a `leaderboard-writer`. Batch-runner can't land without a writer to call.
+- **Round C blocker:** 1.3 `batch-runner`. Dry-run can't land without it.
+
+### Gate criteria (Phase 1 closed)
+
+| Dimension          | Bar                                                                    |
+|--------------------|------------------------------------------------------------------------|
+| Completion         | Full sweep finishes in ≤ 2h, cost ≤ $300                              |
+| Reproducibility    | Same-seed re-runs within 5% SOL variance                              |
+| No cheating        | Random sample of top-5 kernels audited and clean                      |
+| Summary quality    | Scoring script produces ready-to-cite markdown matching baseline format |
+| RESULTS row        | Phase 1 row in this doc populated with mean SOL + solved-rate         |
+
+---
+
+## Phase 2 — SOL-as-metric transition
+
+**Status:** not started
+**Estimate:** 3 days (parallel with Phase 1)
+**Depends on:** Phase 0
+**Unlocks:** Phase 4
+
+### Goal
+
+`GoalSpec` gains `target_sol`. User can type "target SOL 0.8" and the run stops on SOL, not speedup. Evidence gate uses SOL. Both metrics display side-by-side during the transitional period.
+
+### Work agents (parallel, into team `phase-2-sol-ux`)
+
+- **`goal-spec`** — `kernel_code/goal_spec.py` + `kernel_code/goal_parser.py`: add `target_sol: float = 0.80` field. Parse `"SOL 0.8"`, `"0.8 SOL"`, `"80% SOL"`. Keep `target_speedup` readable for backwards-compat.
+- **`stopping-rule`** — `kernel_code/auto_optimizer.py`: target-reached fires on `sol >= target_sol` when SOL is available; falls back to `speedup >= target_speedup` if not. Overshoot-exploratory logic mirrored for SOL.
+- **`evidence-gate`** — `kernel_code/evidence_tracker.py`: replace `speedup > 1.02` filter with `sol > 0.50 AND sol >= prior_best_sol_for_this_problem`. Requires a "prior best" lookup from leaderboard (Phase 1 dependency — can stub initially).
+- **`dual-display`** — `kernel_code/summary_card.py`, `kernel_profile.py`, `live_display.py`, `run_log.py`, `sol_plots.py`: dual-metric display for transition period. SOL primary, speedup secondary.
+
+### Review agents (parallel)
+
+- **`review-backcompat`** — old `.kernel-code/runs/*.log` files (from before Phase 0) still readable via current tooling. Checkpoints with only speedup still resume.
+- **`review-prompts`** — new CLI prompts read naturally. Regression: user typing `"2x speedup"` still works (parser should handle both).
+- **`review-consistency`** — all 21 surfaces from ux-migration's catalog now show SOL primary, no orphaned speedup-only displays.
+
+### Gate criteria
+
+- User types `/optimize target=0.8 sol` → autopilot stops on SOL
+- Old logs still parse
+- Skill library evidence no longer polluted by sub-baseline runs
+
+---
+
+## Phase 3 — kernel+ iteration
+
+**Status:** not started
+**Estimate:** 10-14 days total
+**Depends on:** Phase 0, Phase 1, Phase 2
+**Unlocks:** Phase 4 (alignment)
+
+### Goal
+
+Drive mean SOL on KernelBench L1 from week-1 baseline (~0.25-0.35) to ≥ 0.40. Each sub-phase is individually measured against the Phase 1 benchmark. Ship only if delta ≥ +0.02 mean SOL, held for 24h.
+
+### Sequenced sub-phases (each with work-team + review-team)
+
+Each sub-phase gets its own work team, review team, and A/B measurement before shipping.
+
+#### 3a — Profiler-in-loop for critic  (2 days, +0.3-0.5 SOL est.)
+Inject `compute_util`, `bandwidth_util`, `cache_efficiency`, `bottleneck_type` into the critic prompt after each failing attempt.
+**Single biggest gap** in the current prompt flow (per levers-analysis). Critic today sees `"correct/incorrect + speedup"` only; no utilization data.
+
+Work agents: `critic-prompt`, `pipeline-plumbing`, `prompt-template`
+Review agents: `review-prompt-quality`, `review-a-b-lift`, `review-cost-delta`
+
+#### 3b — Per-op-type prompt templates  (1.5 days, +0.2-0.3 SOL est.)
+Classifier produces `(tier × op_type)` — today used for display only. Route to type-specific generator/pivot prompts:
+- `REDUCTION` → warp-shuffle template
+- `GEMM` → shared-mem tiling template
+- `ATTENTION` → online-softmax (Flash) template
+- `HISTOGRAM` → privatized-bins / warp-aggregated atomics template
+- `NORM` → fused-mean-var template
+
+Work agents: `template-gemm`, `template-attention`, `template-histogram`, `template-reduction-norm`
+Review agents: `review-template-coverage`, `review-pivot-quality`, `review-a-b-lift`
+
+#### 3c — Model routing by tier/op  (2 days, +0.1-0.2 SOL + cost savings)
+Route L1 → Haiku (cheap, fast); L2/Quant → Sonnet; MoE/Attention → Opus or GPT-5. Measure cost-per-SOL.
+
+Work agents: `routing-table`, `routing-integration`
+Review agents: `review-routing-correctness`, `review-cost-per-sol`, `review-a-b-lift`
+
+#### 3d — Auto-tune sweep on correct kernels  (1 day, +0.1-0.15 SOL est.)
+After a correct kernel passes, cartesian-sweep `BLOCK_SIZE × num_warps × num_stages` on small workload, bake best into final.
+
+Work agents: `autotune-sweep`, `autotune-integration`
+Review agents: `review-sweep-speed`, `review-a-b-lift`
+
+#### 3e — Retrieval-augmented few-shot  (3 days, +0.15-0.25 SOL est.)
+Embed skill library + recent wins; retrieve top-3 similar kernels as generator few-shot.
+
+Work agents: `embed-index`, `retrieval-plumbing`, `few-shot-injection`
+Review agents: `review-retrieval-quality`, `review-a-b-lift`, `review-token-budget`
+
+#### 3f — Bandit over strategies  (2.5 days, +0.1-0.2 SOL est.)
+Meta-reflect picks pivot strategy via Thompson sampling over skill-library priors.
+
+Work agents: `bandit-core`, `bandit-integration`, `prior-init`
+Review agents: `review-bandit-convergence`, `review-a-b-lift`, `review-edge-cases`
+
+#### 3g — Quant correctness relaxation  (1 day, +0.05-0.1 SOL est.)
+Dtype-aware tolerance: fp8 → 5e-2, int8 → 1e-1, else → 1e-2.
+
+Work agents: `tolerance-dispatch`
+Review agents: `review-false-positive-rate`, `review-a-b-lift`
+
+### Gate per sub-phase
+
+- A/B test: 30-problem subset (split evenly across op types). Old kernel+ vs new kernel+.
+- **Ship criterion:** `delta_mean_sol >= 0.02 AND p95(delta) > 0` (Mann-Whitney U for signal check)
+- **Rollback if:** any mean metric regresses, OR cost-per-SOL worsens by >20% without an SOL win to justify it.
+- 24h stability hold before advancing to next sub-phase.
+
+---
+
+## Phase 4 — kernel_code alignment
+
+**Status:** not started
+**Estimate:** 3 days
+**Depends on:** Phase 3 (stable SOL numbers)
+**Unlocks:** Phase 5 (optional)
+
+### Goal
+
+Drop dual-metric transitional. SOL becomes primary everywhere. `/leaderboard` command exposes Phase 1 results. Model routing transparent in the Optimization Plan. Deprecate `target_speedup`.
+
+### Work agents (parallel, into team `phase-4-alignment`)
+
+- **`headline-sol`** — `kernel_profile.py` primary line becomes SOL: `"SOL 0.42 · 42% of hardware peak · memory-bound"`. Speedup demoted to subtitle.
+- **`leaderboard-cmd`** — new `/leaderboard` TUI command. Browse by problem, date, model; show trend vs baseline.
+- **`routing-display`** — Optimization Plan reveals which model was chosen per worker.
+- **`deprecation`** — speedup prompts warn on use; `target_speedup` marked `@deprecated`; 2-release deprecation window.
+
+### Review agents (parallel)
+
+- **`review-new-user-flow`** — fresh user launches kernel-code, does `/optimize` — what do they see? Is SOL explained? Is the leaderboard discoverable?
+- **`review-speedup-orphans`** — every speedup mention either deleted, deprecated, or justified as a debug-only column.
+- **`review-leaderboard-ui`** — sort, filter, regression-detection all work.
+
+---
+
+## Phase 5 — Learning loop (optional, post-plan)
+
+**Status:** not started (ideation only)
+**Depends on:** Phase 1 running weekly for ≥ 4 weeks, generating ≥ 1000 skill-library wins
+
+### Ideas (rank at the time, not now)
+
+- **SFT on skill library**: fine-tune Qwen2.5-Coder-32B or DeepSeek-Coder on `(reference + profile + classifier_hints) → winning_kernel` pairs
+- **RLAIF with Sonnet grader**: cheap reward model to proxy real eval
+- **PPO/GRPO on generation**: only if SFT plateaus
+- **Process reward models**: score intermediate compile/correctness/perf states as shaping reward
+- **MCTS over kernel mutations**: tree search in a small action space
+
+Skip until Phases 0-4 are done and you have a stable data flywheel. Every RL approach is useless without reliable eval, which Phase 1 provides.
+
+---
+
+## Dependencies & critical path
+
+```
+Phase 0 (SOL instrumentation) ─┬─> Phase 1 (benchmark harness)
+                               └─> Phase 2 (UX transition)
+                                         ↓
+Phase 1 + Phase 2 ────────────────> Phase 3 (kernel+ iteration, 7 sub-phases)
+                                         ↓
+                                   Phase 4 (kernel_code alignment)
+                                         ↓
+                                   Phase 5 (RL, optional)
+```
+
+**Critical path:** Phase 0 → Phase 1 → Phase 3a (profiler-in-loop). Everything else branches from there.
+
+**Total effort estimate:** 4-5 engineering weeks to Phase 4 complete.
+
+## Risks
+
+| Risk                                  | Mitigation                                                          |
+|---------------------------------------|---------------------------------------------------------------------|
+| KernelBench `ModelNew` wrapper breaks | Phase 1 smoke-test (`kb-smoke` agent) is the de-risk; budget +3 days |
+| ncu profiler adds >5s/eval            | Profile only best candidate per round, not every failure            |
+| Reward hacking (Sakana lesson)        | Deterministic per-seed inputs; flag speedups > 100× as suspicious   |
+| Model ceiling on hard ops (histograms)| Phase 3c (routing) makes Sonnet/Opus default for L2+                |
+| Benchmark cost blows up               | Per-problem $0.50 cap; graceful cancellation on overage             |
+| Workload-spec drift                   | Phase 0 `WORKLOAD_SPEC` covenant: references declare their shape    |
+
+---
+
+## RESULTS log
+
+Update after each phase completes.
+
+| Phase | Status     | Mean SOL (L1) | Solved-rate | Cost | Elapsed | Notes |
+|-------|------------|---------------|-------------|------|---------|-------|
+| 0     | ✅ closed 2026-04-21 | n/a (pre-benchmark) | n/a | ~$0.01 smoke | ~3h | SOL threads end-to-end. Smoke test on histogram passthrough yields sol_score=0.5 (correct for 1.0x speedup). Torch-profiler-untrackable ops (bincount/histograms) fall back to speedup-relative SOL — expected. Modal redeployed. 1 blocker (`_run_eval_gpumode` skipped `_collect_basic_profile`) caught by review, fixed inline. Deferred: 5 non-blocking items. |
+| 1     | not started | —             | —           | —    | —       | —     |
+| 2     | not started | —             | —           | —    | —       | —     |
+| 3a    | not started | —             | —           | —    | —       | —     |
+| 3b    | not started | —             | —           | —    | —       | —     |
+| 3c    | not started | —             | —           | —    | —       | —     |
+| 3d    | not started | —             | —           | —    | —       | —     |
+| 3e    | not started | —             | —           | —    | —       | —     |
+| 3f    | not started | —             | —           | —    | —       | —     |
+| 3g    | not started | —             | —           | —    | —       | —     |
+| 4     | not started | —             | —           | —    | —       | —     |
+
+---
+
+## Deferred (non-blocking from phase reviews)
+
+Fill in as reviews surface non-blocking improvements that shouldn't gate phase advancement.
+
+### From Phase 0
+
+- **openkernel bridge also calls `log_iteration`** — `kernel_code/integration/openkernel_bridge.py:450` has a separate `log_iteration` call site not updated with profile plumbing. Audit and add profile threading before Phase 1 benchmark sweeps exercise it heavily. Non-blocking for current workflow (autopilot uses `kernel_agent_bridge`). Reported by `plumbing-sol`.
+- **Checkpoint `raw_metrics` JSON serialization risk** — `_collect_basic_profile` populates `raw_metrics` with data from torch profiler events. All current fields are primitives, but if a future profiler-event field contained a torch object or tensor, JSON round-trip would crash. Add a defensive `json.dumps(...)` check in checkpoint save, or explicit key whitelist. Reported by `review-edge-cases`.
+- **Old run-log profile backfill** — `kernel_code/run_analysis.py:_parse_run_log` cannot show SOL for pre-Phase-0 logs. Low priority; only matters for cross-history analytics. Reported by `review-edge-cases`.
+- **Dead code in `checkpoint.py:127`** — `logger.info(...)` references `state.round_num` but `state` is not in scope at that call site. Not caused by Phase 0; pre-existing. Fix when touching checkpoint next. Reported by `review-edge-cases`.
+- **`_run_eval_kernelbench` profiling path not independently audited** — Phase 0 only exercised the gpumode path end-to-end (our current workflow). The kernelbench path also calls `_collect_basic_profile` (app.py:335) and should populate SOL correctly, but first exercise is Phase 1 smoke test. If broken, fix in Phase 1.

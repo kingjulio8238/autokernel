@@ -1,0 +1,21 @@
+{
+  "id": "hw_a100_optimization",
+  "name": "A100 Architecture Optimization",
+  "trigger": "A100, sm_80, Ampere, compute_80, A100-80GB, A100-40GB",
+  "approach": "Target A100 architecture: 108 SMs, 164KB shared memory per SM (configurable up to 163KB), 2039 GB/s HBM2e bandwidth (80GB variant) or 1555 GB/s (40GB variant), 312 TFLOPS FP16. Use 256-thread blocks, vectorized half2 loads. Grid multiples of 108. L2 cache is 40MB. Register pressure: 65536 registers per SM.",
+  "backend": "any",
+  "evidence": [],
+  "code_template": null,
+  "tags": [
+    "A100",
+    "Ampere",
+    "sm_80",
+    "hardware_specific",
+    "HBM2e"
+  ],
+  "pitfalls": [
+    "Shared memory can be configured to 163KB but reduces occupancy \u2014 default 48KB per block is safer",
+    "A100-40GB has 1555 GB/s vs A100-80GB at 2039 GB/s \u2014 benchmark results differ significantly",
+    "TF32 is default for torch.matmul on A100 \u2014 custom kernels must explicitly handle precision"
+  ]
+}
