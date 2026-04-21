@@ -2462,20 +2462,10 @@ class KernelCodeShell:
         # For KernelBench: run the Model as both ref and kernel (passthrough = 1.0x baseline)
         # For GPU Mode: run ref_kernel as both ref and kernel
         if fmt == "kernelbench":
-            # Build a passthrough ModelNew
-            import re
-            match = re.search(r"def forward\(self,(.*?)\).*?:", reference_source, re.DOTALL)
-            params = match.group(1).strip() if match else "*args"
-            param_names = ", ".join(p.split(":")[0].strip() for p in params.split(",") if p.strip())
-            kernel_source = f'''import torch
-import torch.nn as nn
-
-class ModelNew(nn.Module):
-    def __init__(self):
-        super().__init__()
-    def forward(self, {params}) -> torch.Tensor:
-        return torch.matmul({param_names})
-'''
+            # Passthrough: alias ModelNew = Model so any forward signature / any op
+            # works. Required because the reference Model can be matmul, softmax,
+            # layernorm, conv, etc. — generic alias preserves its exact interface.
+            kernel_source = reference_source + "\n\nModelNew = Model\n"
             pf = "kernelbench"
         else:
             # GPU Mode: use ref_kernel as kernel_function

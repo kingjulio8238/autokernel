@@ -171,6 +171,21 @@ Round D (integration, sequential)
 
 **Round A gate:** `kb-smoke` passes on Modal with current harness. If it fails, blockers must be fixed before Round B (otherwise batch-runner builds on quicksand).
 
+**Round A CLOSEOUT (2026-04-21):**
+
+Delivered:
+- `scripts/kb_smoke.py` — L1 matmul passthrough on L40S returns `status=correct, speedup=0.99, sol_score=0.495`. Generic `ModelNew = Model` aliasing works for any KB op.
+- `results/leaderboard/SCHEMA.md` + `_example.json` — 22 fields. Required additions after review: `schema_version` (at record top, `"1.0"`) + `kernel_source_path` (for Sakana-style audits) + reader contract section + Changelog.
+- `openkernel/benchmarks/problem_spec.py` + `__init__.py` — frozen dataclass `ProblemSpec(id, name, tier, source, reference_source, workload_spec, expected_dtype)` with `__post_init__` runtime validation (`_VALID_TIERS`, `_VALID_SOURCES`, non-empty id + reference_source).
+- `tests/test_problem_spec.py` — 7/7 tests pass (defaults, all-fields, frozen, invalid tier, invalid source, empty id, empty reference_source).
+
+Cleanup (5 additional work agents, from Deferred):
+- `openkernel/kernelbench/problems.py` — `load_problem` now uses `dataset.get_problem_by_id(id)` + `source="huggingface"`. Dropped stale `len(dataset)` guard.
+- `kernel_code/shell.py:2468` — kernelbench passthrough replaced matmul-hardcode with generic `ModelNew = Model`. Now works for softmax, layernorm, conv, etc.
+- `scripts/smoke_test_sol.py` + `scripts/kb_smoke.py` — tightened `bool(profile)` to `profile.get("sol_score", 0.0) > 0.0`. Silent all-zero profiles now fail the smoke test.
+
+Gate outcome: both reviews CLEAN. 3 non-blocking items logged to Deferred (whitespace-only reference_source, workload_spec key conventions, config_hash algorithm). Round B unblocked.
+
 ### Round B — Loaders + Storage (5 work agents parallel)
 
 | ID    | Agent               | Deliverable | Acceptance |
@@ -435,7 +450,8 @@ Update after each phase completes.
 | Phase | Status     | Mean SOL (L1) | Solved-rate | Cost | Elapsed | Notes |
 |-------|------------|---------------|-------------|------|---------|-------|
 | 0     | ✅ closed 2026-04-21 | n/a (pre-benchmark) | n/a | ~$0.01 smoke | ~3h | SOL threads end-to-end. Smoke test on histogram passthrough yields sol_score=0.5 (correct for 1.0x speedup). Torch-profiler-untrackable ops (bincount/histograms) fall back to speedup-relative SOL — expected. Modal redeployed. 1 blocker (`_run_eval_gpumode` skipped `_collect_basic_profile`) caught by review, fixed inline. Deferred: 5 non-blocking items. |
-| 1     | not started | —             | —           | —    | —       | —     |
+| 1.A   | ✅ closed 2026-04-21 | n/a (pre-benchmark) | n/a | ~$0.02 smoke | ~2h | Foundation + cleanup done. kb-smoke PASS on L1 matmul (sol=0.495, 0.99x passthrough). SCHEMA.md (22 fields with `schema_version` + `kernel_source_path` + reader contract). ProblemSpec w/ `__post_init__` validation (7/7 tests). Cleanup closed 5 Deferred items: `load_problem` fixed, `shell.py` kernelbench passthrough now op-generic, spec validation, tightened smoke assertion, schema versioning. Integration review: READY FOR ROUND B. 3 minor non-blocking items remain in Deferred. |
+| 1     | in progress | —             | —           | —    | —       | —     |
 | 2     | not started | —             | —           | —    | —       | —     |
 | 3a    | not started | —             | —           | —    | —       | —     |
 | 3b    | not started | —             | —           | —    | —       | —     |
@@ -459,3 +475,21 @@ Fill in as reviews surface non-blocking improvements that shouldn't gate phase a
 - **Old run-log profile backfill** — `kernel_code/run_analysis.py:_parse_run_log` cannot show SOL for pre-Phase-0 logs. Low priority; only matters for cross-history analytics. Reported by `review-edge-cases`.
 - **Dead code in `checkpoint.py:127`** — `logger.info(...)` references `state.round_num` but `state` is not in scope at that call site. Not caused by Phase 0; pre-existing. Fix when touching checkpoint next. Reported by `review-edge-cases`.
 - **`_run_eval_kernelbench` profiling path not independently audited** — Phase 0 only exercised the gpumode path end-to-end (our current workflow). The kernelbench path also calls `_collect_basic_profile` (app.py:335) and should populate SOL correctly, but first exercise is Phase 1 smoke test. If broken, fix in Phase 1.
+
+### From Phase 1 Round A
+
+- **`openkernel/kernelbench/problems.py:load_problem` is broken** — `dataset[problem_id]` subscript doesn't work on current kernelbench dataset objects. kb-smoke bypassed by calling `construct_kernelbench_dataset(level, source="huggingface").get_problem_by_id(id)` directly. Fix before Round B's `kb_l1_loader` / `kb_l2_loader` land, or have those loaders use the direct-call pattern.
+- **kernelbench pins `python==3.10`, project uses 3.11** — regular `pip install kernelbench` rejects; `uv pip install` ignores the pin and installs cleanly. No runtime issues observed so far. Add to dev setup notes; consider proposing a relaxed pin upstream.
+- **`shell.py:2463-2472` kernelbench passthrough is matmul-specific** — hardcodes `torch.matmul(...)` in the generated `ModelNew`. Non-matmul KB problems (softmax, layernorm, relu, conv) would fail the `/optimize` flow today. kb-smoke uses the generic `ModelNew = Model` pattern which works for all KB ops. Either port the generic pattern into `shell.py`, or document that `/optimize` against KernelBench is matmul-only until fixed. Orthogonal to Round B (batch-runner builds its own path via ProblemSpec), so not a Round B blocker.
+- **GPU MODE workload_spec validation** — `ProblemSpec.workload_spec` accepts arbitrary dicts; loaders should validate that GPU MODE specs include required keys (`size`, `seed`, and op-specific extras like `contention`) at loader boundary in Round B. Not a ProblemSpec concern.
+- **Runtime enum validation for ProblemSpec** — `Tier` and `Source` use `typing.Literal` which only type-checks; add `__post_init__` to reject invalid values at runtime. Also add a test for empty `reference_source=""`. Nice-to-have.
+- **Classification caching in ProblemSpec** — Phase 3c per-op-type routing will re-classify each spec. Either add a mutable `classification_cache` field (but spec is frozen) or keep the cache external (as `_get_classification()` already does in `auto_optimizer.py`). Lean toward external.
+- **kb-smoke zero-profile assertion** — `scripts/kb_smoke.py:106` checks `bool(profile)` which passes even if all fields are 0. Tighten to `any(v for k, v in profile.items() if k != 'error')` or similar.
+- **Schema `schema_version` field** — add explicit versioning (`"schema_version": "1.0"` in every record) to let future readers detect pre-migration records. Do as part of Phase 2 transition.
+- **Schema `config_hash` opacity** — Phase 3c per-op-type routing may want `backend` / `target_sol` / `budget_usd` as explicit fields rather than hash-rolled-up. Evaluate before Phase 3.
+
+### From Phase 1 Round A cleanup
+
+- **ProblemSpec whitespace-only `reference_source`** — `__post_init__` only rejects `""` / `None`, not `"   "`. Loaders already produce non-whitespace so not a live bug; consider `reference_source.strip()` if a loader ever regresses. Low priority.
+- **`workload_spec` keys not documented per source** — GPU MODE conv2d uses `{size, kernelsize, channels, batch, seed}`, other tasks vary. Loaders will discover empirically. If Phase 3 starts relying on specific keys, codify per-op contracts in SCHEMA.md or a sibling doc.
+- **`config_hash` algorithm not codified** — Writer will hash `(model, backend, target_sol, budget, seed)` but there's no formal spec. Collisions unlikely at current scale. Add to SCHEMA.md when it matters.

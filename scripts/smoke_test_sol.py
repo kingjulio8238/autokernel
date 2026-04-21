@@ -62,7 +62,10 @@ def main() -> None:
             ok = False
         print(f"  [{status}] {name}{(' — ' + detail) if detail else ''}")
 
-    check("profile dict not empty", bool(profile))
+    # profile dict must not just exist, but carry a meaningful sol_score
+    # (the headline metric). Zero sol_score means something upstream broke.
+    check("profile has non-zero sol_score", profile.get("sol_score", 0.0) > 0.0,
+          f"sol_score={profile.get('sol_score')}")
     check("sol_score present", "sol_score" in profile,
           f"value={profile.get('sol_score')}")
     check("compute_util present", "compute_util" in profile,
