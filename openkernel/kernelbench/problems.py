@@ -16,9 +16,10 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # Number of problems per level in the official KernelBench dataset.
+# Levels 1 and 2 ship 100 problems each; Level 3 ships 50.
 _LEVEL_PROBLEM_COUNTS: dict[int, int] = {
     1: 100,
-    2: 50,
+    2: 100,
     3: 50,
 }
 
@@ -34,7 +35,7 @@ def load_problem(
     level : int
         KernelBench level (1, 2, or 3).
     problem_id : int
-        Zero-indexed problem ID within the level.
+        1-indexed problem ID within the level (KernelBench convention).
 
     Returns
     -------

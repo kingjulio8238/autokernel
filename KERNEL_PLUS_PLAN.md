@@ -451,6 +451,7 @@ Update after each phase completes.
 |-------|------------|---------------|-------------|------|---------|-------|
 | 0     | ✅ closed 2026-04-21 | n/a (pre-benchmark) | n/a | ~$0.01 smoke | ~3h | SOL threads end-to-end. Smoke test on histogram passthrough yields sol_score=0.5 (correct for 1.0x speedup). Torch-profiler-untrackable ops (bincount/histograms) fall back to speedup-relative SOL — expected. Modal redeployed. 1 blocker (`_run_eval_gpumode` skipped `_collect_basic_profile`) caught by review, fixed inline. Deferred: 5 non-blocking items. |
 | 1.A   | ✅ closed 2026-04-21 | n/a (pre-benchmark) | n/a | ~$0.02 smoke | ~2h | Foundation + cleanup done. kb-smoke PASS on L1 matmul (sol=0.495, 0.99x passthrough). SCHEMA.md (22 fields with `schema_version` + `kernel_source_path` + reader contract). ProblemSpec w/ `__post_init__` validation (7/7 tests). Cleanup closed 5 Deferred items: `load_problem` fixed, `shell.py` kernelbench passthrough now op-generic, spec validation, tightened smoke assertion, schema versioning. Integration review: READY FOR ROUND B. 3 minor non-blocking items remain in Deferred. |
+| 1.B   | ✅ closed 2026-04-21 | n/a (pre-benchmark) | n/a | $0 (static) | ~2h | Loaders + storage done. kb_l1 (100), kb_l2 (100), gpumode (8) → 208 unique valid ProblemSpecs; dtype detection correct (histogram=uint8, matmul=float16). Leaderboard writer atomic temp+rename+fsync, kernel companion file, 4/4 tests. Reader with schema_version contract (skip-lower-major stands), 7/7 tests. 3 blockers fixed inline: reader warnings for missing `correct`/`timestamp`; docstring "zero-indexed" → "1-indexed"; `_LEVEL_PROBLEM_COUNTS[2]` 50→100. 4 non-blocking items to Deferred. |
 | 1     | in progress | —             | —           | —    | —       | —     |
 | 2     | not started | —             | —           | —    | —       | —     |
 | 3a    | not started | —             | —           | —    | —       | —     |
@@ -493,3 +494,10 @@ Fill in as reviews surface non-blocking improvements that shouldn't gate phase a
 - **ProblemSpec whitespace-only `reference_source`** — `__post_init__` only rejects `""` / `None`, not `"   "`. Loaders already produce non-whitespace so not a live bug; consider `reference_source.strip()` if a loader ever regresses. Low priority.
 - **`workload_spec` keys not documented per source** — GPU MODE conv2d uses `{size, kernelsize, channels, batch, seed}`, other tasks vary. Loaders will discover empirically. If Phase 3 starts relying on specific keys, codify per-op contracts in SCHEMA.md or a sibling doc.
 - **`config_hash` algorithm not codified** — Writer will hash `(model, backend, target_sol, budget, seed)` but there's no formal spec. Collisions unlikely at current scale. Add to SCHEMA.md when it matters.
+
+### From Phase 1 Round B
+
+- **Kernel-source bit-identity assumption** — writer's "skip if `kernels/{hash}.py` exists" short-circuit assumes same hash = same bytes (sha256 collision-free at our scale). Document the assumption in the writer docstring when Phase 2 scales up.
+- **Writer mutex under high concurrency** — current `rename`-atomicity handles 2-worker contention fine. If Phase 2 pushes >16 concurrent workers against the same (problem, hardware, config, date) tuple, consider adding a file-lock. Not a Phase 1 concern.
+- **Reader test gaps** — empty-dir case, nested `kernels/` subdir skip, non-padded ISO dates (e.g. `"2026-4-1"` breaks string compare). All non-blocking; add when touching the reader next.
+- **GPU MODE name casing** — `_PROBLEMS` slugs get `.title()`'d for `ProblemSpec.name` → `"Vectoradd"` instead of `"VectorAdd"`. Ugly but harmless. Standardize if ever exposed in UI.
