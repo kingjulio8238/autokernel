@@ -191,21 +191,24 @@ class KernelAgentBridge:
             fmt = detect_format(self._reference)
         self._resolved_format = fmt
 
-        # Build a Problem instance — try loading from file for full context
+        # Build a Problem instance from the constructor-supplied reference.
+        # The old OPENKERNEL_REFERENCE_PATH env fallback races under ThreadPoolExecutor
+        # concurrency (process-global env = every thread reads the same disk file
+        # regardless of spec). self._reference is per-instance and always correct.
+        problem = Problem(
+            reference_code=self._reference,
+            format=fmt,
+            dtype=_detect_dtype_simple(self._reference),
+        )
+        # Legacy env var path kept as an emergency escape for external callers that
+        # may set OPENKERNEL_REFERENCE_PATH without providing reference_source. Used
+        # below for few-shot example lookup (search for sibling solutions/ dir).
         ref_path = Path(os.environ.get("OPENKERNEL_REFERENCE_PATH", "reference.py"))
-        if ref_path.is_file():
+        if not self._reference and ref_path.is_file():
             try:
                 problem = load_problem(ref_path)
             except Exception:
-                problem = Problem(
-                    reference_code=self._reference, format=fmt,
-                    dtype=_detect_dtype_simple(self._reference),
-                )
-        else:
-            problem = Problem(
-                reference_code=self._reference, format=fmt,
-                dtype=_detect_dtype_simple(self._reference),
-            )
+                pass
 
         # Make reference self-contained (inline task.py, utils.py for GPU Mode)
         self_contained_ref = make_self_contained(problem)
@@ -324,12 +327,24 @@ class KernelAgentBridge:
         result = None
         error = None
 
+        # Build per-bridge worker env (race-free: each bridge owns its own dict,
+        # plumbed as an explicit arg through agent → manager → mp.Process args.
+        # Workers apply these AFTER process spawn, so concurrent bridges don't
+        # clobber each other's os.environ.)
+        worker_env = {
+            "OPENKERNEL_USE_MODAL": "1" if self._use_modal else "0",
+            "OPENKERNEL_REFERENCE_CODE": self._self_contained_ref,
+            "OPENKERNEL_PROBLEM_FORMAT": self._resolved_format,
+            "OPENKERNEL_GPU_TYPE": self._hardware,
+        }
+
         def _run_agent():
             nonlocal result, error
             try:
                 result = agent.generate_kernel(
                     problem_description=problem_desc,
                     test_code=test_code,
+                    worker_env=worker_env,
                 )
             except Exception as exc:
                 error = exc
@@ -699,17 +714,17 @@ class KernelAgentBridge:
         return ""
 
     def _configure_agent(self, agent: Any) -> None:
-        """Configure agent's workers with Modal eval via env vars.
+        """Configure agent's workers for Modal eval.
 
-        Workers are spawned via multiprocessing.Process — we can't pass
-        Python callbacks or function objects. Instead, we set env vars
-        that workers read at startup:
-        - OPENKERNEL_USE_MODAL=1 — tells workers to use Modal for eval
-        - OPENKERNEL_REFERENCE_CODE — the reference source code
+        Per-bridge config (reference code, gpu type, problem format) is plumbed
+        through agent.generate_kernel(worker_env=...) as an explicit arg rather
+        than via os.environ. The previous approach of mutating process-global
+        env vars races under ThreadPoolExecutor concurrency: bridge A sets env,
+        bridge B overwrites it, bridge A's workers fork and inherit bridge B's
+        reference — cross-contaminating results across threads.
+
+        This method is kept as a no-op hook for future per-agent configuration.
         """
-        if self._use_modal:
-            os.environ["OPENKERNEL_USE_MODAL"] = "1"
-            # Send self-contained reference so Modal has all dependencies
-            os.environ["OPENKERNEL_REFERENCE_CODE"] = self._self_contained_ref
-            os.environ["OPENKERNEL_PROBLEM_FORMAT"] = self._resolved_format
-            os.environ["OPENKERNEL_GPU_TYPE"] = self._hardware
+        # Intentional no-op. See run() where worker_env is constructed and
+        # passed to agent.generate_kernel.
+        return

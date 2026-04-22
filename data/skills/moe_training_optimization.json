@@ -31,6 +31,15 @@
       "strategy": "Refine block sizes, tile shapes and warp counts to further improve kernel performance.",
       "bottleneck": "unknown",
       "sol_score": 0.0
+    },
+    {
+      "problem": "L1/reduction",
+      "speedup": 23.9618,
+      "hardware": "L40S",
+      "round": 2,
+      "strategy": "Apply shared-memory histogram with privatized bins and warp-aggregated atomics to mitigate contention.",
+      "bottleneck": "memory_bound",
+      "sol_score": 1.0
     }
   ],
   "code_template": null,

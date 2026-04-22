@@ -248,22 +248,7 @@ def _run_eval(
             "error": f"Compilation/import error: {exc}\n{traceback.format_exc()}",
         }
 
-    # ---- Instantiate models ----
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    try:
-        ref_model = ref_mod.Model().to(device).eval()
-        kernel_model = kernel_mod.ModelNew().to(device).eval()
-    except Exception as exc:
-        return {
-            "status": "compile_error",
-            "correct": False,
-            "speedup": 0.0,
-            "runtime_us": 0.0,
-            "ref_runtime_us": 0.0,
-            "error": f"Model instantiation error: {exc}\n{traceback.format_exc()}",
-        }
-
-    # ---- Get inputs ----
+    # ---- Get inputs + Model ctor args ----
     try:
         get_inputs = ref_mod.get_inputs
         get_init_inputs = getattr(ref_mod, "get_init_inputs", lambda: [])
@@ -275,6 +260,44 @@ def _run_eval(
             "runtime_us": 0.0,
             "ref_runtime_us": 0.0,
             "error": f"Reference module missing get_inputs: {exc}",
+        }
+
+    # ---- Instantiate models (pass get_init_inputs() to ctor) ----
+    # Parameterized KernelBench Model classes (e.g. Conv2D) require ctor kwargs
+    # declared via get_init_inputs(). Previously this was ignored, causing
+    # "Model.__init__() missing N positional args" failures on all L2+ problems.
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    try:
+        init_inputs = get_init_inputs()
+    except Exception as exc:
+        return {
+            "status": "error",
+            "correct": False,
+            "speedup": 0.0,
+            "runtime_us": 0.0,
+            "ref_runtime_us": 0.0,
+            "error": f"get_init_inputs() failed: {exc}\n{traceback.format_exc()}",
+        }
+
+    def _instantiate_model(model_cls):
+        # init_inputs may be: dict → kwargs; list/tuple → positional; None/empty → no args
+        if isinstance(init_inputs, dict):
+            return model_cls(**init_inputs)
+        if isinstance(init_inputs, (list, tuple)) and len(init_inputs) > 0:
+            return model_cls(*init_inputs)
+        return model_cls()
+
+    try:
+        ref_model = _instantiate_model(ref_mod.Model).to(device).eval()
+        kernel_model = _instantiate_model(kernel_mod.ModelNew).to(device).eval()
+    except Exception as exc:
+        return {
+            "status": "compile_error",
+            "correct": False,
+            "speedup": 0.0,
+            "runtime_us": 0.0,
+            "ref_runtime_us": 0.0,
+            "error": f"Model instantiation error: {exc}\n{traceback.format_exc()}",
         }
 
     # ---- Correctness check ----
@@ -535,6 +558,11 @@ def _call_generate_input(generate_input, size: int, extra_kwargs: dict | None = 
     When extra_kwargs are supplied (WORKLOAD_SPEC path), they are filtered
     to parameters the signature actually accepts so stray metadata keys
     like "notes" or "shape_hint" don't blow up the call.
+
+    For signatures with REQUIRED params beyond `size` (e.g. GPU-MODE
+    histogram's `contention`, Conv2D's `kernelsize/channels/batch`), a
+    heuristic-defaults table fills in reasonable values so the harness
+    can produce SOME workload even when no WORKLOAD_SPEC is declared.
     """
     import inspect
 
@@ -555,6 +583,28 @@ def _call_generate_input(generate_input, size: int, extra_kwargs: dict | None = 
 
     if "seed" in param_names and "seed" not in kwargs and not extra_kwargs:
         kwargs["seed"] = 42
+
+    # Fill heuristic defaults for REQUIRED params without defaults beyond
+    # (size, seed). Known gpumode/kernelbench parameter names mapped to
+    # sane middling values. Without this, problems like histogram (which
+    # requires `contention`) and conv2d (`kernelsize`/`channels`/`batch`)
+    # TypeError out of generate_input when no WORKLOAD_SPEC is declared.
+    _HEURISTIC_DEFAULTS: dict[str, Any] = {
+        "seed": 42,
+        "contention": 50,      # [0, 100] — middling atomic contention
+        "kernelsize": 3,       # conv2d kernel size
+        "kernel_size": 3,
+        "channels": 16,        # conv channel count
+        "batch": 4,            # batch size
+        "n": 1024, "m": 1024, "k": 1024,  # matmul dims (fallback, WORKLOAD_SPEC should override)
+    }
+    for pname, pobj in params.items():
+        if pname == "size" or pname in kwargs:
+            continue
+        if pobj.default is not inspect.Parameter.empty:
+            continue  # has its own default
+        if pname in _HEURISTIC_DEFAULTS:
+            kwargs[pname] = _HEURISTIC_DEFAULTS[pname]
 
     try:
         return generate_input(size, **kwargs)

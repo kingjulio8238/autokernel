@@ -5,7 +5,12 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from openkernel.backends.base import BackendBase
+from openkernel.backends.base import (
+    BackendBase,
+    format_archspec,
+    format_hints,
+    safe_format,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,14 +30,20 @@ class CudaBackend(BackendBase):
         intent: str,
         critic_feedback: str | None = None,
         skills: str | None = None,
+        problem_context: str | None = None,
+        strategy_hints: list[str] | None = None,
+        archspec: dict | None = None,
     ) -> str:
-        prompt = _safe_format(
+        prompt = safe_format(
             self._template,
             reference_code=reference,
             hardware=hardware,
             intent=intent,
             critic_feedback=critic_feedback or "None (first attempt)",
             skills=skills or "None available",
+            problem_context=problem_context or "None provided",
+            strategy_hints=format_hints(strategy_hints) or "None provided",
+            archspec=format_archspec(archspec) or "No structured hardware spec available",
         )
         return prompt
 
@@ -69,19 +80,6 @@ class CudaBackend(BackendBase):
         return path.read_text()
 
 
-def _safe_format(template: str, **kwargs: str) -> str:
-    """Format a template string, leaving unknown {placeholders} intact."""
-    import re
-
-    def _replacer(match: re.Match) -> str:
-        key = match.group(1)
-        if key in kwargs:
-            return kwargs[key]
-        return match.group(0)
-
-    return re.sub(r"\{(\w+)\}", _replacer, template)
-
-
 _FALLBACK_TEMPLATE = """\
 You are an expert GPU kernel engineer specializing in CUDA C++.
 
@@ -93,7 +91,11 @@ Reference code:
 {reference_code}
 
 Target hardware: {hardware}
+Hardware archspec: {archspec}
 Optimization intent: {intent}
+Problem context: {problem_context}
+Strategy hints:
+{strategy_hints}
 Critic feedback: {critic_feedback}
 Relevant skills: {skills}
 

@@ -31,6 +31,15 @@
       "strategy": "Switch to warp-level shuffle reduction using shared memory tiling to alleviate memory bottleneck.",
       "bottleneck": "memory_bound",
       "sol_score": 0.0
+    },
+    {
+      "problem": "L1/reduction",
+      "speedup": 23.9618,
+      "hardware": "L40S",
+      "round": 2,
+      "strategy": "Apply shared-memory histogram with privatized bins and warp-aggregated atomics to mitigate contention.",
+      "bottleneck": "memory_bound",
+      "sol_score": 1.0
     }
   ],
   "code_template": null,

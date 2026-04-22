@@ -120,6 +120,7 @@ class WorkerManager:
         test_code: list[str],
         problem_description: str,
         session_log_dir: Path | None = None,
+        worker_env: dict[str, str] | None = None,
     ) -> dict[str, Any | None]:
         """
         Run parallel verification on multiple kernel seeds.
@@ -172,6 +173,7 @@ class WorkerManager:
                     self.target_platform,
                     self.no_cusolver,
                     self.test_timeout_s,
+                    worker_env,
                 )
 
                 process = mp.Process(target=worker_process, args=args)
@@ -238,6 +240,7 @@ def worker_process(
     target_platform: str,
     no_cusolver: bool = False,
     test_timeout_s: int = 30,
+    worker_env: dict[str, str] | None = None,
 ):
     """
     Worker process for kernel verification and refinement.
@@ -245,7 +248,17 @@ def worker_process(
     This is run in a separate process.
     """
     # Import here to avoid issues with multiprocessing
+    import os
     from .worker import VerificationWorker
+
+    # Apply per-bridge env overrides FIRST, before VerificationWorker reads any
+    # env vars at construction time. worker_env carries reference_code, gpu_type,
+    # problem_format, use_modal — values that must not race across concurrent
+    # bridges sharing a process-global environment.
+    if worker_env:
+        for k, v in worker_env.items():
+            if v is not None:
+                os.environ[k] = str(v)
 
     worker = VerificationWorker(
         worker_id=worker_id,

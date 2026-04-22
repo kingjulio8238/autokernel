@@ -29,6 +29,9 @@ class Generator:
         intent: str,
         critic_feedback: str | None = None,
         skills: str | None = None,
+        problem_context: str | None = None,
+        strategy_hints: list[str] | None = None,
+        archspec: dict | None = None,
     ) -> str:
         """Generate a kernel implementation.
 
@@ -44,6 +47,12 @@ class Generator:
             Formatted critic diagnosis from a prior iteration.
         skills : str, optional
             Relevant optimization skills from the skill library.
+        problem_context : str, optional
+            Formatted classifier output (tier, op type, bottleneck).
+        strategy_hints : list[str], optional
+            Actionable hints derived from the classifier.
+        archspec : dict, optional
+            Structured hardware archspec to inject into the prompt.
 
         Returns
         -------
@@ -62,6 +71,9 @@ class Generator:
             intent=intent,
             critic_feedback=critic_feedback,
             skills=skills,
+            problem_context=problem_context,
+            strategy_hints=strategy_hints,
+            archspec=archspec,
         )
 
         # 2. Call LLM

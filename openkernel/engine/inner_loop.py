@@ -97,6 +97,76 @@ class InnerLoop:
         self._on_phase = on_phase  # callback: (status_message) -> None
         # Load hardware/backend context for injection into generator prompts
         self._skills_context = self._load_context(config)
+        # Per-run retrieval cache keyed by reference source. Classification is
+        # deterministic for a given reference, so one call per distinct
+        # reference is sufficient across all rounds in a run.
+        self._retrieval_cache: dict[str, dict] = {}
+        # Lazy-loaded SkillLibrary — only instantiated when first needed.
+        self._skill_library = None
+
+    def _get_retrieval(self, reference: str, hardware: str, intent: str) -> dict:
+        """Return classifier+skills+archspec bundle, cached per reference.
+
+        The bundle shape::
+
+            {
+                "problem_context": str | None,
+                "strategy_hints": list[str] | None,
+                "skills_extra": str | None,   # appended to static skills_context
+                "archspec": dict | None,
+            }
+
+        All retrieval failures degrade to ``None``/empty — generator
+        invocation must never crash because a retrieval step failed.
+        """
+        cached = self._retrieval_cache.get(reference)
+        if cached is not None:
+            return cached
+
+        bundle: dict = {
+            "problem_context": None,
+            "strategy_hints": None,
+            "skills_extra": None,
+            "archspec": None,
+        }
+
+        # --- Classifier -----------------------------------------------------
+        op_tag = ""
+        try:
+            from kernel_code.problem_classifier import classify_problem  # lazy
+
+            classif = classify_problem(reference)
+            bundle["problem_context"] = classif.to_context_string()
+            bundle["strategy_hints"] = list(classif.strategy_hints) or None
+            op_tag = classif.op_type.value
+        except Exception as exc:
+            logger.warning("InnerLoop: classify_problem failed — %s", exc)
+
+        # --- Skill library -------------------------------------------------
+        try:
+            if self._skill_library is None:
+                from openkernel.memory.skill_library import SkillLibrary  # lazy
+
+                lib = SkillLibrary()
+                lib.load()
+                self._skill_library = lib
+            query = f"{op_tag} {intent}".strip() or intent
+            matches = self._skill_library.search_skills(query, top_k=3)
+            if matches:
+                bundle["skills_extra"] = type(self._skill_library).to_context_string(matches)
+        except Exception as exc:
+            logger.warning("InnerLoop: skill search failed — %s", exc)
+
+        # --- Archspec -------------------------------------------------------
+        try:
+            from openkernel.backends.base import _hardware_archspec  # lazy
+
+            bundle["archspec"] = _hardware_archspec(hardware)
+        except Exception as exc:
+            logger.warning("InnerLoop: archspec lookup failed — %s", exc)
+
+        self._retrieval_cache[reference] = bundle
+        return bundle
 
     @staticmethod
     def _load_context(config: OpenKernelConfig) -> str:
@@ -179,6 +249,20 @@ class InnerLoop:
             current_best,
         )
 
+        # Retrieval happens ONCE per (reference, intent) and is cached on self
+        # across rounds to avoid redundant LLM-irrelevant work.
+        retrieval = self._get_retrieval(reference, hardware, intent.description)
+        # Merge static hardware/backend/pitfalls context with any dynamic
+        # skills found for this problem. Static context has been the default
+        # since before skill retrieval; keep it unless we actively replace it.
+        skills_combined = self._skills_context
+        if retrieval["skills_extra"]:
+            skills_combined = (
+                f"{self._skills_context}\n\n{retrieval['skills_extra']}"
+                if self._skills_context
+                else retrieval["skills_extra"]
+            )
+
         def _phase(msg: str) -> None:
             if self._on_phase is not None:
                 self._on_phase(msg)
@@ -194,7 +278,10 @@ class InnerLoop:
                     hardware=hardware,
                     intent=intent.description,
                     critic_feedback=critic_feedback,
-                    skills=self._skills_context,
+                    skills=skills_combined,
+                    problem_context=retrieval["problem_context"],
+                    strategy_hints=retrieval["strategy_hints"],
+                    archspec=retrieval["archspec"],
                 )
             except ValueError as exc:
                 # Validation failure from generator — treat as a soft error,
