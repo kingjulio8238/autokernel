@@ -14,16 +14,24 @@ If the reference defines `class Model(nn.Module)` with a `forward(...)` method, 
 
 ```python
 class ModelNew(nn.Module):
-    def __init__(self):
+    def __init__(self, *args_matching_Model_init) -> None:
         super().__init__()
+        # Mirror Model.__init__ EXACTLY: same positional args, same parameter
+        # assignments (nn.Parameter, stored shape/stride), same internal state.
+        # The harness calls `ModelNew(*get_init_inputs())` with whatever
+        # `Model` would receive — a no-arg ModelNew WILL crash here for any
+        # parameterized problem (Conv2D, Linear, GroupNorm, …).
+        ...
     def forward(self, *args_matching_Model_forward) -> torch.Tensor:
         # launch triton kernel, return output
         ...
 ```
 
+- `ModelNew.__init__` MUST match `Model.__init__` signature exactly. If `get_init_inputs()` returns `[in_channels, out_channels, kernel_size, bias_shape]`, then your `__init__` MUST accept exactly `(self, in_channels, out_channels, kernel_size, bias_shape)` — in that order. A no-arg `def __init__(self):` is WRONG for any parameterized `Model` and will fail with `"takes 1 positional argument but N were given"`.
+- `ModelNew.__init__` MUST call `super().__init__()` first (or `super(ModelNew, self).__init__()`).
+- Store any weights/parameters the reference `Model` stored — `nn.Parameter`, buffers, shapes. The kernel needs them at forward time.
 - `ModelNew.forward()` MUST match `Model.forward()` signature exactly (same positional args, same order, same names).
-- `ModelNew.__init__` MUST call `super().__init__()` (or `super(ModelNew, self).__init__()`).
-- Do NOT include `torch.matmul`, `torch.nn.functional.*`, or any `torch.nn` layers inside `forward()` — they must be implemented in Triton.
+- Do NOT include `torch.matmul`, `torch.nn.functional.*`, or any `torch.nn` COMPUTE layers (Conv2d, Linear, BatchNorm, …) inside `forward()` — those compute ops must be implemented in Triton. `nn.Parameter`/`nn.Module`/`super().__init__()` themselves are REQUIRED (not cheats); the structural scaffolding stays. What's forbidden is calling pre-built PyTorch OPS like `self.conv(x)`, `F.conv2d(x, ...)`, `torch.matmul(a, b)`.
 
 ### Format B: GPU MODE (`ref_kernel(data)` function)
 

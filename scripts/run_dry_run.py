@@ -87,6 +87,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Delete today's existing records for the target IDs before running so "
              "the resume filter doesn't skip them. Useful for dev iteration.",
     )
+    p.add_argument(
+        "--concurrency",
+        type=int,
+        default=None,
+        help=f"Override the default concurrency ({_CONCURRENCY}). Use 1 to run "
+             "problems serially — useful when diagnosing CUDA-state cross-"
+             "contamination in concurrent Modal containers.",
+    )
     return p.parse_args(argv)
 
 
@@ -107,6 +115,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.limit is not None:
         target_ids = target_ids[: args.limit]
     log.info("Dry-run target: %d IDs — %s", len(target_ids), target_ids)
+
+    concurrency = args.concurrency if args.concurrency is not None else _CONCURRENCY
 
     settings = load_settings()
     injected = inject_api_keys(settings)
@@ -182,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
 
     log.info(
         "Starting run_suite: hardware=%s budget=$%.2f concurrency=%d model=%s target_sol=%.2f date=%s",
-        _HARDWARE, _BUDGET_PER_PROBLEM, _CONCURRENCY, _MODEL, _TARGET_SOL, date_str,
+        _HARDWARE, _BUDGET_PER_PROBLEM, concurrency, _MODEL, _TARGET_SOL, date_str,
     )
     wall_start = time.time()
     try:
@@ -190,7 +200,7 @@ def main(argv: list[str] | None = None) -> int:
             specs=picked,
             hardware=_HARDWARE,
             budget_per_problem=_BUDGET_PER_PROBLEM,
-            concurrency=_CONCURRENCY,
+            concurrency=concurrency,
             date=date_str,
             model=_MODEL,
             target_sol=_TARGET_SOL,
