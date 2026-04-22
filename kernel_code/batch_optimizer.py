@@ -770,12 +770,14 @@ def run_suite(
     for _spec_id, status, auto_result, record_path in results:
         if status == "succeeded":
             suite.succeeded += 1
-            if record_path is not None:
-                suite.records_written.append(record_path)
         elif status == "failed":
             suite.failed += 1
         else:
             suite.errored += 1
+        # Failed attempts now also write a record (with correct=False) —
+        # they show up on disk so the summary counter must reflect them.
+        if record_path is not None:
+            suite.records_written.append(record_path)
 
         if auto_result is not None:
             suite.total_cost_usd += float(auto_result.total_cost_usd or 0.0)
