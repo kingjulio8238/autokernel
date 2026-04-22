@@ -81,6 +81,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Take only the first N IDs after filtering (for small dry-runs).",
     )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="Delete today's existing records for the target IDs before running so "
+             "the resume filter doesn't skip them. Useful for dev iteration.",
+    )
     return p.parse_args(argv)
 
 
@@ -156,6 +162,23 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    if args.force:
+        # Delete today's records for the target IDs so resume doesn't skip.
+        # Also wipe companion kernel files if they're not referenced elsewhere
+        # (conservative: leave kernel files in place, only drop record files).
+        day_dir = _PROJECT_ROOT / "results" / "leaderboard" / date_str
+        removed = 0
+        if day_dir.exists():
+            target_id_set = {s.id for s in picked}
+            for fp in day_dir.glob("*.json"):
+                # Filename convention: {problem_id}_{hardware}_{config_hash}.json
+                for tid in target_id_set:
+                    if fp.name.startswith(f"{tid}_{_HARDWARE}_"):
+                        fp.unlink()
+                        removed += 1
+                        break
+        log.info("--force: removed %d existing record(s) for today's targets", removed)
 
     log.info(
         "Starting run_suite: hardware=%s budget=$%.2f concurrency=%d model=%s target_sol=%.2f date=%s",
