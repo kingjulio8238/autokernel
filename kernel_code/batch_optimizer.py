@@ -455,17 +455,20 @@ def _extract_profile_metrics(auto_result: AutoResult) -> dict[str, float]:
     if best_round is not None:
         profile = best_round.get("profile", {})
         if isinstance(profile, dict):
-            # Phase 0 contract: modal_infra/app.py emits short-form keys
-            # `compute_util` / `bandwidth_util` (0-100 percent), with
-            # `compute_utilization` / `bandwidth_utilization` kept as legacy
-            # aliases. Accept both so future renames don't silently zero out.
+            # Round profile comes from OptimizationLog.to_dict_list() which
+            # serializes ProfileMetrics field names: *_utilization_pct. Phase 0's
+            # short-form keys (`compute_util` / `bandwidth_util`) are ALSO
+            # accepted as fallback in case something bypasses the typed log.
+            # All values are percent (0-100).
             compute_util = float(
-                profile.get("compute_util")
+                profile.get("compute_utilization_pct")
+                or profile.get("compute_util")
                 or profile.get("compute_utilization")
                 or 0.0
             )
             bandwidth_util = float(
-                profile.get("bandwidth_util")
+                profile.get("bandwidth_utilization_pct")
+                or profile.get("bandwidth_util")
                 or profile.get("bandwidth_utilization")
                 or 0.0
             )
@@ -519,6 +522,10 @@ def _run_single_spec(
         tf.write(spec.reference_source)
         ref_path = Path(tf.name)
 
+    logger.info(
+        "run_suite: START %s (%s) hardware=%s budget=$%.2f model=%s",
+        spec.id, spec.name[:40], hardware, budget_per_problem, model,
+    )
     start = time.time()
     try:
         goal = GoalSpec(
@@ -533,15 +540,63 @@ def _run_single_spec(
         optimizer = MetaOptimizer(goal=goal, settings=settings)
         auto_result: AutoResult = optimizer.run()
     except Exception as exc:
-        logger.error("run_suite: %s errored: %s", spec.id, exc)
+        logger.error("run_suite: %s ERRORED: %s", spec.id, exc)
         ref_path.unlink(missing_ok=True)
         return ("errored", None, None)
 
     ref_path.unlink(missing_ok=True)
 
-    # No correct kernel produced — skip writing a record.
+    elapsed_s = int(time.time() - start)
+
+    # No correct kernel produced — still write a record with correct=False
+    # so the leaderboard reflects what was attempted. Without this, failed
+    # problems are invisible to downstream reports/metrics.
     if not auto_result.best_kernel or auto_result.best_speedup <= 0.0:
-        return ("failed", auto_result, None)
+        logger.info(
+            "run_suite: FAILED %s — no correct kernel after %ds, cost=$%.3f, rounds=%d",
+            spec.id, elapsed_s, auto_result.total_cost_usd, auto_result.rounds_completed,
+        )
+        now = datetime.now(timezone.utc)
+        fail_record = {
+            # Placeholder source so kernel_hash + companion file stay well-formed.
+            # Bytes are fixed so repeated failures collapse to one companion file.
+            "kernel_source": "# No correct kernel produced for this attempt.\n",
+            "hardware": hardware,
+            "date": date,
+            "timestamp": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "model": model,
+            "speedup": 0.0,        # sentinel per schema: "no timing measured"
+            "sol_score": 0.0,
+            "compute_util": 0.0,
+            "bandwidth_util": 0.0,
+            "bottleneck_type": "unknown",
+            "correct": False,
+            "cost_usd": float(auto_result.total_cost_usd),
+            "elapsed_s": int(auto_result.elapsed_seconds or elapsed_s),
+            "stop_reason": (auto_result.stop_reason or "no correct kernel")[:256],
+            "rounds": int(max(auto_result.rounds_completed, 0)),
+            "iterations": int(auto_result.total_iterations),
+            "config": {
+                "model": model,
+                "backend": "triton",
+                "target_sol": target_sol,
+                "budget_per_problem": budget_per_problem,
+                "seed": _SUITE_SEED,
+            },
+        }
+        try:
+            from openkernel.benchmarks.leaderboard_writer import write_record
+            if leaderboard_root is not None:
+                fail_path = write_record(spec, fail_record, root=leaderboard_root)
+            else:
+                fail_path = write_record(spec, fail_record)
+            return ("failed", auto_result, str(fail_path))
+        except Exception as exc:
+            logger.warning(
+                "run_suite: failed-record write for %s raised: %s (counting as failed, no trail)",
+                spec.id, exc,
+            )
+            return ("failed", auto_result, None)
 
     profile = _extract_profile_metrics(auto_result)
     bottleneck = _bottleneck_label(profile["compute_util"], profile["bandwidth_util"])
@@ -582,6 +637,14 @@ def _run_single_spec(
         logger.error("run_suite: write_record failed for %s: %s", spec.id, exc)
         return ("errored", auto_result, None)
 
+    logger.info(
+        "run_suite: DONE %s — speedup=%.2fx sol=%.3f bw=%.1f%% compute=%.1f%% "
+        "cost=$%.3f elapsed=%ds rounds=%d record=%s",
+        spec.id, auto_result.best_speedup, profile["sol_score"],
+        profile["bandwidth_util"], profile["compute_util"],
+        auto_result.total_cost_usd, elapsed_s, auto_result.rounds_completed,
+        Path(path).name,
+    )
     return ("succeeded", auto_result, str(path))
 
 
@@ -639,7 +702,13 @@ def run_suite(
         suite.total_elapsed_s = int(time.time() - start_wall)
         return suite
 
+    logger.info(
+        "run_suite: launching %d specs (concurrency=%d, hardware=%s, budget/problem=$%.2f, target_sol=%.2f)",
+        len(pending), concurrency, hardware, budget_per_problem, target_sol,
+    )
+
     sem = asyncio.Semaphore(max(1, concurrency))
+    _done_counter = {"n": 0}  # closure-shared for simple live counter
 
     async def _gated(spec: "ProblemSpec") -> tuple[str, str, AutoResult | None, str | None]:
         async with sem:
@@ -660,7 +729,11 @@ def run_suite(
                 )
             except Exception as exc:
                 logger.error("run_suite: unexpected error for %s: %s", spec.id, exc)
+                _done_counter["n"] += 1
+                logger.info("run_suite: [%d/%d] problems complete", _done_counter["n"], len(pending))
                 return (spec.id, "errored", None, None)
+            _done_counter["n"] += 1
+            logger.info("run_suite: [%d/%d] problems complete", _done_counter["n"], len(pending))
             return (spec.id, status, auto_result, record_path)
 
     async def _driver() -> list[tuple[str, str, AutoResult | None, str | None]]:

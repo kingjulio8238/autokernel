@@ -109,8 +109,14 @@ def _validate(spec: ProblemSpec, result: dict) -> None:
             f"invalid bottleneck_type {result['bottleneck_type']!r}, "
             f"must be one of {sorted(_VALID_BOTTLENECKS)}"
         )
-    if result["speedup"] <= 0:
-        raise ValueError(f"speedup must be > 0, got {result['speedup']}")
+    # speedup >= 0: 0 is the sentinel for "no correct kernel produced",
+    # only valid when correct=False. Correct kernels must have speedup > 0.
+    if result["speedup"] < 0:
+        raise ValueError(f"speedup must be >= 0, got {result['speedup']}")
+    if result["correct"] and result["speedup"] <= 0:
+        raise ValueError(
+            f"speedup must be > 0 when correct=True, got {result['speedup']}"
+        )
     if not 0.0 <= result["sol_score"] <= 1.0:
         raise ValueError(f"sol_score must be in [0, 1], got {result['sol_score']}")
     if not 0.0 <= result["compute_util"] <= 100.0:

@@ -105,9 +105,9 @@ All fields are **required** (non-nullable). If a value is genuinely unknown, use
 
 - **Type:** `number` (float)
 - **Nullable:** no
-- **Description:** `reference_runtime / kernel_runtime`, measured on `hardware`. A value `>= 1.0` means the kernel is at least as fast as the reference; `< 1.0` means slower. Unbounded above.
-- **Constraints:** `> 0`.
-- **Example:** `1.85`
+- **Description:** `reference_runtime / kernel_runtime`, measured on `hardware`. A value `>= 1.0` means the kernel is at least as fast as the reference; `< 1.0` means slower. Unbounded above. The sentinel value `0.0` is reserved for records where no correct kernel was produced — only valid when `correct == false`.
+- **Constraints:** `>= 0`. When `correct == true`, must be strictly `> 0`. When `correct == false`, `0.0` denotes "no timing measured" and any positive value denotes "timed but failed correctness."
+- **Examples:** `1.85` (correct, faster), `0.23` (correct, slower), `0.0` (no correct kernel)
 
 ### `sol_score`
 

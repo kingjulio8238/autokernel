@@ -39,16 +39,37 @@ class ProfileMetrics:
 
     @classmethod
     def from_modal_profile(cls, profile: dict) -> "ProfileMetrics":
-        """Create from a Modal eval profile dict."""
+        """Create from a Modal eval profile dict.
+
+        Modal (post-Phase 0) emits utilization values as already-percent
+        (`compute_util` and `bandwidth_util` in 0-100 range), plus legacy
+        aliases `compute_utilization` / `bandwidth_utilization` also in
+        percent. `sol_score` is computed Modal-side and carried through.
+        """
+        # Prefer short-form keys (Phase 0); fall back to legacy aliases
+        # (pre-Phase-0 records may still have decimal 0-1 values, so those
+        # get the × 100 treatment). Short-form is already percent.
+        bw_util = profile.get("bandwidth_util")
+        if bw_util is None:
+            bw_util = profile.get("bandwidth_utilization", 0.0)
+            if 0.0 < bw_util <= 1.0:  # heuristic: old decimal encoding
+                bw_util *= 100
+        comp_util = profile.get("compute_util")
+        if comp_util is None:
+            comp_util = profile.get("compute_utilization", 0.0)
+            if 0.0 < comp_util <= 1.0:
+                comp_util *= 100
+
         return cls(
-            bandwidth_utilization_pct=profile.get("bandwidth_utilization", 0.0) * 100,
-            compute_utilization_pct=profile.get("compute_utilization", 0.0) * 100,
+            bandwidth_utilization_pct=float(bw_util),
+            compute_utilization_pct=float(comp_util),
             occupancy=profile.get("occupancy", 0.0),
             operational_intensity=profile.get("operational_intensity", 0.0),
             total_flops=profile.get("total_flops", 0),
             total_bytes=profile.get("total_bytes", 0),
             runtime_us=profile.get("runtime_us", 0.0),
             ref_runtime_us=profile.get("ref_runtime_us", 0.0),
+            sol_score=float(profile.get("sol_score", 0.0)),
         )
 
 
