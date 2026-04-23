@@ -21,6 +21,7 @@ Usage::
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import os
@@ -47,6 +48,56 @@ def _detect_dtype_simple(code: str) -> str:
     if "bfloat16" in code or "bf16" in code:
         return "bfloat16"
     return "float32"
+
+
+def _extract_kb_init_hint(reference: str) -> str:
+    """Extract a single-line KB init-signature hint for the LLM prompt.
+
+    Returns a ``"- ..."`` bullet ready to splice into the CRITICAL
+    REQUIREMENTS block, or empty string for non-KB / no-arg references.
+    The hint tells the LLM exactly which positional args ``ModelNew.__init__``
+    must accept so the harness call ``ModelNew(*get_init_inputs())`` does not
+    crash with "takes 1 positional argument but N were given".
+    """
+    if not reference or "class Model" not in reference:
+        return ""
+    try:
+        tree = ast.parse(reference)
+    except SyntaxError:
+        return ""
+
+    args: list[str] | None = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "Model":
+            for body_node in node.body:
+                if isinstance(body_node, ast.FunctionDef) and body_node.name == "__init__":
+                    names = [a.arg for a in body_node.args.args]
+                    if names and names[0] == "self":
+                        names = names[1:]
+                    args = names
+                    break
+            break
+
+    if not args:
+        return ""
+
+    sig = ", ".join(["self", *args])
+    # Python's "takes N but M given" counts `self`. For a no-arg
+    # `def __init__(self):`, `get_init_inputs()` passes `len(args)` values
+    # plus `self` → the error reports "but len(args)+1 were given".
+    n_given = len(args) + 1
+    # No fenced code block, no section heading — embedding a ```python
+    # example inside the prompt confuses o3-mini's code extractor, which
+    # then returns "No valid code found in LLM response". A single-line
+    # bullet is enough signal without mimicking the answer format.
+    return (
+        f"- REQUIRED ModelNew.__init__ signature: "
+        f"`def __init__({sig}):` — MUST mirror Model.__init__ exactly. "
+        f"Harness calls `ModelNew(*get_init_inputs())`. "
+        f"A no-arg `def __init__(self):` crashes with "
+        f"`TypeError: ModelNew.__init__() takes 1 positional argument but "
+        f"{n_given} were given`; don't let that happen.\n"
+    )
 
 
 def _strip_dead_code(code: str) -> str:
@@ -87,30 +138,93 @@ def _strip_dead_code(code: str) -> str:
 from kernel_code.gpu_functions import GPU_FUNCTION_MAP as _GPU_FUNCTION_MAP
 
 
+# Statuses that indicate an infra-level failure the kernel can't be held
+# responsible for. Since modal_infra/app.py runs every eval in a fresh
+# `spawn` subprocess, a CUDA illegal-memory-access is now GUARANTEED to be
+# an OOB in the LLM-generated kernel (no sibling contamination is possible)
+# — so `cuda_error` is NO LONGER infra: it must feed back to the critic as
+# a correctness failure so the next round can fix it. Only surviving infra
+# classes are genuine environment breakages: the child process dying
+# unexpectedly before producing a result, and eval timeouts.
+_INFRA_STATUSES = frozenset({"timeout", "process_crashed"})
+
+# Number of times to retry a Modal eval when it returns an infra-level
+# failure. Each retry gets a fresh subprocess on the Modal side.
+_INFRA_RETRY_LIMIT = 2
+
+
+def _is_infra_error(result: dict | None) -> bool:
+    """True if the eval result represents infra failure, not a kernel failure.
+
+    Single source of truth for "this isn't a kernel problem, retry it."
+    Matches an explicit status from Modal app's subprocess isolation. Note
+    we deliberately do NOT pattern-match CUDA error markers in the message
+    body — with subprocess isolation, "illegal memory access" means the
+    kernel has an OOB bug that we want the critic to see.
+    """
+    if not isinstance(result, dict):
+        return False
+    return result.get("status") in _INFRA_STATUSES
+
+
 def _modal_eval(
     kernel_code: str,
     reference_code: str,
     problem_format: str = "auto",
     gpu_type: str = "L40S",
 ) -> dict:
-    """Evaluate a kernel via Modal remote GPU.
+    """Evaluate a kernel via Modal remote GPU with infra-level retries.
 
     Routes to the correct GPU-specific Modal function based on gpu_type.
     KernelBench leaderboard standardizes on L40S — other GPU results
     are not directly comparable.
+
+    Retries up to `_INFRA_RETRY_LIMIT` times on infra-level failures
+    (CUDA context poisoning, subprocess crash, eval timeout). Each retry
+    hits a fresh subprocess on the Modal side.
     """
     import modal
 
     fn_name = _GPU_FUNCTION_MAP.get(gpu_type, "eval_kernel_on_gpu")
     eval_fn = modal.Function.from_name("openkernel-eval", fn_name)
-    result = eval_fn.remote(
-        kernel_source=kernel_code,
-        reference_source=reference_code,
-        eval_mode="fast",
-        problem_format=problem_format,
-        gpu_type=gpu_type,
-    )
-    return result
+
+    last_result: dict = {}
+    for attempt in range(_INFRA_RETRY_LIMIT + 1):
+        try:
+            result = eval_fn.remote(
+                kernel_source=kernel_code,
+                reference_source=reference_code,
+                eval_mode="fast",
+                problem_format=problem_format,
+                gpu_type=gpu_type,
+            )
+        except Exception as exc:
+            # Network / Modal-layer failures are also infra — retry.
+            result = {
+                "status": "process_crashed",
+                "correct": False,
+                "speedup": 0.0,
+                "runtime_us": 0.0,
+                "ref_runtime_us": 0.0,
+                "error": f"modal remote call failed: {type(exc).__name__}: {exc}",
+            }
+
+        last_result = result if isinstance(result, dict) else {}
+        if not _is_infra_error(last_result):
+            return last_result
+
+        logger.warning(
+            "Modal eval infra failure (attempt %d/%d): status=%s error=%s",
+            attempt + 1, _INFRA_RETRY_LIMIT + 1,
+            last_result.get("status"),
+            (last_result.get("error") or "")[:200],
+        )
+
+    # All retries exhausted — return the last infra error so upstream can
+    # mark this attempt as infra-failed and skip counting it as a kernel
+    # failure (e.g., don't trigger round-1-zero-correct early-stop).
+    last_result.setdefault("infra_retries_exhausted", True)
+    return last_result
 
 
 class KernelAgentBridge:
@@ -224,6 +338,17 @@ class KernelAgentBridge:
         prev_kernel = os.environ.get("OPENKERNEL_BEST_KERNEL", "")
         prev_speedup = os.environ.get("OPENKERNEL_BEST_SPEEDUP", "")
 
+        # Extract the KB Model.__init__ signature up-front so we can splice
+        # it into the prompt as an unambiguous init hint. Parameterized KB
+        # problems (Conv2D, Linear, GroupNorm, …) failed repeatedly with
+        # "ModelNew.__init__() takes 1 positional argument but N were given"
+        # because the LLM kept emitting no-arg `def __init__(self):`. The
+        # reference already encodes the signature via ``get_init_inputs()``;
+        # converting it to a single-line hint in the FINAL prompt (not the
+        # inner_loop.py bundle, which this code path bypasses) fixes that
+        # entire failure class for all KB problems at once.
+        init_hint = _extract_kb_init_hint(self_contained_ref)
+
         # Build problem description with all context
         problem_desc = (
             f"Optimize the following PyTorch code into a fast Triton kernel "
@@ -234,6 +359,7 @@ class KernelAgentBridge:
             f"- The kernel must be correct: torch.allclose(ref, kernel, rtol=1e-2, atol=1e-2)\n"
             f"- Output dtype must match reference output dtype\n"
             f"- Do NOT hardcode bfloat16 or float16 — use the input tensor's dtype\n"
+            f"{init_hint}"
             f"\n"
             f"PERFORMANCE REQUIREMENTS:\n"
             f"- MUST use @triton.autotune with 4+ configs varying BLOCK_SIZE "
@@ -531,6 +657,8 @@ class KernelAgentBridge:
         profile = {}
         ref_runtime_us = 0.0
         kernel_runtime_us = 0.0
+        infra_failed = False
+        infra_error: str = ""
 
         if result.get("success") and kernel_code and self._use_modal:
             try:
@@ -552,6 +680,17 @@ class KernelAgentBridge:
                     ref_runtime_us = eval_result.get("ref_runtime_us", 0.0)
                     kernel_runtime_us = eval_result.get("runtime_us", 0.0)
                     profile = eval_result.get("profile", {})
+                elif _is_infra_error(eval_result):
+                    # CUDA-context poisoning, subprocess crash, or timeout.
+                    # Not a kernel-quality signal — upstream must retry rather
+                    # than count this toward round-1-zero-correct early-stop.
+                    infra_failed = True
+                    infra_error = str(eval_result.get("error") or "")[:500]
+                    logger.warning(
+                        "Modal eval returned infra error (status=%s) — "
+                        "bridge will signal infra_failed=True",
+                        eval_result.get("status"),
+                    )
 
                 if self._live_display:
                     # Only "keep" if it beats the current best
@@ -627,6 +766,11 @@ class KernelAgentBridge:
             "rounds": result.get("rounds", self._max_rounds),
             "elapsed": elapsed,
             "per_worker": self._per_worker_latest,
+            # Infra-level eval failure (CUDA context poisoning, subprocess
+            # crash, eval timeout) — upstream treats as retry signal, not
+            # kernel failure. `error` populated only when infra_failed=True.
+            "infra_failed": infra_failed,
+            "infra_error": infra_error,
         }
 
     def _find_few_shot_example(self, ref_path: Path, classification: Any = None) -> str:

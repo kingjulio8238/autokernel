@@ -14,7 +14,9 @@ optimization intent it:
 
 from __future__ import annotations
 
+import ast
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import Enum
@@ -30,6 +32,58 @@ from openkernel.eval.types import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_kb_init_hint(reference: str) -> str:
+    """Extract the KernelBench ``Model.__init__`` signature as a prompt hint.
+
+    KB references define ``class Model(nn.Module)`` and a companion
+    ``get_init_inputs()`` function; the harness calls
+    ``ModelNew(*get_init_inputs())`` on the generated kernel, so ``ModelNew``
+    must accept the SAME positional args. LLMs routinely forget this and
+    emit ``def __init__(self):`` which immediately fails with
+    "takes 1 positional argument but N were given".
+
+    Returns a single-line hint like::
+
+        Init-signature hint (KB Model): ModelNew.__init__(self, in_channels, out_channels, kernel_size, bias_shape) — mirror Model.__init__ exactly.
+
+    Or empty string for non-KB references (e.g. GPU MODE ref_kernel),
+    unparseable refs, or KB refs without get_init_inputs(). Never raises —
+    callers can trust the return value to be a string.
+    """
+    if not reference or "class Model" not in reference:
+        return ""
+    try:
+        tree = ast.parse(reference)
+    except SyntaxError:
+        return ""
+
+    model_init_args: list[str] | None = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "Model":
+            for body_node in node.body:
+                if isinstance(body_node, ast.FunctionDef) and body_node.name == "__init__":
+                    args = body_node.args
+                    names = [a.arg for a in args.args]
+                    # Drop "self" — ModelNew's __init__ needs the rest.
+                    if names and names[0] == "self":
+                        names = names[1:]
+                    model_init_args = names
+                    break
+            break
+
+    if not model_init_args:
+        return ""
+
+    sig = ", ".join(["self", *model_init_args])
+    return (
+        f"Init-signature hint (KernelBench Model): "
+        f"ModelNew.__init__({sig}) must mirror Model.__init__ exactly — "
+        f"the harness calls ModelNew(*get_init_inputs()). "
+        f"A no-arg `def __init__(self):` crashes with "
+        f"\"takes 1 positional argument but {len(model_init_args)} were given\"."
+    )
 
 
 # ------------------------------------------------------------------
@@ -128,10 +182,12 @@ class InnerLoop:
             "strategy_hints": None,
             "skills_extra": None,
             "archspec": None,
+            "op_template": "",
         }
 
         # --- Classifier -----------------------------------------------------
         op_tag = ""
+        op_type_value: str | None = None
         try:
             from kernel_code.problem_classifier import classify_problem  # lazy
 
@@ -139,8 +195,34 @@ class InnerLoop:
             bundle["problem_context"] = classif.to_context_string()
             bundle["strategy_hints"] = list(classif.strategy_hints) or None
             op_tag = classif.op_type.value
+            op_type = getattr(classif, "op_type", None)
+            op_type_value = getattr(op_type, "value", op_type) if op_type else None
         except Exception as exc:
             logger.warning("InnerLoop: classify_problem failed — %s", exc)
+
+        # --- KB init-signature hint ----------------------------------------
+        # Parameterized KB models (Conv2D, Linear, GroupNorm, …) repeatedly
+        # failed with "ModelNew.__init__() takes 1 positional argument but N
+        # were given" because the LLM emitted a no-arg ``def __init__(self):``.
+        # The reference already encodes the required signature via
+        # ``get_init_inputs()``; splice it into problem_context as an
+        # unambiguous signature hint. Applies to ALL KB problems — not
+        # problem-specific.
+        try:
+            init_hint = _extract_kb_init_hint(reference)
+            if init_hint:
+                pc = bundle["problem_context"] or ""
+                bundle["problem_context"] = (pc + "\n" + init_hint).strip()
+        except Exception as exc:
+            logger.warning("InnerLoop: init-hint extraction failed — %s", exc)
+
+        # --- Op-type template ----------------------------------------------
+        try:
+            from openkernel.backends.base import load_op_template  # lazy
+
+            bundle["op_template"] = load_op_template(op_type_value)
+        except Exception as exc:
+            logger.warning("InnerLoop: load_op_template failed — %s", exc)
 
         # --- Skill library -------------------------------------------------
         try:
@@ -282,6 +364,7 @@ class InnerLoop:
                     problem_context=retrieval["problem_context"],
                     strategy_hints=retrieval["strategy_hints"],
                     archspec=retrieval["archspec"],
+                    op_template=retrieval.get("op_template") or None,
                 )
             except ValueError as exc:
                 # Validation failure from generator — treat as a soft error,

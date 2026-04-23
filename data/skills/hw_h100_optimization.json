@@ -40,6 +40,15 @@
       "strategy": "Apply shared-memory histogram with privatized bins and warp-aggregated atomics to mitigate contention.",
       "bottleneck": "memory_bound",
       "sol_score": 1.0
+    },
+    {
+      "problem": "L1/reduction",
+      "speedup": 8.4439,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "memory_bound",
+      "sol_score": 1.0
     }
   ],
   "code_template": null,

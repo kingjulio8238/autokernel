@@ -32,6 +32,7 @@ class Generator:
         problem_context: str | None = None,
         strategy_hints: list[str] | None = None,
         archspec: dict | None = None,
+        op_template: str | None = None,
     ) -> str:
         """Generate a kernel implementation.
 
@@ -53,6 +54,8 @@ class Generator:
             Actionable hints derived from the classifier.
         archspec : dict, optional
             Structured hardware archspec to inject into the prompt.
+        op_template : str, optional
+            Canonical op-type skeleton body picked by the classifier.
 
         Returns
         -------
@@ -74,6 +77,7 @@ class Generator:
             problem_context=problem_context,
             strategy_hints=strategy_hints,
             archspec=archspec,
+            op_template=op_template,
         )
 
         # 2. Call LLM

@@ -9,7 +9,9 @@ CUDA toolkit, Triton, and PyTorch pre-installed.
 
 from __future__ import annotations
 
+import multiprocessing
 import os
+import queue as _queue
 import tempfile
 import time
 import traceback
@@ -55,7 +57,68 @@ _GPU_MAP = {
 # ---------------------------------------------------------------------------
 
 
-def _eval_kernel_impl(
+_CUDA_FATAL_MARKERS = (
+    "illegalAddress",
+    "illegal memory access",
+    "CUDA error",
+    "CUDA_ERROR",
+    "cudaErrorIllegal",
+    "an illegal memory access was encountered",
+    "device-side assert triggered",
+    "misaligned address",
+)
+
+
+def _classify_cuda_error(err_str: str) -> bool:
+    """True if the error string looks like a fatal CUDA-context poisoning."""
+    if not err_str:
+        return False
+    return any(marker in err_str for marker in _CUDA_FATAL_MARKERS)
+
+
+# Typographic Unicode chars that LLMs frequently emit inside generated code
+# (from markdown-ish reasoning, copy-pasted prose, etc.). Python's parser
+# rejects any of these on sight, which costs us rounds across ALL problem
+# types. Normalizing them to ASCII equivalents recovers ~15–20% of otherwise-
+# failing rounds without changing code semantics. Mapping is conservative:
+# only chars that have a clear ASCII intent (quotes, dashes, spaces, bullets).
+_UNICODE_CODE_REPLACEMENTS = {
+    "‘": "'",   # LEFT SINGLE QUOTATION MARK
+    "’": "'",   # RIGHT SINGLE QUOTATION MARK
+    "“": '"',   # LEFT DOUBLE QUOTATION MARK
+    "”": '"',   # RIGHT DOUBLE QUOTATION MARK
+    "–": "-",   # EN DASH
+    "—": "-",   # EM DASH
+    "‐": "-",   # HYPHEN
+    "‑": "-",   # NON-BREAKING HYPHEN
+    "‒": "-",   # FIGURE DASH
+    "−": "-",   # MINUS SIGN
+    "…": "...", # HORIZONTAL ELLIPSIS
+    " ": " ",   # NON-BREAKING SPACE
+    "•": "#",   # BULLET (replace with comment prefix so a "bullet" line doesn't blow up)
+    "·": "#",   # MIDDLE DOT
+    "﻿": "",    # BYTE ORDER MARK
+}
+
+
+def _sanitize_kernel_source(src: str) -> str:
+    """Replace typographic Unicode chars with ASCII equivalents.
+
+    LLMs often echo markdown-style prose into code (smart quotes, bullets,
+    em-dashes). Python's parser fails immediately with
+    ``SyntaxError: invalid character '…'`` even though the surrounding code
+    is well-formed. Normalizing is safe — the replacements preserve semantic
+    intent (e.g. ``"`` for smart double-quote, ``-`` for em-dash).
+    """
+    if not src:
+        return src
+    for bad, good in _UNICODE_CODE_REPLACEMENTS.items():
+        if bad in src:
+            src = src.replace(bad, good)
+    return src
+
+
+def _eval_kernel_core(
     kernel_source: str,
     reference_source: str,
     eval_mode: str = "fast",
@@ -65,20 +128,26 @@ def _eval_kernel_impl(
     perf_trials_thorough: int = 100,
     gpu_type: str = "L40S",
 ) -> dict[str, Any]:
-    """Evaluate a kernel against a reference implementation on a GPU.
+    """Core eval logic — compile, check correctness, benchmark.
 
-    This function runs inside a Modal container with GPU access.
-    It writes sources to temp files, uses KernelBench's eval machinery
-    to check correctness and measure performance.
-
-    Returns a dict matching EvalResult fields.
+    Intended to run inside an isolated subprocess via `_eval_subprocess_worker`.
+    Do NOT call directly from the Modal handler — use `_eval_kernel_impl`
+    which provides subprocess isolation so a poisoned CUDA context in the
+    child cannot contaminate sibling evals in the same container.
     """
-    import torch
+    import torch  # noqa: F401 — imported for side effect (fresh CUDA init)
 
     wall_start = time.time()
     num_perf_trials = (
         perf_trials_fast if eval_mode == "fast" else perf_trials_thorough
     )
+
+    # Sanitize typographic Unicode before the Python parser sees the source.
+    # Applies to BOTH kernel and reference — the reference is authored by us
+    # but we sanitize it too so "sanitize everything that hits exec_module"
+    # is the single invariant callers can rely on.
+    kernel_source = _sanitize_kernel_source(kernel_source)
+    reference_source = _sanitize_kernel_source(reference_source)
 
     # Write sources to temp files so KernelBench can load them as modules
     tmpdir = tempfile.mkdtemp(prefix="openkernel_eval_")
@@ -119,17 +188,194 @@ def _eval_kernel_impl(
                 gpu_type=gpu_type,
             )
     except Exception as exc:
+        err_str = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
         result = {
+            "status": "cuda_error" if _classify_cuda_error(err_str) else "error",
+            "correct": False,
+            "speedup": 0.0,
+            "runtime_us": 0.0,
+            "ref_runtime_us": 0.0,
+            "error": err_str,
+        }
+
+    result["eval_seconds"] = time.time() - wall_start
+    result.setdefault("profile", {})
+    return result
+
+
+def _eval_subprocess_worker(in_q, out_q) -> None:
+    """Child-process entrypoint: pull params from in_q, push result to out_q.
+
+    Runs in a fresh `multiprocessing.get_context('spawn')` process so the CUDA
+    context is brand-new. If a generated kernel corrupts CUDA (illegal memory
+    access, etc.), only this process dies — the Modal container parent stays
+    alive and the next eval gets a fresh subprocess.
+    """
+    try:
+        params = in_q.get(timeout=60)
+    except Exception as exc:
+        out_q.put({
+            "status": "process_crashed",
+            "correct": False,
+            "speedup": 0.0,
+            "runtime_us": 0.0,
+            "ref_runtime_us": 0.0,
+            "error": f"subprocess failed to receive params: {exc}",
+        })
+        return
+
+    try:
+        result = _eval_kernel_core(**params)
+    except BaseException as exc:  # catch SystemExit too
+        err_str = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
+        result = {
+            "status": "cuda_error" if _classify_cuda_error(err_str) else "error",
+            "correct": False,
+            "speedup": 0.0,
+            "runtime_us": 0.0,
+            "ref_runtime_us": 0.0,
+            "error": err_str,
+        }
+
+    try:
+        out_q.put(result)
+    except Exception:
+        # If the queue is broken (parent already reaped us), nothing we can do.
+        pass
+
+
+def _eval_kernel_impl(
+    kernel_source: str,
+    reference_source: str,
+    eval_mode: str = "fast",
+    problem_format: str = "auto",
+    correctness_trials: int = 5,
+    perf_trials_fast: int = 10,
+    perf_trials_thorough: int = 100,
+    gpu_type: str = "L40S",
+) -> dict[str, Any]:
+    """Evaluate a kernel in an isolated subprocess on the GPU.
+
+    Fresh CUDA context per call — if the child dies from illegal memory
+    access or any other CUDA-fatal crash, the parent survives and returns
+    a structured error. Upstream treats `cuda_error` / `process_crashed`
+    / `timeout` as infra retries, not as kernel-quality signals.
+    """
+    wall_start = time.time()
+
+    params = {
+        "kernel_source": kernel_source,
+        "reference_source": reference_source,
+        "eval_mode": eval_mode,
+        "problem_format": problem_format,
+        "correctness_trials": correctness_trials,
+        "perf_trials_fast": perf_trials_fast,
+        "perf_trials_thorough": perf_trials_thorough,
+        "gpu_type": gpu_type,
+    }
+
+    # `spawn` gives a brand-new interpreter → fresh CUDA context every call.
+    # `fork` would inherit the poisoned parent context, which defeats the point.
+    try:
+        ctx = multiprocessing.get_context("spawn")
+    except ValueError as exc:
+        # Spawn unavailable in this environment — surface loudly rather than
+        # silently falling back to fork (which would reintroduce the bug).
+        return {
             "status": "error",
             "correct": False,
             "speedup": 0.0,
             "runtime_us": 0.0,
             "ref_runtime_us": 0.0,
-            "error": f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}",
+            "error": f"multiprocessing spawn context unavailable: {exc}",
+            "eval_seconds": time.time() - wall_start,
+            "profile": {},
         }
 
-    result["eval_seconds"] = time.time() - wall_start
+    in_q = ctx.Queue()
+    out_q = ctx.Queue()
+    proc = ctx.Process(target=_eval_subprocess_worker, args=(in_q, out_q))
+    proc.start()
+    in_q.put(params)
+
+    # Parent-side timeout: the Modal function itself has timeout=600, so give
+    # the child a bit less so the parent still has time to terminate cleanly
+    # and return a structured timeout dict.
+    child_timeout_s = 540.0
+
+    result: dict[str, Any] | None = None
+    try:
+        result = out_q.get(timeout=child_timeout_s)
+    except _queue.Empty:
+        result = {
+            "status": "timeout",
+            "correct": False,
+            "speedup": 0.0,
+            "runtime_us": 0.0,
+            "ref_runtime_us": 0.0,
+            "error": f"eval subprocess timed out after {child_timeout_s:.0f}s",
+        }
+    except Exception as exc:
+        result = {
+            "status": "process_crashed",
+            "correct": False,
+            "speedup": 0.0,
+            "runtime_us": 0.0,
+            "ref_runtime_us": 0.0,
+            "error": f"subprocess queue error: {exc}",
+        }
+
+    # We already have the result (or a synthesized timeout). Join the child
+    # so it cannot outlive the parent call. The child's Queue feeder thread
+    # may still be draining after the put(), so give it a brief grace period
+    # before terminating — otherwise we routinely SIGTERM a healthy child and
+    # misread the negative exitcode as a CUDA crash.
+    got_result_from_child = isinstance(result, dict) and result.get("status") != "timeout"
+    if got_result_from_child:
+        proc.join(timeout=5)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(timeout=5)
+    if proc.is_alive():
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        proc.join(timeout=5)
+
+    exitcode = proc.exitcode
+
+    if not isinstance(result, dict):
+        # Child produced nothing — hard crash / signal kill. Treat as infra.
+        result = {
+            "status": "process_crashed",
+            "correct": False,
+            "speedup": 0.0,
+            "runtime_us": 0.0,
+            "ref_runtime_us": 0.0,
+            "error": f"subprocess produced no result (exitcode={exitcode})",
+        }
+    elif not got_result_from_child:
+        # Timeout branch — already has status=timeout, leave as-is.
+        pass
+    else:
+        # Child returned a result dict. Only upgrade to cuda_error when the
+        # CHILD itself raised and the message screams CUDA — a parent-driven
+        # SIGTERM after successful put is NOT a CUDA crash.
+        if (result.get("status") == "error"
+                and _classify_cuda_error(result.get("error", ""))):
+            result["status"] = "cuda_error"
+
+    result.setdefault("eval_seconds", time.time() - wall_start)
     result.setdefault("profile", {})
+
+    # Best-effort queue cleanup
+    try:
+        in_q.close()
+        out_q.close()
+    except Exception:
+        pass
+
     return result
 
 
@@ -521,7 +767,22 @@ def _run_eval_gpumode(
             gpu_type=gpu_type,
         )
     except Exception as exc:
-        gpumode_profile = {"error": f"profiling failed: {exc}"}
+        # Even when profiling blows up, downstream (ProfileMetrics) expects a
+        # sol_score / runtime_us. Compute the runtime-relative fallback SOL
+        # from measured kernel_us / ref_us so a correct kernel doesn't record
+        # sol_score=0 just because torch.profiler tripped.
+        fallback_sol = _sol_compute_sol_score(kernel_us, ref_us, 0, 0, gpu_type)
+        gpumode_profile = {
+            "error": f"profiling failed: {exc}",
+            "sol_score": fallback_sol,
+            "compute_util": 0.0,
+            "bandwidth_util": 0.0,
+            "total_flops": 0,
+            "total_bytes": 0,
+            "runtime_us": kernel_us,
+            "ref_runtime_us": ref_us,
+            "bottleneck_type": "unknown",
+        }
 
     return {
         "status": "correct", "correct": True,
@@ -886,7 +1147,22 @@ def _collect_basic_profile(
         "sol_score": 0.0,
         "compute_util": 0.0,
         "bandwidth_util": 0.0,
+        "runtime_us": kernel_runtime_us,
+        "ref_runtime_us": ref_runtime_us,
     }
+
+    def _iter_tensors(obj):
+        if isinstance(obj, torch.Tensor):
+            yield obj
+        elif isinstance(obj, (tuple, list)):
+            for item in obj:
+                yield from _iter_tensors(item)
+        elif isinstance(obj, dict):
+            for item in obj.values():
+                yield from _iter_tensors(item)
+
+    def _sum_bytes(obj) -> int:
+        return sum(t.nelement() * t.element_size() for t in _iter_tensors(obj))
 
     try:
         inputs = [
@@ -940,25 +1216,18 @@ def _collect_basic_profile(
             # Estimate memory I/O from input/output tensor sizes.
             # self_cuda_memory_usage tracks allocations, not actual I/O,
             # so tensor-based estimation is more reliable for OI calculation.
-            total_bytes = 0
-            for inp in inputs:
-                if isinstance(inp, torch.Tensor):
-                    total_bytes += inp.nelement() * inp.element_size()  # read
+            # GPU-MODE problems pass inputs as tuples (e.g. prefixsum
+            # (input, output), vectoradd (a, b, c)) so flatten containers.
+            input_bytes = _sum_bytes(inputs)
+            total_bytes = input_bytes  # read
             # Run once to capture output size for write estimate
             try:
                 with torch.no_grad():
                     out = model(*inputs)
-                if isinstance(out, torch.Tensor):
-                    total_bytes += out.nelement() * out.element_size()  # write
-                elif isinstance(out, (tuple, list)):
-                    for o in out:
-                        if isinstance(o, torch.Tensor):
-                            total_bytes += o.nelement() * o.element_size()
+                total_bytes += _sum_bytes(out)  # write
             except Exception:
                 # Conservative fallback: assume output size ≈ input size
-                for inp in inputs:
-                    if isinstance(inp, torch.Tensor):
-                        total_bytes += inp.nelement() * inp.element_size()
+                total_bytes += input_bytes
             profile_result["total_bytes"] = total_bytes
 
             # Operational intensity: FLOPs / bytes

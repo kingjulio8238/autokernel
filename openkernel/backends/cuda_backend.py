@@ -33,6 +33,7 @@ class CudaBackend(BackendBase):
         problem_context: str | None = None,
         strategy_hints: list[str] | None = None,
         archspec: dict | None = None,
+        op_template: str | None = None,
     ) -> str:
         prompt = safe_format(
             self._template,
@@ -44,6 +45,7 @@ class CudaBackend(BackendBase):
             problem_context=problem_context or "None provided",
             strategy_hints=format_hints(strategy_hints) or "None provided",
             archspec=format_archspec(archspec) or "No structured hardware spec available",
+            op_template=op_template or "No op-specific template available",
         )
         return prompt
 

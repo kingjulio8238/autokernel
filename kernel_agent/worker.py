@@ -14,6 +14,7 @@
 
 """Verification Worker for testing and refining individual kernels."""
 
+import ast
 import json
 import logging
 import multiprocessing as mp
@@ -32,6 +33,29 @@ from kernel_agent.ka_utils.providers import get_model_provider
 
 from .prompt_manager import PromptManager
 from .worker_util import _run_test_multiprocess
+
+
+# LLMs occasionally emit typographic Unicode (smart quotes, em-dash, bullets)
+# inside generated code, which makes Python's parser fail immediately with
+# "SyntaxError: invalid character …" even when the surrounding code is fine.
+# We normalize on both the Modal-side write (modal_infra/app.py) AND here
+# so the local subprocess eval path gets the same treatment.
+_UNICODE_CODE_REPLACEMENTS = {
+    "‘": "'", "’": "'", "“": '"', "”": '"',
+    "–": "-", "—": "-", "‐": "-", "‑": "-",
+    "‒": "-", "−": "-", "…": "...", " ": " ",
+    "•": "#", "·": "#", "﻿": "",
+}
+
+
+def _sanitize_kernel_source(src: str) -> str:
+    """Replace typographic Unicode with ASCII equivalents. Idempotent."""
+    if not src:
+        return src
+    for bad, good in _UNICODE_CODE_REPLACEMENTS.items():
+        if bad in src:
+            src = src.replace(bad, good)
+    return src
 
 
 DISALLOWED_TORCH_PATTERNS = [
@@ -272,7 +296,7 @@ class VerificationWorker:
 
     def _write_kernel(self, kernel_code: str):
         """Write only the kernel code to file."""
-        self.kernel_file.write_text(kernel_code)
+        self.kernel_file.write_text(_sanitize_kernel_source(kernel_code))
         self.logger.info("Updated kernel file")
 
     def _write_files(self, kernel_code: str, test_code: list[str]):
@@ -289,7 +313,7 @@ class VerificationWorker:
                 primary test written to ``test_kernel.py``; any subsequent
                 entries are written to ``test_extra_{i}_kernel.py``.
         """
-        self.kernel_file.write_text(kernel_code)
+        self.kernel_file.write_text(_sanitize_kernel_source(kernel_code))
         self.test_files = []
         for i, code in enumerate(test_code):
             name = "test_kernel.py" if i == 0 else f"test_extra_{i}_kernel.py"
@@ -299,16 +323,81 @@ class VerificationWorker:
         self.logger.info("Wrote kernel and %d test file(s)", len(self.test_files))
 
     def _strip_comments_and_strings(self, code: str) -> str:
-        """Remove comments and docstrings to avoid false positives when scanning code."""
+        """Remove comments, docstrings, and ``if __name__ == "__main__":``
+        blocks so the scanner doesn't false-positive on code that never
+        executes at eval time.
+
+        - Preserves newlines inside multi-line docstrings so line numbers
+          still map to the original source.
+        - Drops anything inside an ``if __name__ == "__main__":`` block
+          (replaced with blank lines to preserve numbering). The Modal
+          eval harness imports the kernel module — Python does not run
+          ``__main__`` blocks on import, so patterns there are harmless
+          and must not block a kernel that is otherwise clean.
+        """
         pattern = re.compile(r'("""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'|#.*)')
-        return re.sub(pattern, "", code)
+
+        def _blank_but_keep_newlines(m: "re.Match[str]") -> str:
+            matched = m.group(0)
+            if matched.startswith("#"):
+                return ""
+            return re.sub(r"[^\n]", " ", matched)
+
+        stripped = pattern.sub(_blank_but_keep_newlines, code)
+
+        # Blank out ``if __name__ == "__main__":`` + body. The block starts
+        # at column 0 and runs until EOF or the next unindented line.
+        main_re = re.compile(
+            r'^if\s+__name__\s*==\s*["\']__main__["\']\s*:\s*$',
+            re.MULTILINE,
+        )
+        m = main_re.search(stripped)
+        if m:
+            head = stripped[: m.start()]
+            tail = stripped[m.start():]
+            # Replace every non-newline char in the tail with space so the
+            # indented body is wiped but line numbers still match.
+            tail_blanked = re.sub(r"[^\n]", " ", tail)
+            stripped = head + tail_blanked
+
+        return stripped
 
     def _detect_pytorch_compute(self, kernel_code: str) -> str | None:
-        """Detect disallowed PyTorch usage inside the kernel wrapper."""
+        """Detect disallowed PyTorch usage inside the kernel wrapper.
+
+        Returns a message that includes the offending line number + the raw
+        source line (not the comment-stripped version) so the next round's
+        LLM gets a concrete pointer to what it wrote. Generic "matmul not
+        allowed" messages produce the same offending kernel on every retry
+        because the LLM can't tell which line to change.
+
+        Pre-flight: if the kernel doesn't parse (SyntaxError) we short-
+        circuit with a parse-error message BEFORE scanning for forbidden
+        patterns. Truncated LLM responses frequently leave an unclosed
+        triple-quoted docstring; without this guard the scanner sees the
+        DOCSTRING PROSE as live code and false-positives on phrases like
+        "torch.nn.functional" that are quoting our own prompt back at us.
+        """
+        try:
+            ast.parse(kernel_code)
+        except SyntaxError as exc:
+            return (
+                f"Generated file does not parse as Python — "
+                f"regenerate a COMPLETE kernel file. "
+                f"Python says: {exc.msg} (line {exc.lineno or '?'})"
+            )
+
         sanitized = self._strip_comments_and_strings(kernel_code)
         for pattern, message in DISALLOWED_TORCH_PATTERNS:
-            if pattern.search(sanitized):
-                return message
+            m = pattern.search(sanitized)
+            if not m:
+                continue
+            line_no = sanitized.count("\n", 0, m.start()) + 1
+            src_lines = kernel_code.splitlines()
+            if 1 <= line_no <= len(src_lines):
+                offending = src_lines[line_no - 1].strip()
+                return f"{message} — line {line_no}: {offending[:160]}"
+            return message
         return None
 
     def _run_test(self) -> tuple[bool, str, str]:
@@ -453,19 +542,26 @@ class VerificationWorker:
             try:
                 self.logger.info(f"Refining kernel using {self.openai_model}")
 
-                # Build context from history
+                # Build context from history — bounded to the LAST 4 attempts
+                # with per-attempt caps. Unbounded history squeezed the LLM's
+                # output token budget (Conv2D: kernels shrank 209→82→17 lines
+                # as the prompt grew across rounds). Last-2 was too tight:
+                # workers lost the signal and produced the SAME buggy kernel
+                # across retries. Last-4 + ~1000-char stderr budget balances:
+                # the LLM sees enough error-context to iterate, without so
+                # much history that the output gets truncated.
                 history_context = ""
-                if self.history:
-                    history_context = "\n\nPREVIOUS ATTEMPTS:\n"
-                    for i, round_data in enumerate(self.history):
-                        history_context += f"\nAttempt {i + 1}:\n"
-                        history_context += f"Kernel code:\n```python\n{round_data['kernel_code'][:500]}...\n```\n"
+                recent = self.history[-4:] if self.history else []
+                if recent:
+                    history_context = "\n\nRECENT ATTEMPTS (most recent last):\n"
+                    base = len(self.history) - len(recent) + 1
+                    for i, round_data in enumerate(recent):
+                        history_context += f"\nAttempt {base + i}:\n"
+                        history_context += f"Kernel code (head):\n```python\n{round_data['kernel_code'][:400]}\n```\n"
                         if round_data.get("stderr"):
-                            history_context += f"Error: {round_data['stderr'][:2000]}\n"
+                            history_context += f"Error: {round_data['stderr'][:1000]}\n"
                         if round_data.get("stdout"):
-                            history_context += (
-                                f"Output: {round_data['stdout'][:1000]}\n"
-                            )
+                            history_context += f"Output: {round_data['stdout'][:400]}\n"
 
                 # Create refinement prompt using template
                 prompt = self.prompt_manager.render_kernel_refinement_prompt(

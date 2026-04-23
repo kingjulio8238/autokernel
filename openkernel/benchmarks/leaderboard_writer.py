@@ -18,12 +18,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from openkernel.benchmarks.problem_spec import ProblemSpec
+
+logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = "1.0"
 
@@ -31,6 +35,30 @@ _VALID_TIERS = {"L1", "L2", "GPU_MODE"}
 _VALID_HARDWARE = {"L40S", "H100", "A100-80GB", "B200"}
 _VALID_BOTTLENECKS = {"compute-bound", "memory-bound", "balanced", "unknown"}
 _VALID_KERNEL_EXT = {".py", ".cu", ".triton"}
+
+# Placeholder source emitted by kernel_code/batch_optimizer.py for failure
+# records (correct=False, speedup=0.0). Valid ONLY when correct=False.
+_FAILURE_PLACEHOLDER = "# No correct kernel produced for this attempt.\n"
+
+# Op tokens scanned in the first 2000 chars of kernel_source. If one of
+# these tokens appears in the kernel's leading docstring/comments but is
+# absent from spec.reference_source (and from spec.name/spec.id), that is
+# strong evidence the kernel was generated for a DIFFERENT problem — the
+# env-var-leak class of bug. Regex patterns use word boundaries where
+# meaningful to cut false positives from substrings like "assortment".
+_OP_TOKENS: tuple[tuple[str, str], ...] = (
+    ("histogram", r"\bhistogram\b"),
+    ("cumsum", r"\bcumsum\b"),
+    ("prefix sum", r"\bprefix[\s-]?sum\b"),
+    ("prefixsum", r"\bprefixsum\b"),
+    ("matmul", r"\bmatmul\b"),
+    ("softmax", r"\bsoftmax\b"),
+    ("layernorm", r"\blayer[\s-]?norm\b"),
+    ("conv2d", r"\bconv2d\b"),
+    ("vectoradd", r"\bvector[\s-]?add\b"),
+    ("vectorsum", r"\bvector[\s-]?sum\b"),
+    ("grayscale", r"\bgrayscale\b"),
+)
 
 _REQUIRED_RESULT_KEYS: dict[str, type | tuple[type, ...]] = {
     "kernel_source": str,
@@ -61,6 +89,95 @@ def _kernel_hash(source: str) -> str:
 def _config_hash(config: dict) -> str:
     digest = hashlib.sha256(_canonical_json(config).encode("utf-8")).hexdigest()[:12]
     return f"cfg_{digest}"
+
+
+def _check_kernel_identity(
+    spec: ProblemSpec,
+    result: dict,
+    date_dir: Path,
+    khash: str,
+) -> None:
+    """Integrity defense against cross-problem kernel leakage.
+
+    Raises ValueError when the kernel being written looks like it was
+    generated for a different problem than ``spec``. Three guards:
+
+    1. Placeholder source + ``correct=True`` — the failure-record
+       placeholder is only valid for failure records.
+    2. Op-token docstring mismatch — an op name in the kernel's leading
+       docstring/comments that is absent from ``spec.reference_source``
+       AND from ``spec.name``/``spec.id``. Heuristic; disable with
+       ``OPENKERNEL_SKIP_KERNEL_IDENTITY_CHECK=1`` if noisy.
+    3. Kernel hash already written against a DIFFERENT ``problem_id``
+       on the same date — catches leaks that slip past the heuristic.
+    """
+    kernel_source = result["kernel_source"]
+    correct = bool(result["correct"])
+
+    if correct and kernel_source == _FAILURE_PLACEHOLDER:
+        raise ValueError(
+            "kernel_source is the failure placeholder but correct=True; "
+            "placeholder is only valid for correct=False failure records"
+        )
+
+    if os.environ.get("OPENKERNEL_SKIP_KERNEL_IDENTITY_CHECK") != "1":
+        head = kernel_source[:2000].lower()
+        ref_lower = (spec.reference_source or "").lower()
+        id_name = f"{spec.id} {spec.name}".lower()
+        for token_name, pattern in _OP_TOKENS:
+            if not re.search(pattern, head):
+                continue
+            if re.search(pattern, ref_lower):
+                continue
+            if re.search(pattern, id_name):
+                continue
+            logger.warning(
+                "leaderboard_writer: kernel-identity mismatch for %s — "
+                "kernel docstring mentions %r which is absent from "
+                "reference_source and problem id/name; refusing to write. "
+                "Set OPENKERNEL_SKIP_KERNEL_IDENTITY_CHECK=1 to bypass.",
+                spec.id, token_name,
+            )
+            raise ValueError(
+                f"kernel-identity mismatch: kernel_source for problem "
+                f"{spec.id!r} mentions {token_name!r} in its docstring, "
+                f"but that token is absent from reference_source and "
+                f"from the problem id/name — likely cross-problem leak"
+            )
+
+    # Guard #3 (cross-problem hash reuse) does not apply to the failure
+    # placeholder. The placeholder is intentionally deterministic so every
+    # failure record across every problem collapses to one companion file
+    # (``kernels/27c7dcf3ca247272.py``); collision is contract, not leak.
+    # Skipping this guard here is safe because guard #1 above already
+    # blocks the only dangerous placeholder case (correct=True).
+    if kernel_source == _FAILURE_PLACEHOLDER:
+        return
+
+    if date_dir.exists():
+        for sibling in date_dir.iterdir():
+            if sibling.suffix != ".json" or ".tmp." in sibling.name:
+                continue
+            try:
+                with open(sibling, "r") as f:
+                    prior = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                continue
+            if prior.get("kernel_hash") != khash:
+                continue
+            prior_pid = prior.get("problem_id")
+            if prior_pid and prior_pid != spec.id:
+                logger.warning(
+                    "leaderboard_writer: kernel hash %s already written "
+                    "for problem %r on %s; refusing to reuse for %r.",
+                    khash, prior_pid, date_dir.name, spec.id,
+                )
+                raise ValueError(
+                    f"kernel-identity mismatch: kernel_hash {khash!r} "
+                    f"was previously written against problem "
+                    f"{prior_pid!r} on {date_dir.name} — refusing to "
+                    f"reuse for {spec.id!r}"
+                )
 
 
 def _atomic_write(target: Path, data: bytes) -> None:
@@ -213,6 +330,9 @@ def write_record(
 
     date_dir = root / date
     kernels_dir = root / "kernels"
+
+    _check_kernel_identity(spec, result, date_dir, khash)
+
     date_dir.mkdir(parents=True, exist_ok=True)
     kernels_dir.mkdir(parents=True, exist_ok=True)
 

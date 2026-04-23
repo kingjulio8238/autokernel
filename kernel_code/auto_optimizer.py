@@ -64,6 +64,23 @@ logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+# Env vars the MetaOptimizer writes to hand state to the per-round bridge.
+# These MUST be cleared at run() entry and exit — otherwise problem N's best
+# kernel / strategy / round offset / inline profile leaks into problem N+1
+# when batch_optimizer runs problems sequentially in the same process.
+_PER_RUN_ENV_KEYS = (
+    "OPENKERNEL_BEST_KERNEL",
+    "OPENKERNEL_BEST_SPEEDUP",
+    "OPENKERNEL_CURRENT_STRATEGY",
+    "OPENKERNEL_ROUND_OFFSET",
+    "OPENKERNEL_INLINE_PROFILE",
+)
+
+
+def _clear_per_run_env() -> None:
+    for k in _PER_RUN_ENV_KEYS:
+        os.environ.pop(k, None)
+
 
 @dataclass
 class AutoResult:
@@ -180,6 +197,19 @@ class MetaOptimizer:
 
     def run(self) -> AutoResult:
         """Run the autonomous optimization loop."""
+        # Clear any env state left behind by a prior MetaOptimizer.run() in the
+        # same process. batch_optimizer runs problems sequentially, so without
+        # this the previous problem's best kernel / strategy / round offset /
+        # inline profile would leak into this problem's round 1.
+        _clear_per_run_env()
+        try:
+            return self._run_impl()
+        finally:
+            # Clear again on exit so the next caller starts clean even if
+            # this run raised partway through.
+            _clear_per_run_env()
+
+    def _run_impl(self) -> AutoResult:
         start_time = time.time()
         stop_reason = ""
 
@@ -303,7 +333,16 @@ class MetaOptimizer:
             # likely miscompiled (dtype/atomics/API) or unreachable. Further
             # rounds will keep failing; stop immediately with an actionable
             # reason instead of grinding through the full budget.
-            if round_num == 1 and round_result.get("kept", 0) == 0 and self._best_speedup <= 0.0:
+            #
+            # SKIP this early-stop if the round's eval failed at the
+            # infra level (CUDA context poisoning, subprocess crash,
+            # Modal timeout) — those aren't kernel-quality signals, so
+            # retrying in round 2 is the right move.
+            round_was_infra_failure = bool(round_result.get("infra_failed", False))
+            if (round_num == 1
+                    and round_result.get("kept", 0) == 0
+                    and self._best_speedup <= 0.0
+                    and not round_was_infra_failure):
                 stop_reason = (
                     f"No correct kernel after round 1 "
                     f"({round_result.get('total', 0)} attempts, "
@@ -311,6 +350,11 @@ class MetaOptimizer:
                     f"check reference dtypes, atomics, or backend choice"
                 )
                 break
+            if round_num == 1 and round_was_infra_failure and self._live_display:
+                self._live_display.print_permanent(
+                    "  [yellow]Infra-level eval failure in round 1 "
+                    "(CUDA context / subprocess crash) — retrying in round 2[/yellow]"
+                )
 
             # --- Early stop: kernel can't beat baseline after 2+ rounds ---
             # If we've tried 2+ rounds and still can't hit 1.0x, the reference
@@ -497,6 +541,11 @@ class MetaOptimizer:
             )
             os.environ["OPENKERNEL_INLINE_PROFILE"] = profile_context
 
+        # Infra-level failures (CUDA context poisoning, subprocess crash,
+        # eval timeout on Modal side) must not count as kernel failures —
+        # otherwise round-1-zero-correct early-stop triggers on transient
+        # infra problems. Surface the flag so the caller can distinguish.
+        infra_failed = bool(result.get("infra_failed", False))
         return {
             "round": round_num,
             "strategy": self._current_strategy,
@@ -508,6 +557,8 @@ class MetaOptimizer:
             "bottleneck": bottleneck_hint,
             "per_worker": result.get("per_worker", []),
             "profile": result.get("profile") or {},
+            "infra_failed": infra_failed,
+            "infra_error": result.get("infra_error", ""),
         }
 
     def _reflect(self, round_num: int) -> MetaReflection:

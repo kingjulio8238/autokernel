@@ -31,6 +31,7 @@ class BackendBase(ABC):
         problem_context: str | None = None,
         strategy_hints: list[str] | None = None,
         archspec: dict | None = None,
+        op_template: str | None = None,
     ) -> str:
         """Build the full generator prompt for the LLM.
 
@@ -53,6 +54,10 @@ class BackendBase(ABC):
         archspec : dict, optional
             Structured hardware archspec (device, sm_count, memory_gb,
             bandwidth_gbps, peak_tflops_fp16/fp32).
+        op_template : str, optional
+            Canonical op-type skeleton body (markdown) selected by the
+            classifier's ``op_type``. Empty/None falls back to a neutral
+            placeholder in the rendered prompt.
 
         Returns
         -------
@@ -165,6 +170,29 @@ _ARCHSPEC_FALLBACK: dict[str, dict] = {
 
 
 _SKILLS_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "skills"
+_TEMPLATE_DIR = Path(__file__).resolve().parents[2] / "data" / "prompts" / "op_templates"
+
+
+def load_op_template(op_type: str | None) -> str:
+    """Load the op-type template markdown for the given OpType enum value.
+
+    Returns the template body as a string, or empty string when the
+    op_type is None, unknown, or the template file doesn't exist. Never
+    raises — missing templates are soft-fallback.
+    """
+    if not op_type:
+        return ""
+    slug = str(op_type).strip().lower()
+    if not slug:
+        return ""
+    path = _TEMPLATE_DIR / f"{slug}.md"
+    if not path.exists():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as exc:
+        logger.warning("load_op_template: failed to read %s — %s", path, exc)
+        return ""
 
 # Single-line numeric patterns we try to extract from the prose "approach" field.
 _APPROACH_PATTERNS: list[tuple[str, str, type]] = [

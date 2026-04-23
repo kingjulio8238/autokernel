@@ -246,6 +246,68 @@ def test_bug_b_concurrent_bridges_dont_race():
     print(f"  [PASS] Bug B: {len(results)} concurrent bridges each saw their own reference")
 
 
+def test_meta_optimizer_clears_env_on_entry_and_exit():
+    """MetaOptimizer.run() must clear the per-run env vars it uses to hand
+    state to the bridge, both on entry (so stale state from a prior run
+    doesn't leak in) and on exit (so the next caller starts clean).
+
+    Regression: before this fix, problem N's best kernel persisted in
+    OPENKERNEL_BEST_KERNEL across sequential batch_optimizer invocations,
+    contaminating problem N+1's round-1 generator prompt.
+    """
+    from kernel_code.auto_optimizer import _PER_RUN_ENV_KEYS, _clear_per_run_env
+
+    # Simulate leftover state from a prior run.
+    os.environ["OPENKERNEL_BEST_KERNEL"] = "prev-problem-kernel"
+    os.environ["OPENKERNEL_BEST_SPEEDUP"] = "2.05"
+    os.environ["OPENKERNEL_CURRENT_STRATEGY"] = "prev-strategy"
+    os.environ["OPENKERNEL_ROUND_OFFSET"] = "42"
+    os.environ["OPENKERNEL_INLINE_PROFILE"] = "BW=99%"
+
+    try:
+        # The helper that run() calls on entry and in its finally block.
+        _clear_per_run_env()
+
+        for k in _PER_RUN_ENV_KEYS:
+            assert k not in os.environ, (
+                f"{k} should have been cleared by _clear_per_run_env() but is still set"
+            )
+    finally:
+        # Defensive: ensure we don't leak state out of this test.
+        for k in _PER_RUN_ENV_KEYS:
+            os.environ.pop(k, None)
+
+    print("  [PASS] env-leak: per-run env keys cleared on entry/exit")
+
+
+def test_meta_optimizer_run_uses_try_finally_for_env_cleanup():
+    """Static check: MetaOptimizer.run() wraps its body in try/finally and
+    calls _clear_per_run_env() in the finally block — guarantees cleanup
+    even when a round raises.
+    """
+    from kernel_code import auto_optimizer
+    import inspect
+
+    src = inspect.getsource(auto_optimizer.MetaOptimizer.run)
+    assert "_clear_per_run_env()" in src, (
+        "MetaOptimizer.run() must call _clear_per_run_env() — env leak regression"
+    )
+    assert "try:" in src and "finally:" in src, (
+        "MetaOptimizer.run() must wrap its body in try/finally so the env is "
+        "cleaned up even when a round raises"
+    )
+    # The finally-branch clear MUST come after the try: so that a raised
+    # exception still runs it. A simple ordering check.
+    try_idx = src.find("try:")
+    finally_idx = src.find("finally:")
+    assert try_idx < finally_idx, "try must precede finally"
+    # _clear_per_run_env() appears twice (entry + finally). Confirm.
+    assert src.count("_clear_per_run_env()") >= 2, (
+        "_clear_per_run_env() should be called at entry AND in finally"
+    )
+    print("  [PASS] env-leak: MetaOptimizer.run() wraps body in try/finally")
+
+
 if __name__ == "__main__":
     import tempfile
     with tempfile.TemporaryDirectory() as td:
@@ -271,4 +333,6 @@ if __name__ == "__main__":
     test_bug_b_worker_env_dict_carries_own_reference()
     test_bug_b_worker_process_applies_env_post_spawn()
     test_bug_b_concurrent_bridges_dont_race()
+    test_meta_optimizer_clears_env_on_entry_and_exit()
+    test_meta_optimizer_run_uses_try_finally_for_env_cleanup()
     print("\nAll ref-path plumbing tests passed.")

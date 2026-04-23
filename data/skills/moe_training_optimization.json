@@ -40,6 +40,15 @@
       "strategy": "Apply shared-memory histogram with privatized bins and warp-aggregated atomics to mitigate contention.",
       "bottleneck": "memory_bound",
       "sol_score": 1.0
+    },
+    {
+      "problem": "L1/gemm",
+      "speedup": 2.0674,
+      "hardware": "L40S",
+      "round": 2,
+      "strategy": "Autotune BLOCK_M/BLOCK_N/BLOCK_K tiling and warp-per-output configuration to leverage tensor core performance.",
+      "bottleneck": "compute_bound",
+      "sol_score": 1.0
     }
   ],
   "code_template": null,

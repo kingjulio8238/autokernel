@@ -61,6 +61,14 @@ def kernel_function(data):
 - Include proper error checking for CUDA API calls (`AT_DISPATCH_*`, `C10_CUDA_CHECK`, or equivalent).
 - Specify appropriate launch configurations (block size, grid size, shared memory).
 
+## Op-Type Skeleton (classifier-selected)
+
+The classifier identified this problem's op type from `{problem_context}` above. Below is the canonical CUDA skeleton for that op class — adapt it for your specific dtype, shape, and any fused epilogue operations:
+
+{op_template}
+
+Prefer this skeleton structure over inventing a new pattern, unless the problem truly doesn't fit any of the standard op categories.
+
 ## Generation Template
 
 Given:

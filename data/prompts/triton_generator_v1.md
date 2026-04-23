@@ -92,6 +92,14 @@ class ModelNew(nn.Module):
         return output
 ```
 
+## Op-Type Skeleton (classifier-selected)
+
+The classifier identified this problem's op type from `{problem_context}` above. Below is the canonical Triton skeleton for that op class — adapt it for your specific dtype, shape, and any fused epilogue operations:
+
+{op_template}
+
+Prefer this skeleton structure over inventing a new pattern, unless the problem truly doesn't fit any of the standard op categories.
+
 ## Generation Template
 
 Given:
