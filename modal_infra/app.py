@@ -12,7 +12,9 @@ from __future__ import annotations
 import multiprocessing
 import os
 import queue as _queue
+import shutil
 import tempfile
+import threading
 import time
 import traceback
 from typing import Any
@@ -76,6 +78,29 @@ def _classify_cuda_error(err_str: str) -> bool:
     return any(marker in err_str for marker in _CUDA_FATAL_MARKERS)
 
 
+def _maybe_schedule_container_death(result: Any) -> None:
+    """Schedule os._exit(1) ~2s after return if result is a cuda_error.
+
+    The Modal container parent process persists across calls even though each
+    eval runs in a fresh spawn subprocess. A CUDA illegal-memory-access in a
+    child can leave the driver-level device state wedged, so subsequent
+    unrelated evals in the same container see sticky CUDA errors.
+
+    Scheduling os._exit(1) via a 2s Timer lets Modal finish serializing the
+    result back to the client before the container dies. Modal transparently
+    rotates to a fresh container for the next call. Hot path (no cuda_error)
+    is untouched, so container reuse still amortizes cold-start cost.
+
+    Gated by env var OPENKERNEL_DIE_ON_CUDA_ERROR (default on; set to "0"
+    to disable for debugging).
+    """
+    if os.environ.get("OPENKERNEL_DIE_ON_CUDA_ERROR", "1") == "0":
+        return
+    if not (isinstance(result, dict) and result.get("status") == "cuda_error"):
+        return
+    threading.Timer(2.0, lambda: os._exit(1)).start()
+
+
 # Typographic Unicode chars that LLMs frequently emit inside generated code
 # (from markdown-ish reasoning, copy-pasted prose, etc.). Python's parser
 # rejects any of these on sight, which costs us rounds across ALL problem
@@ -135,6 +160,11 @@ def _eval_kernel_core(
     which provides subprocess isolation so a poisoned CUDA context in the
     child cannot contaminate sibling evals in the same container.
     """
+    # Per-call Triton JIT cache isolation (Change B, child side).
+    # Parent passes a fresh per-call dir via params; set it before torch/triton
+    # import so the JIT cache can't leak state between unrelated evals.
+    triton_cache_dir = os.environ.get("TRITON_CACHE_DIR")
+
     import torch  # noqa: F401 — imported for side effect (fresh CUDA init)
 
     wall_start = time.time()
@@ -151,56 +181,61 @@ def _eval_kernel_core(
 
     # Write sources to temp files so KernelBench can load them as modules
     tmpdir = tempfile.mkdtemp(prefix="openkernel_eval_")
-    ref_path = os.path.join(tmpdir, "reference.py")
-    kernel_path = os.path.join(tmpdir, "kernel.py")
-
-    with open(ref_path, "w") as f:
-        f.write(reference_source)
-    with open(kernel_path, "w") as f:
-        f.write(kernel_source)
-
-    # Auto-detect format if needed
-    if problem_format == "auto":
-        if "kernel_function" in kernel_source and "class ModelNew" not in kernel_source:
-            problem_format = "gpumode"
-        else:
-            problem_format = "kernelbench"
-
     try:
-        if problem_format == "gpumode":
-            result = _run_eval_gpumode(
-                ref_path=ref_path,
-                kernel_path=kernel_path,
-                correctness_trials=correctness_trials,
-                num_perf_trials=num_perf_trials,
-                tmpdir=tmpdir,
-                gpu_type=gpu_type,
-            )
-        else:
-            result = _run_eval(
-                ref_path=ref_path,
-                kernel_path=kernel_path,
-                reference_source=reference_source,
-                kernel_source=kernel_source,
-                correctness_trials=correctness_trials,
-                num_perf_trials=num_perf_trials,
-                tmpdir=tmpdir,
-                gpu_type=gpu_type,
-            )
-    except Exception as exc:
-        err_str = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
-        result = {
-            "status": "cuda_error" if _classify_cuda_error(err_str) else "error",
-            "correct": False,
-            "speedup": 0.0,
-            "runtime_us": 0.0,
-            "ref_runtime_us": 0.0,
-            "error": err_str,
-        }
+        ref_path = os.path.join(tmpdir, "reference.py")
+        kernel_path = os.path.join(tmpdir, "kernel.py")
 
-    result["eval_seconds"] = time.time() - wall_start
-    result.setdefault("profile", {})
-    return result
+        with open(ref_path, "w") as f:
+            f.write(reference_source)
+        with open(kernel_path, "w") as f:
+            f.write(kernel_source)
+
+        # Auto-detect format if needed
+        if problem_format == "auto":
+            if "kernel_function" in kernel_source and "class ModelNew" not in kernel_source:
+                problem_format = "gpumode"
+            else:
+                problem_format = "kernelbench"
+
+        try:
+            if problem_format == "gpumode":
+                result = _run_eval_gpumode(
+                    ref_path=ref_path,
+                    kernel_path=kernel_path,
+                    correctness_trials=correctness_trials,
+                    num_perf_trials=num_perf_trials,
+                    tmpdir=tmpdir,
+                    gpu_type=gpu_type,
+                )
+            else:
+                result = _run_eval(
+                    ref_path=ref_path,
+                    kernel_path=kernel_path,
+                    reference_source=reference_source,
+                    kernel_source=kernel_source,
+                    correctness_trials=correctness_trials,
+                    num_perf_trials=num_perf_trials,
+                    tmpdir=tmpdir,
+                    gpu_type=gpu_type,
+                )
+        except Exception as exc:
+            err_str = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
+            result = {
+                "status": "cuda_error" if _classify_cuda_error(err_str) else "error",
+                "correct": False,
+                "speedup": 0.0,
+                "runtime_us": 0.0,
+                "ref_runtime_us": 0.0,
+                "error": err_str,
+            }
+
+        result["eval_seconds"] = time.time() - wall_start
+        result.setdefault("profile", {})
+        return result
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        if triton_cache_dir:
+            shutil.rmtree(triton_cache_dir, ignore_errors=True)
 
 
 def _eval_subprocess_worker(in_q, out_q) -> None:
@@ -291,6 +326,17 @@ def _eval_kernel_impl(
             "eval_seconds": time.time() - wall_start,
             "profile": {},
         }
+
+    # Per-call Triton JIT cache dir (Change B, parent side).
+    # Set in os.environ so the spawn child inherits it on import. Using a
+    # unique per-call dir prevents JIT cache pollution from a prior kernel's
+    # failed compile/run leaking into this one. Child rmtrees this dir in a
+    # finally block after eval completes.
+    triton_cache_dir = os.path.join(
+        tempfile.gettempdir(),
+        f"triton_cache_{os.getpid()}_{time.time_ns()}",
+    )
+    os.environ["TRITON_CACHE_DIR"] = triton_cache_dir
 
     in_q = ctx.Queue()
     out_q = ctx.Queue()
@@ -394,10 +440,12 @@ def eval_kernel_on_gpu(
     gpu_type: str = "L40S",
 ) -> dict[str, Any]:
     """Evaluate kernel on L40S (default, KernelBench standard)."""
-    return _eval_kernel_impl(
+    result = _eval_kernel_impl(
         kernel_source, reference_source, eval_mode, problem_format,
         correctness_trials, perf_trials_fast, perf_trials_thorough, gpu_type,
     )
+    _maybe_schedule_container_death(result)
+    return result
 
 
 @app.function(gpu="H100", timeout=600, retries=0)
@@ -408,10 +456,12 @@ def eval_kernel_h100(
     gpu_type: str = "H100",
 ) -> dict[str, Any]:
     """Evaluate kernel on H100."""
-    return _eval_kernel_impl(
+    result = _eval_kernel_impl(
         kernel_source, reference_source, eval_mode, problem_format,
         correctness_trials, perf_trials_fast, perf_trials_thorough, gpu_type,
     )
+    _maybe_schedule_container_death(result)
+    return result
 
 
 @app.function(gpu="A100-80GB", timeout=600, retries=0)
@@ -422,10 +472,12 @@ def eval_kernel_a100_80gb(
     gpu_type: str = "A100-80GB",
 ) -> dict[str, Any]:
     """Evaluate kernel on A100-80GB."""
-    return _eval_kernel_impl(
+    result = _eval_kernel_impl(
         kernel_source, reference_source, eval_mode, problem_format,
         correctness_trials, perf_trials_fast, perf_trials_thorough, gpu_type,
     )
+    _maybe_schedule_container_death(result)
+    return result
 
 
 @app.function(gpu="A100", timeout=600, retries=0)
@@ -436,10 +488,12 @@ def eval_kernel_a100_40gb(
     gpu_type: str = "A100-40GB",
 ) -> dict[str, Any]:
     """Evaluate kernel on A100-40GB."""
-    return _eval_kernel_impl(
+    result = _eval_kernel_impl(
         kernel_source, reference_source, eval_mode, problem_format,
         correctness_trials, perf_trials_fast, perf_trials_thorough, gpu_type,
     )
+    _maybe_schedule_container_death(result)
+    return result
 
 
 # Map GPU type strings to Modal function names for runtime lookup.
@@ -1312,7 +1366,7 @@ class EvalWorker:
         gpu_type: str = "L40S",
     ) -> dict[str, Any]:
         """Delegate to the implementation function."""
-        return _eval_kernel_impl(
+        result = _eval_kernel_impl(
             kernel_source=kernel_source,
             reference_source=reference_source,
             eval_mode=eval_mode,
@@ -1321,6 +1375,8 @@ class EvalWorker:
             perf_trials_thorough=perf_trials_thorough,
             gpu_type=gpu_type,
         )
+        _maybe_schedule_container_death(result)
+        return result
 
 
 # ---------------------------------------------------------------------------
