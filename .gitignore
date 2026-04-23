@@ -58,3 +58,6 @@ triton_kernel_logs/
 
 # Generated optimized kernels
 *_optimized.py
+
+# Claude Code transient session state
+.claude/scheduled_tasks.lock
