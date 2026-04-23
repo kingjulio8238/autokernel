@@ -27,7 +27,7 @@ __all__ = [
     "render_welcome",
 ]
 
-ACCENT = "magenta"
+ACCENT = "black"
 
 _KC_MONOGRAM = [
     "\u2588\u2588\u2557  \u2588\u2588\u2557 \u2588\u2588\u2588\u2588\u2588\u2588\u2557",
