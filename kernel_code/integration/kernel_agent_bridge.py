@@ -442,7 +442,7 @@ class KernelAgentBridge:
         # Report phase
         if self._live_display:
             self._live_display.update_phase(
-                f"KernelAgent: {self._num_workers} workers × {self._max_rounds} rounds "
+                f"Kernel+: {self._num_workers} workers × {self._max_rounds} rounds "
                 f"({self._model_name})"
             )
 

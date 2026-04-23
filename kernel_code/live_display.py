@@ -339,29 +339,29 @@ class LiveOptimizationDisplay:
 
         # ---- Header: problem · hw · backend · baseline · elapsed ------
         header = Text()
-        header.append("\n  \u2500\u2500 ", style=_DIM)
+        header.append("\n  \u2500\u2500 ", style="white")
         header.append((self._problem or "Optimizing")[:40], style="bold white")
         ctx = [self._hardware, self._backend]
         if self._problem_tier:
             ctx.append(self._problem_tier)
         if self._problem_type:
             ctx.append(self._problem_type)
-        header.append(" \u00b7 " + " \u00b7 ".join(ctx), style=_DIM)
+        header.append(" \u00b7 " + " \u00b7 ".join(ctx), style="white")
         if self._baseline_us:
-            header.append(f" \u00b7 baseline {self._baseline_us:.0f} \u00b5s", style=_DIM)
+            header.append(f" \u00b7 baseline {self._baseline_us:.0f} \u00b5s", style="white")
         mins, secs = divmod(int(elapsed), 60)
         elapsed_str = f"{mins}m{secs:02d}s" if mins else f"{secs}s"
-        header.append(f" \u00b7 {elapsed_str}", style=_DIM)
-        header.append(" \u2500\u2500", style=_DIM)
+        header.append(f" \u00b7 {elapsed_str}", style="white")
+        header.append(" \u2500\u2500", style="white")
         parts.append(header)
 
-        # ---- Strategy (subtle, one line) -----------------------------
+        # ---- Strategy (one line) ------------------------------------
         if self._current_strategy:
             strat = self._current_strategy
             if len(strat) > 72:
                 strat = strat[:70].rsplit(" ", 1)[0] + "\u2026"
             s_line = Text()
-            s_line.append("  \u25b6 ", style=_CLAY)
+            s_line.append("  \u25b6 ", style="white")
             s_line.append(strat, style="white")
             parts.append(s_line)
 
@@ -371,15 +371,16 @@ class LiveOptimizationDisplay:
         table = Table(
             box=box.SIMPLE,
             show_header=True,
-            header_style=f"bold {_DIM}",
+            header_style="bold white",
+            border_style="white",
             pad_edge=False,
             padding=(0, 2),
             expand=False,
         )
         table.add_column("worker", style="white", no_wrap=True)
-        table.add_column("runtime", justify="right", no_wrap=True)
-        table.add_column("% SOL", justify="right", no_wrap=True)
-        table.add_column("speedup", justify="right", no_wrap=True)
+        table.add_column("runtime", style="white", justify="right", no_wrap=True)
+        table.add_column("% SOL", style="white", justify="right", no_wrap=True)
+        table.add_column("speedup", style="white", justify="right", no_wrap=True)
 
         for row in self._worker_rows:
             gid = row.get("global_id", row.get("id", 0))
@@ -393,7 +394,6 @@ class LiveOptimizationDisplay:
             status = row.get("status", "")
 
             if status == "passed" and speedup > 0.0:
-                sp_color = _SUCCESS if speedup >= 1.0 else _WARNING
                 runtime_cell = (
                     f"{runtime_us:.0f} \u00b5s" if runtime_us is not None else "\u2014"
                 )
@@ -405,28 +405,27 @@ class LiveOptimizationDisplay:
                     Text(worker_label, style="bold white"),
                     Text(runtime_cell, style="white"),
                     Text(sol_cell, style="white"),
-                    Text(speedup_cell, style=f"bold {sp_color}"),
+                    Text(speedup_cell, style="bold white"),
                 )
             else:
-                # Cancelled / stopped / zero-speedup rows render dim.
                 label = {
                     "cancelled": "cancelled",
                     "stopped": "stopped",
                 }.get(status, status or "\u2014")
                 table.add_row(
-                    Text(worker_label, style=_DIM),
-                    Text("\u2014", style=_DIM),
-                    Text("\u2014", style=_DIM),
-                    Text(label, style=_DIM),
+                    Text(worker_label, style="white"),
+                    Text("\u2014", style="white"),
+                    Text("\u2014", style="white"),
+                    Text(label, style="white"),
                 )
 
         if not self._worker_rows:
             # Empty-state placeholder so the table renders something immediately.
             table.add_row(
-                Text("\u2014", style=_DIM),
-                Text("\u2014", style=_DIM),
-                Text("\u2014", style=_DIM),
-                Text("waiting...", style=_DIM),
+                Text("\u2014", style="white"),
+                Text("\u2014", style="white"),
+                Text("\u2014", style="white"),
+                Text("waiting...", style="white"),
             )
 
         parts.append(table)
@@ -439,8 +438,8 @@ class LiveOptimizationDisplay:
             spinner_chars = "\u2818\u2838\u2830\u2834\u2826\u2827\u2807\u280f"
             sc = spinner_chars[int(elapsed * 4) % len(spinner_chars)]
             status_line = Text()
-            status_line.append(f"  {sc} ", style=_CLAY)
-            status_line.append(phase, style=_DIM)
+            status_line.append(f"  {sc} ", style="white")
+            status_line.append(phase, style="white")
             parts.append(status_line)
 
         return Group(*parts)

@@ -2432,8 +2432,14 @@ class KernelCodeShell:
             console=self._console,
         )
 
-    def _cmd_profile_ref(self, args_str: str) -> None:
-        """Profile the reference kernel on Modal — shows runtime, bottleneck, SOL."""
+    def _cmd_profile_ref(self, args_str: str, *, quiet: bool = False) -> None:
+        """Profile the reference kernel on Modal — shows runtime, bottleneck, SOL.
+
+        ``quiet=True`` (used by the /optimize autopath) runs only the Modal
+        eval: prints ``> profiling reference...`` and ``> reference profiled``
+        on success, and skips the kernel-profile card + guidance. Use full
+        output from ``/profile`` in the REPL.
+        """
         from pathlib import Path as _Path
 
         ref_path = _PROJECT_ROOT / "reference.py"
@@ -2456,8 +2462,9 @@ class KernelCodeShell:
                 p = Problem(reference_code=reference_source, format=fmt)
             reference_source = make_self_contained(p)
 
-        self._console.print()
-        self._console.print("  [bold white]\u2500\u2500 Profiling reference \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500[/bold white]")
+        if not quiet:
+            self._console.print()
+            self._console.print("  [bold white]\u2500\u2500 Profiling reference \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500[/bold white]")
 
         # For KernelBench: run the Model as both ref and kernel (passthrough = 1.0x baseline)
         # For GPU Mode: run ref_kernel as both ref and kernel
@@ -2472,7 +2479,10 @@ class KernelCodeShell:
             kernel_source = reference_source.replace("def ref_kernel(", "def kernel_function(")
             pf = "gpumode"
 
-        self._console.print("  \u23bf  [#999999]Evaluating on Modal (5 trials for stability)...[/#999999]")
+        if not quiet:
+            self._console.print("  \u23bf  [#999999]Evaluating on Modal (5 trials for stability)...[/#999999]")
+        else:
+            self._console.print("  [white]> profiling reference...[/white]")
 
         # Multi-trial baseline: run N times, take median + report variance
         trials = []
@@ -2516,8 +2526,8 @@ class KernelCodeShell:
 
         self._last_profile = result
 
-        # Warn if variance is high (measurement noise dominates)
-        if ref_cv > 20:
+        if not quiet and ref_cv > 20:
+            # Warn if variance is high (measurement noise dominates)
             self._console.print(
                 f"  [#ffc107]! High baseline variance: "
                 f"median={ref_median:.0f}\u03bcs \u00b1 {ref_stdev:.0f}\u03bcs ({ref_cv:.0f}% CV) \u2014 "
@@ -2527,26 +2537,33 @@ class KernelCodeShell:
                 f"  [#999999]  Speedup measurements will be unreliable below ~{ref_stdev*2:.0f}\u03bcs delta[/#999999]"
             )
 
-        # Display profile — this is the initial reference-vs-reference
-        # baseline characterization (no candidate kernel yet), so skip the
-        # Speedup/delta rows and just show the reference runtime.
-        from kernel_code.kernel_profile import render_kernel_profile
-        render_kernel_profile(
-            speedup=result.get("speedup", 0.0),
-            ref_runtime_us=result.get("ref_runtime_us", 0.0),
-            kernel_runtime_us=result.get("runtime_us", 0.0),
-            profile=result.get("profile", {}),
-            hardware=self._settings.default_gpu,
-            console=self._console,
-            is_baseline=True,
-        )
+        if not quiet:
+            # Display profile — this is the initial reference-vs-reference
+            # baseline characterization (no candidate kernel yet), so skip the
+            # Speedup/delta rows and just show the reference runtime.
+            from kernel_code.kernel_profile import render_kernel_profile
+            render_kernel_profile(
+                speedup=result.get("speedup", 0.0),
+                ref_runtime_us=result.get("ref_runtime_us", 0.0),
+                kernel_runtime_us=result.get("runtime_us", 0.0),
+                profile=result.get("profile", {}),
+                hardware=self._settings.default_gpu,
+                console=self._console,
+                is_baseline=True,
+            )
 
-        # Show guidance
-        ref_us = result.get("ref_runtime_us", 0.0)
-        if ref_us > 0:
-            self._console.print(f"  \u23bf  [#999999]Reference runtime: {ref_us:.0f}\u03bcs on {self._settings.default_gpu}[/#999999]")
-            self._console.print(f"  \u23bf  [#999999]Run /optimize to generate a faster kernel[/#999999]")
-        self._console.print()
+            # Show guidance
+            ref_us = result.get("ref_runtime_us", 0.0)
+            if ref_us > 0:
+                self._console.print(
+                    f"  \u23bf  [#999999]Reference runtime: {ref_us:.0f}\u03bcs on "
+                    f"{self._settings.default_gpu}[/#999999]"
+                )
+                self._console.print("  \u23bf  [#999999]Run /optimize to generate a faster kernel[/#999999]")
+            self._console.print()
+        else:
+            self._console.print("  [white]> reference profiled[/white]")
+            self._console.print()
 
     def _cmd_roofline(self, args_str: str) -> None:
         """/roofline [--me] [--mem] — show roofline plot."""
@@ -3019,6 +3036,10 @@ class KernelCodeShell:
             self._console.print("  [#999999]Cancelled[/#999999]")
             return
 
+        # Clear the optimization plan + confirm prompt so the run starts on a
+        # clean screen (table + quiet profile only).
+        self._console.clear()
+
         # --- Save as reference.py if it's a different file ---
         if goal.file != "reference.py":
             src = (_PROJECT_ROOT / goal.file).read_text()
@@ -3039,9 +3060,8 @@ class KernelCodeShell:
             save_project_setting("default_gpu", goal.hardware)
             self._settings.default_gpu = goal.hardware
 
-        # --- Auto-profile ---
-        self._console.print(f"  \u23bf  [#999999]Profiling reference...[/#999999]")
-        self._cmd_profile_ref("")
+        # --- Auto-profile (compact: > profiling ... / > reference profiled) ---
+        self._cmd_profile_ref("", quiet=True)
 
         # --- Abort if profile produced no valid baseline ---
         last_prof_ok = getattr(self, "_last_profile", {}) or {}
