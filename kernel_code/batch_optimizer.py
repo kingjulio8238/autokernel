@@ -528,8 +528,13 @@ def _run_single_spec(
     )
     start = time.time()
     try:
+        # target_speedup retained as a fallback criterion used by MetaOptimizer
+        # when a round's profile lacks a valid SOL score (e.g., profiling
+        # failed). Kept at a workload-agnostic default — the real stopping
+        # target is SOL, passed through to MetaOptimizer.run(target_sol=...).
         goal = GoalSpec(
-            target_speedup=1.0 / max(1.0 - target_sol, 0.01),
+            target_speedup=2.0,
+            target_sol=target_sol,
             max_budget_usd=budget_per_problem,
             max_rounds=5,
             reference_path=str(ref_path),
@@ -538,7 +543,7 @@ def _run_single_spec(
             model=model,
         )
         optimizer = MetaOptimizer(goal=goal, settings=settings)
-        auto_result: AutoResult = optimizer.run()
+        auto_result: AutoResult = optimizer.run(target_sol=target_sol)
     except Exception as exc:
         logger.error("run_suite: %s ERRORED: %s", spec.id, exc)
         ref_path.unlink(missing_ok=True)

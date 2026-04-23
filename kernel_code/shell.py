@@ -2879,8 +2879,17 @@ class KernelCodeShell:
 
         self._console.print()
 
-        # Parse what the user gave us
-        goal = parse_goal(text)
+        # Parse what the user gave us. Bare numbers / unit-less targets raise
+        # ValueError with a help message — surface that instead of a stacktrace.
+        try:
+            goal = parse_goal(text)
+        except ValueError as exc:
+            self._console.print(f"[red]Ambiguous target:[/red] {exc}")
+            self._console.print(
+                "[#999999]Accepted forms: '2x', '2x speedup', 'target 2x' for speedup; "
+                "'SOL 0.8', '0.8 SOL', '80% SOL', 'target sol 0.8' for SOL.[/#999999]"
+            )
+            return
 
         # Suppress asyncio noise from litellm
         import logging as _logging

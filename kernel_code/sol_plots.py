@@ -59,22 +59,24 @@ def render_sol_trajectory(
     if not rounds:
         return Group(Text("  No SOL data yet.", style=_DIM))
 
-    # Extract SOL scores and strategies
+    # Extract SOL scores and strategies. SOL-primary surface: read
+    # ``profile["sol_score"]`` directly — no fallback synthesis from speedup.
+    # Rounds without measured SOL contribute 0.0 to the trajectory and show
+    # up as "SOL unavailable" in the header when no round has SOL at all.
     data: list[tuple[int, float, str]] = []
     for r in rounds:
         round_num = r.get("round", 0)
-        sol = 0.0
         profile = r.get("profile", {})
+        sol = 0.0
         if isinstance(profile, dict):
-            sol = profile.get("sol_score", 0.0)
-        # Fallback: estimate SOL from speedup (0.5 * speedup, capped at 1.0)
-        if sol <= 0 and r.get("speedup", 0) > 0:
-            sol = min(1.0, 0.5 * r["speedup"])
+            sol = float(profile.get("sol_score", 0.0) or 0.0)
         strategy = r.get("strategy", "")
         data.append((round_num, sol, strategy))
 
     if not data:
         return Group(Text("  No SOL data yet.", style=_DIM))
+
+    any_sol_measured = any(sol > 0 for _, sol, _ in data)
 
     max_round = max(d[0] for d in data)
     best_sol = max(d[1] for d in data)
@@ -138,7 +140,10 @@ def render_sol_trajectory(
     # Header
     header = Text()
     header.append("  SOL TRAJECTORY  ", style=f"bold {_CYAN}")
-    header.append(f"best {best_sol:.2f}/1.00 ceiling", style="bold white")
+    if any_sol_measured:
+        header.append(f"best {best_sol:.2f}/1.00 ceiling", style="bold white")
+    else:
+        header.append("SOL unavailable", style="bold #ff6b80")
     header.append(f"  ({len(data)} round{'s' if len(data) != 1 else ''})", style=_DIM)
     parts.append(header)
 
@@ -327,39 +332,69 @@ def render_strategy_timeline(
 
     parts.append(label_line)
 
-    # Summary line — show vs-baseline context, not just inter-round delta
+    # Summary line — SOL primary when measured on any stage, speedup as
+    # dim secondary. Falls back to speedup-only (with "SOL unknown" tag) when
+    # no stage has SOL.
     if stages:
-        first_metric = stages[0]["best_speedup"]
-        last_metric = stages[-1]["best_speedup"]
+        first_sol = stages[0]["best_sol"]
+        last_sol = stages[-1]["best_sol"]
+        first_speedup = stages[0]["best_speedup"]
+        last_speedup = stages[-1]["best_speedup"]
+        any_sol = any(s["best_sol"] > 0 for s in stages)
+
         summary = Text("  ")
-        # Color end based on baseline (1.0x), not vs start
-        end_color = _SUCCESS if last_metric >= 1.0 else _GOLD if last_metric >= 0.9 else "#ff6b80"
 
-        # Only show Start → End when there are multiple stages; otherwise
-        # first_metric == last_metric and the arrow is tautological.
-        if len(stages) > 1:
-            summary.append(f"Start: {first_metric:.2f}x", style=_DIM)
-            summary.append(f"  {_ARROW}  ", style=_GRID)
-            summary.append(f"End: {last_metric:.2f}x", style=f"bold {end_color}")
+        if any_sol:
+            # SOL primary headline.
+            end_color = _SUCCESS if last_sol >= 0.7 else _GOLD if last_sol >= 0.4 else "#ff6b80"
+            if len(stages) > 1:
+                summary.append(f"SOL: {first_sol:.2f}", style=_DIM)
+                summary.append(f"  {_ARROW}  ", style=_GRID)
+                summary.append(f"{last_sol:.2f}", style=f"bold {end_color}")
+                if last_sol != first_sol and first_sol > 0:
+                    delta = (last_sol - first_sol) / first_sol * 100
+                    sign = "+" if delta >= 0 else ""
+                    summary.append(f"  ({sign}{delta:.0f}% round-over-round)", style=_DIM)
+            else:
+                summary.append(f"Best SOL: {last_sol:.2f}", style=f"bold {end_color}")
+            # Dim secondary speedup annotation.
+            summary.append(f"  · {last_speedup:.2f}x speedup vs reference", style=_DIM)
 
-            # Inter-round delta (informational, parenthesized)
-            if last_metric != first_metric and first_metric > 0:
-                delta = (last_metric - first_metric) / first_metric * 100
-                sign = "+" if delta >= 0 else ""
-                summary.append(f"  ({sign}{delta:.0f}% round-over-round)", style=_DIM)
+            # SOL-relative gap-to-peak (the KE-facing number).
+            if last_sol <= 0.0:
+                summary.append("  — SOL not measured on last stage", style="#ff6b80")
+            else:
+                gap = (1.0 - last_sol) * 100
+                if gap > 50:
+                    summary.append(f"  — {gap:.0f}% below hardware peak", style="#ff6b80")
+                elif gap > 10:
+                    summary.append(f"  — {gap:.0f}% below hardware peak", style=_GOLD)
+                else:
+                    summary.append(f"  — within {gap:.0f}% of hardware peak", style=_SUCCESS)
         else:
-            # Single-stage run: report best directly rather than Start→End
-            summary.append(f"Best: {last_metric:.2f}x", style=f"bold {end_color}")
+            # Fallback: SOL unavailable. Speedup-only headline with explicit tag.
+            end_color = _SUCCESS if last_speedup >= 1.0 else _GOLD if last_speedup >= 0.9 else "#ff6b80"
+            if len(stages) > 1:
+                summary.append(f"Start: {first_speedup:.2f}x", style=_DIM)
+                summary.append(f"  {_ARROW}  ", style=_GRID)
+                summary.append(f"End: {last_speedup:.2f}x", style=f"bold {end_color}")
+                if last_speedup != first_speedup and first_speedup > 0:
+                    delta = (last_speedup - first_speedup) / first_speedup * 100
+                    sign = "+" if delta >= 0 else ""
+                    summary.append(f"  ({sign}{delta:.0f}% round-over-round)", style=_DIM)
+            else:
+                summary.append(f"Best: {last_speedup:.2f}x", style=f"bold {end_color}")
 
-        # vs-baseline: the number the KE actually cares about
-        if last_metric <= 0.0:
-            summary.append("  — no correct kernel produced", style="#ff6b80")
-        elif last_metric < 1.0:
-            below = (1.0 - last_metric) * 100
-            summary.append(f"  — still {below:.0f}% below baseline", style="#ff6b80")
-        else:
-            above = (last_metric - 1.0) * 100
-            summary.append(f"  — {above:.0f}% above baseline", style=_SUCCESS)
+            if last_speedup <= 0.0:
+                summary.append("  — no correct kernel produced", style="#ff6b80")
+            elif last_speedup < 1.0:
+                below = (1.0 - last_speedup) * 100
+                summary.append(f"  — still {below:.0f}% below baseline", style="#ff6b80")
+            else:
+                above = (last_speedup - 1.0) * 100
+                summary.append(f"  — {above:.0f}% above baseline", style=_SUCCESS)
+            summary.append("  · (SOL unknown)", style=_DIM)
+
         parts.append(summary)
 
     return Group(*parts)

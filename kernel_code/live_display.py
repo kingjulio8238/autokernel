@@ -58,9 +58,9 @@ def _sparkline(values: list[float], width: int = 40) -> Text:
 def _iteration_log_compact(iterations: list[dict], width: int = 80) -> list:
     """BAND 3 - compact one-line-per-round log.
 
-    Format: "  R1  * 0.91x  shared memory tiling..."
-    Status glyph + speedup + strategy snippet. No SOL column
-    (already shown in BAND 1). No table chrome.
+    Format: "  R1  * SOL 0.42 \u00b7 0.91x  shared memory tiling..." when SOL is
+    present on that iteration, else "  R1  * 0.91x  shared memory tiling..."
+    (speedup-only, no SOL column \u2014 BAND 1 already shows the best-SOL rollup).
     """
     lines: list = []
     if not iterations:
@@ -73,11 +73,14 @@ def _iteration_log_compact(iterations: list[dict], width: int = 80) -> list:
     for it in iterations[-6:]:  # last 6; older via /show results
         num = it.get("num", "?")
         speedup = it.get("speedup", 0.0)
+        sol_score = float(it.get("sol_score", 0.0) or 0.0)
         status = it.get("status", "?")
         is_best = it.get("is_best", False)
         intent = it.get("intent", "")
-        if len(intent) > 45:
-            intent = intent[:43].rstrip() + "\u2026"
+        # Dual-display eats ~9 extra chars; tighten intent when SOL is shown.
+        intent_budget = 36 if sol_score > 0 else 45
+        if len(intent) > intent_budget:
+            intent = intent[:intent_budget - 2].rstrip() + "\u2026"
 
         if is_best:
             glyph, glyph_style = "\u2605", f"bold {_SUCCESS}"
@@ -98,7 +101,11 @@ def _iteration_log_compact(iterations: list[dict], width: int = 80) -> list:
         line = Text()
         line.append(f"    R{num} ", style=_DIM)
         line.append(f"{glyph} ", style=glyph_style)
-        line.append(f"{speedup:.2f}x", style=sp_style)
+        if sol_score > 0:
+            line.append(f"SOL {sol_score:.2f}", style=sp_style)
+            line.append(f" \u00b7 {speedup:.2f}x", style=_DIM)
+        else:
+            line.append(f"{speedup:.2f}x", style=sp_style)
         line.append("  ")
         line.append(intent, style="white" if is_best else _DIM)
         lines.append(line)
@@ -256,7 +263,8 @@ class LiveOptimizationDisplay:
             header.append(f"  [{bound}]", style="#22d3ee")
         parts.append(header)
 
-        # Line 2: round + budget + time
+        # Line 2: round + best metric + time.
+        # Dual-display: SOL primary when present, speedup as dim secondary.
         ctx2 = Text()
         ctx2.append("  \u23bf  ", style=_DIM)
         if self._current_round > 0:
@@ -264,7 +272,12 @@ class LiveOptimizationDisplay:
             ctx2.append(f" \u00b7 ", style=_DIM)
         ctx2.append(f"best ", style=_DIM)
         sp_color = _SUCCESS if self._best_speedup >= (self._target_speedup or 1.0) else _WARNING if self._best_speedup >= 1.0 else _ERROR
-        ctx2.append(f"{self._best_speedup:.2f}x", style=f"bold {sp_color}")
+        if best_sol > 0:
+            sol_color = _SUCCESS if best_sol >= 0.7 else _WARNING if best_sol >= 0.4 else _ERROR
+            ctx2.append(f"SOL {best_sol:.2f}", style=f"bold {sol_color}")
+            ctx2.append(f" \u00b7 {self._best_speedup:.2f}x", style=_DIM)
+        else:
+            ctx2.append(f"{self._best_speedup:.2f}x", style=f"bold {sp_color}")
         if self._target_speedup:
             ctx2.append(f" / {self._target_speedup:.1f}x target", style=_DIM)
         mins = int(elapsed) // 60
@@ -273,25 +286,40 @@ class LiveOptimizationDisplay:
         ctx2.append(f" \u00b7 {elapsed_str}", style=_DIM)
         parts.append(ctx2)
 
-        # Line 3: combined progress bars (target + SOL)
-        if self._target_speedup is not None:
-            pct = min(100, int(self._best_speedup / self._target_speedup * 100))
-            bar_w = 20
-            filled = int(pct / 100 * bar_w)
-            color = _SUCCESS if pct >= 100 else _WARNING if pct >= 50 else _ERROR
+        # Line 3: combined progress bars. SOL-primary: when SOL is available
+        # it renders first (wider, labeled), and the target/speedup bar moves
+        # to the secondary/right position. Target bar stays for transitional
+        # dual display \u2014 Phase 4 removes it when target_speedup is retired.
+        if self._target_speedup is not None or best_sol > 0:
             prog = Text()
             prog.append("  \u23bf  ", style=_DIM)
-            prog.append("\u2588" * filled, style=color)
-            prog.append("\u2591" * (bar_w - filled), style="#333333")
-            prog.append(f" {pct}%", style=f"bold {color}")
+
             if best_sol > 0:
-                sol_bar_w = 12
+                sol_bar_w = 20
                 sol_filled = min(sol_bar_w, max(0, int(best_sol * sol_bar_w)))
                 sol_color = _SUCCESS if best_sol >= 0.7 else _WARNING if best_sol >= 0.4 else _ERROR
-                prog.append("   SOL ", style=_DIM)
+                prog.append("SOL ", style="bold white")
                 prog.append("\u2588" * sol_filled, style=sol_color)
                 prog.append("\u2591" * (sol_bar_w - sol_filled), style="#333333")
                 prog.append(f" {best_sol:.2f}", style=f"bold {sol_color}")
+
+            if self._target_speedup is not None:
+                pct = min(100, int(self._best_speedup / self._target_speedup * 100))
+                bar_w = 12 if best_sol > 0 else 20
+                filled = int(pct / 100 * bar_w)
+                color = _SUCCESS if pct >= 100 else _WARNING if pct >= 50 else _ERROR
+                if best_sol > 0:
+                    # Secondary position: dim label, narrower bar.
+                    prog.append("   target ", style=_DIM)
+                    prog.append("\u2588" * filled, style=color)
+                    prog.append("\u2591" * (bar_w - filled), style="#333333")
+                    prog.append(f" {pct}%", style=_DIM)
+                else:
+                    # No SOL \u2014 target bar in primary position.
+                    prog.append("\u2588" * filled, style=color)
+                    prog.append("\u2591" * (bar_w - filled), style="#333333")
+                    prog.append(f" {pct}%", style=f"bold {color}")
+
             parts.append(prog)
 
         parts.append(Text(""))

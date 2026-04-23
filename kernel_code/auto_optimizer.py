@@ -132,6 +132,10 @@ class MetaOptimizer:
         self._optimization_log = OptimizationLog(
             target_speedup=goal.target_speedup,
         )
+        # Effective SOL target for the current run(); set at run() entry so a
+        # caller can pass target_sol= to override goal.target_sol without
+        # mutating the goal. Defaults to goal.target_sol until run() sets it.
+        self._effective_target_sol: float = float(goal.target_sol)
 
         # Checkpointing
         self._checkpoint_mgr: CheckpointManager | None = None
@@ -195,19 +199,46 @@ class MetaOptimizer:
             )
         return state.round_num
 
-    def run(self) -> AutoResult:
-        """Run the autonomous optimization loop."""
+    def run(self, target_sol: float | None = None) -> AutoResult:
+        """Run the autonomous optimization loop.
+
+        Args:
+            target_sol: Optional per-call override for the SOL stopping target.
+                When provided and positive, it takes precedence over
+                ``self._goal.target_sol`` for this run. Used by
+                ``batch_optimizer.run_suite`` to pass the suite-level
+                ``target_sol`` through without mutating the GoalSpec. Leave
+                ``None`` to use ``goal.target_sol`` unchanged.
+        """
         # Clear any env state left behind by a prior MetaOptimizer.run() in the
         # same process. batch_optimizer runs problems sequentially, so without
         # this the previous problem's best kernel / strategy / round offset /
         # inline profile would leak into this problem's round 1.
         _clear_per_run_env()
+        if target_sol is not None and target_sol > 0.0:
+            self._effective_target_sol = float(target_sol)
+        else:
+            self._effective_target_sol = float(self._goal.target_sol)
         try:
             return self._run_impl()
         finally:
             # Clear again on exit so the next caller starts clean even if
             # this run raised partway through.
             _clear_per_run_env()
+
+    def _latest_sol(self) -> float:
+        """Return the most recent round's sol_score, or 0.0 if unavailable.
+
+        Reads from the structured optimization log (populated by _run_round).
+        A value <= 0 signals the profile was missing SOL — callers should
+        then fall back to the speedup criterion.
+        """
+        if not self._optimization_log.rounds:
+            return 0.0
+        try:
+            return float(self._optimization_log.rounds[-1].profile.sol_score or 0.0)
+        except Exception:
+            return 0.0
 
     def _run_impl(self) -> AutoResult:
         start_time = time.time()
@@ -308,8 +339,38 @@ class MetaOptimizer:
                 self._checkpoint_mgr.save_round(ckpt)
 
             # --- Check if target reached ---
-            if self._best_speedup >= self._goal.target_speedup:
-                overshoot_ratio = self._best_speedup / self._goal.target_speedup
+            # SOL is the primary stopping criterion when the latest round
+            # produced a valid SOL score and the goal has a positive
+            # target_sol. Otherwise fall back to speedup. The overshoot-
+            # exploratory branch mirrors whichever criterion fired.
+            latest_sol = self._latest_sol()
+            sol_criterion_active = (
+                latest_sol > 0.0 and self._effective_target_sol > 0.0
+            )
+            if sol_criterion_active:
+                target_met = latest_sol >= self._effective_target_sol
+                overshoot_ratio = (
+                    latest_sol / self._effective_target_sol
+                    if self._effective_target_sol > 0.0
+                    else 0.0
+                )
+                criterion = "SOL"
+                target_str = (
+                    f"SOL {latest_sol:.2f} >= {self._effective_target_sol:.2f}"
+                )
+            else:
+                target_met = self._best_speedup >= self._goal.target_speedup
+                overshoot_ratio = (
+                    self._best_speedup / self._goal.target_speedup
+                    if self._goal.target_speedup > 0.0
+                    else 0.0
+                )
+                criterion = "speedup"
+                target_str = (
+                    f"{self._best_speedup:.2f}x >= {self._goal.target_speedup:.1f}x"
+                )
+
+            if target_met:
                 if (overshoot_ratio >= 1.10
                         and round_num == 1
                         and not self._exploratory_round_done
@@ -317,15 +378,22 @@ class MetaOptimizer:
                     self._exploratory_round_done = True
                     if self._live_display:
                         self._live_display.print_permanent(
-                            f"  [#f5a850]Overshot target by {(overshoot_ratio - 1) * 100:.0f}% — "
+                            f"  [#f5a850]Overshot {criterion} target by "
+                            f"{(overshoot_ratio - 1) * 100:.0f}% — "
                             f"running one exploratory round for extra upside[/#f5a850]"
+                        )
+                    if self._run_logger:
+                        self._run_logger.log_event(
+                            f"stopping: {criterion} overshoot ({target_str}) — "
+                            f"exploratory round deferred"
                         )
                     # don't break; let loop continue for one more round
                 else:
-                    stop_reason = (
-                        f"Target reached: {self._best_speedup:.2f}x >= "
-                        f"{self._goal.target_speedup:.1f}x"
-                    )
+                    stop_reason = f"Target reached ({criterion}): {target_str}"
+                    if self._run_logger:
+                        self._run_logger.log_event(
+                            f"stopping: {criterion} target reached ({target_str})"
+                        )
                     break
 
             # --- Early stop: zero correct kernels on round 1 ---
@@ -421,10 +489,19 @@ class MetaOptimizer:
             if self._run_logger:
                 self._run_logger.log_event(f"Evidence extraction failed: {exc}")
 
+        # target_reached reflects whichever criterion was active at stop time.
+        # When the latest round has a valid SOL and target_sol > 0, use SOL;
+        # otherwise fall back to speedup.
+        final_latest_sol = self._latest_sol()
+        if final_latest_sol > 0.0 and self._effective_target_sol > 0.0:
+            target_reached = final_latest_sol >= self._effective_target_sol
+        else:
+            target_reached = self._best_speedup >= self._goal.target_speedup
+
         return AutoResult(
             best_speedup=self._best_speedup,
             best_kernel=self._best_kernel,
-            target_reached=self._best_speedup >= self._goal.target_speedup,
+            target_reached=target_reached,
             rounds_completed=len(self._round_history),
             total_iterations=self._total_iterations,
             total_cost_usd=self._total_cost,

@@ -138,6 +138,37 @@ def filter_records(
     return out
 
 
+def prior_best_sol(
+    problem_id: str,
+    hardware: str,
+    root: Path | str | None = None,
+) -> float:
+    """Return the best ``sol_score`` ever recorded for this problem+hardware.
+
+    Considers only correct runs. Returns ``0.0`` when no prior record
+    exists (callers treat that as "no prior best, any SOL above the
+    floor is a new best"). A missing or non-numeric ``sol_score`` on a
+    record contributes ``0.0`` rather than raising.
+    """
+    records = load_all(root)
+    best = 0.0
+    for r in records:
+        if r.get("problem_id") != problem_id:
+            continue
+        if r.get("hardware") != hardware:
+            continue
+        if r.get("correct") is not True:
+            continue
+        sol = r.get("sol_score", 0.0)
+        try:
+            sol_f = float(sol) if sol is not None else 0.0
+        except (TypeError, ValueError):
+            sol_f = 0.0
+        if sol_f > best:
+            best = sol_f
+    return best
+
+
 def latest_per_problem(records: list[dict]) -> list[dict]:
     """Return the newest record for each ``(problem_id, hardware, config_hash)``.
 

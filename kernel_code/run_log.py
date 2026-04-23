@@ -127,13 +127,33 @@ class RunLogger:
         best_kernel: str = "",
         stop_reason: str = "",
         total_cost: float = 0.0,
+        best_sol: float = 0.0,
     ) -> None:
-        """Finalize the run log with results."""
+        """Finalize the run log with results.
+
+        Phase 2 dual-display: when ``best_sol`` is non-zero (or recoverable
+        from any iteration's profile), SOL is printed as the primary headline
+        in the RESULT block and speedup drops to a secondary line. Speedup
+        falls back to the sole headline (with an explicit "SOL unknown" tag)
+        when no iteration recorded a SOL score. The JSON schema is additive —
+        ``best_speedup`` stays for back-compat; ``best_sol`` is new.
+        """
         elapsed = time.time() - self._start_time
+
+        if not best_sol:
+            for it in self._iterations:
+                prof = it.get("profile") or {}
+                s = float(prof.get("sol_score", 0.0) or 0.0) if isinstance(prof, dict) else 0.0
+                if s > best_sol:
+                    best_sol = s
 
         self._log(f"\n{'='*60}")
         self._log(f"  RESULT")
-        self._log(f"  Best speedup:  {best_speedup:.2f}x")
+        if best_sol > 0:
+            self._log(f"  Best SOL:      {best_sol:.2f}   ({int(best_sol * 100)}% of hardware peak)")
+            self._log(f"  Best speedup:  {best_speedup:.2f}x")
+        else:
+            self._log(f"  Best speedup:  {best_speedup:.2f}x   (SOL unknown)")
         kept = sum(1 for it in self._iterations if it["status"] == "keep")
         total = len(self._iterations)
         self._log(f"  Iterations:    {kept}/{total} kept")
@@ -151,6 +171,7 @@ class RunLogger:
             "config": self._config,
             "iterations": self._iterations,
             "best_speedup": best_speedup,
+            "best_sol": best_sol,
             "total_cost": total_cost,
             "cost_note": "LLM tokens only; GPU compute billed separately via Modal",
             "elapsed_seconds": round(elapsed, 1),

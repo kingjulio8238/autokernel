@@ -27,6 +27,9 @@ class ParsedGoal:
     hardware: str = ""
     backend: str = ""
     target_speedup: float = 0.0
+    # Fraction of speed-of-light; 0.0 = "user did not state a SOL target".
+    # Callers that need a default should pull from GoalSpec (0.80), not here.
+    target_sol: float = 0.0
     budget_usd: float = 0.0
     time_limit_seconds: int = 0
     model: str = ""
@@ -82,6 +85,35 @@ def parse_goal(text: str) -> ParsedGoal:
         goal.target_speedup = float(speed_match.group(1))
         goal.explicit.add("target")
 
+    # --- Target SOL: "SOL 0.8", "0.8 SOL", "80% SOL", "target sol 0.8" ---
+    lower = text.lower()
+    sol_match = (
+        re.search(r"(?:target\s+)?sol\s+(\d+\.?\d*)", lower)
+        or re.search(r"(\d+\.?\d*)\s*sol\b", lower)
+    )
+    sol_pct_match = re.search(r"(\d+\.?\d*)\s*%\s*sol\b", lower)
+    if sol_pct_match:
+        goal.target_sol = float(sol_pct_match.group(1)) / 100.0
+        goal.explicit.add("target_sol")
+    elif sol_match:
+        goal.target_sol = float(sol_match.group(1))
+        goal.explicit.add("target_sol")
+
+    # --- Ambiguity guard: "target <N>" with no x/SOL qualifier, or a bare
+    # number on its own, cannot be disambiguated between speedup and SOL.
+    if "target" not in goal.explicit and "target_sol" not in goal.explicit:
+        stripped = text.strip()
+        bare_is_just_number = bool(re.fullmatch(r"\d+\.?\d*\s*%?", stripped))
+        target_no_unit = re.search(
+            r"\btarget\s+(\d+\.?\d*)\b(?!\s*(?:x|sol|%))", lower
+        )
+        if bare_is_just_number or target_no_unit:
+            raise ValueError(
+                "Ambiguous target: cannot tell if this is speedup or SOL. "
+                "Accepted forms: '2x', '2x speedup', 'target 2x' for speedup; "
+                "'SOL 0.8', '0.8 SOL', '80% SOL', 'target sol 0.8' for SOL."
+            )
+
     # --- Budget: "$10", "$5.00", "budget $10", "budget 10" ---
     budget_match = re.search(r"\$\s*(\d+\.?\d*)", text)
     if budget_match:
@@ -130,6 +162,9 @@ def validate_goal(goal: ParsedGoal, project_root: Path) -> list[str]:
 
     if goal.target_speedup < 0:
         errors.append(f"Invalid target: {goal.target_speedup}x")
+
+    if goal.target_sol < 0 or goal.target_sol > 1.0:
+        errors.append(f"Invalid SOL target: {goal.target_sol} (must be in [0.0, 1.0])")
 
     if goal.budget_usd < 0:
         errors.append(f"Invalid budget: ${goal.budget_usd}")

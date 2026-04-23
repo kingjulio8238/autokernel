@@ -28,24 +28,54 @@ from kernel_code.problem_classifier import classify_problem
 
 logger = logging.getLogger(__name__)
 
+# SOL floor: a run whose SOL is below this should never enter the skill
+# library, even if there is no prior evidence. Prevents sub-baseline
+# kernels from polluting future generations.
+_SOL_FLOOR = 0.50
+# Fallback speedup floor for runs where SOL is unavailable (legacy
+# profiles or missing telemetry). Matches the prior gate value.
+_SPEEDUP_FLOOR = 1.02
+
+
+def _load_prior_best_sol(problem_id: str | None, hardware: str) -> float:
+    """Return the best SOL ever recorded on the leaderboard for this problem+hardware.
+
+    Returns ``0.0`` when ``problem_id`` is missing or the leaderboard has
+    no matching record. Import-scoped and failure-tolerant so evidence
+    extraction never crashes due to leaderboard I/O.
+    """
+    if not problem_id:
+        return 0.0
+    try:
+        from openkernel.benchmarks.leaderboard_reader import prior_best_sol
+        return prior_best_sol(problem_id, hardware)
+    except Exception as exc:  # noqa: BLE001 — keep gate resilient
+        logger.debug("prior_best_sol lookup failed: %s", exc)
+        return 0.0
+
 
 def extract_and_update_evidence(
     optimization_log: list[dict],
     reference_code: str,
     hardware: str,
     skills_dir: str | Path = "data/skills",
+    problem_id: str | None = None,
 ) -> int:
     """Extract winning strategies from a completed run and update skill evidence.
 
-    Looks at rounds where speedup improved, identifies which strategies
-    and bottleneck types led to gains, and records evidence entries in
-    matching skills.
+    Looks at rounds where SOL improved (falling back to speedup when SOL
+    is unavailable), identifies which strategies led to gains, and
+    records evidence entries in matching skills.
 
     Args:
         optimization_log: List of round dicts from AutoResult.round_history.
         reference_code: Original reference code (for problem classification).
         hardware: GPU type used (e.g., "L40S", "H100").
         skills_dir: Path to skill JSON files.
+        problem_id: Optional leaderboard problem identifier used to look
+            up the prior best SOL. When provided, runs whose SOL is
+            worse than the leaderboard's best are skipped (prevents
+            stale evidence promotion).
 
     Returns:
         Number of evidence entries added.
@@ -65,14 +95,18 @@ def extract_and_update_evidence(
         logger.info("No skills loaded — skipping evidence update")
         return 0
 
-    # Extract winning rounds (speedup improved over previous best)
+    # Extract winning rounds (SOL improved; falls back to speedup).
     winning_rounds = _extract_winning_rounds(optimization_log)
-    # Filter out rounds that didn't beat the baseline (2% noise margin).
-    # Without this, a run whose best was 0.85x would still pollute the
-    # skill library with "evidence" for losing strategies.
-    winning_rounds = [w for w in winning_rounds if w.get("speedup", 0.0) > 1.02]
+
+    # SOL-first promotion gate. Runs below the 0.50 SOL floor are
+    # rejected outright (sub-baseline). Runs whose SOL is no better
+    # than the leaderboard's prior best are also rejected (stale).
+    # When SOL is missing (0.0), we fall back to the legacy speedup
+    # floor so legacy profiles keep working during the SOL rollout.
+    prior_best = _load_prior_best_sol(problem_id, hardware)
+    winning_rounds = [w for w in winning_rounds if _passes_gate(w, prior_best)]
     if not winning_rounds:
-        logger.debug("No winning rounds beat baseline — no evidence to record")
+        logger.debug("No winning rounds beat SOL/speedup gate — no evidence to record")
         return 0
 
     # Match winning strategies to skills and update evidence
@@ -108,14 +142,23 @@ def extract_and_update_evidence(
 
 
 def _extract_winning_rounds(rounds: list[dict]) -> list[dict]:
-    """Find rounds where speedup improved over the previous best."""
+    """Find rounds that improved over the previous best in-run.
+
+    Ranking prefers SOL when any round in the log exposes a non-zero
+    SOL; otherwise falls back to speedup so legacy runs without SOL
+    telemetry still produce evidence.
+    """
+    use_sol = any(_extract_sol(r) > 0.0 for r in rounds)
+
     winners = []
     best_so_far = 0.0
     for r in rounds:
-        speedup = r.get("speedup", 0.0)
         status = r.get("status", "")
-        if speedup > best_so_far and speedup > 0 and status in ("success", "SUCCESS"):
-            best_so_far = speedup
+        if status not in ("success", "SUCCESS"):
+            continue
+        metric = _extract_sol(r) if use_sol else r.get("speedup", 0.0)
+        if metric > best_so_far and metric > 0:
+            best_so_far = metric
             winners.append(r)
     return winners
 
@@ -124,8 +167,28 @@ def _extract_sol(round_dict: dict) -> float:
     """Extract SOL score from a round dict."""
     profile = round_dict.get("profile", {})
     if isinstance(profile, dict):
-        return profile.get("sol_score", 0.0)
+        sol = profile.get("sol_score", 0.0)
+        try:
+            return float(sol) if sol is not None else 0.0
+        except (TypeError, ValueError):
+            return 0.0
     return 0.0
+
+
+def _passes_gate(round_dict: dict, prior_best_sol: float) -> bool:
+    """Decide whether a winning round should be promoted to evidence.
+
+    SOL-first: a SOL >= max(floor, prior_best) is a winner. If SOL is
+    unavailable on this round, fall back to the legacy speedup floor so
+    pre-SOL logs still produce evidence during the rollout.
+    """
+    sol = _extract_sol(round_dict)
+    if sol > 0.0:
+        required = max(_SOL_FLOOR, prior_best_sol)
+        return sol >= required
+    # SOL missing -> speedup fallback.
+    speedup = round_dict.get("speedup", 0.0) or 0.0
+    return speedup > _SPEEDUP_FLOOR
 
 
 def _match_to_skills(
@@ -168,10 +231,13 @@ def compute_skill_priority(skill: OptimizationSkill) -> float:
     Higher priority = more evidence of success. Used to rank skills
     when injecting into generator prompts.
 
-    Scoring:
+    Scoring (SOL-driven):
     - Base: number of evidence entries (breadth)
-    - Weighted by average speedup achieved (quality)
+    - Quality: average SOL (primary) + small speedup debug weight
     - Bonus for diversity of hardware/problem types (generality)
+
+    The avg_speedup number is retained for human readability (shell
+    surfaces still display it) but selection weight is on SOL.
 
     Returns:
         Priority score (higher is better). Range: 0.0 to ~100.0
@@ -182,9 +248,12 @@ def compute_skill_priority(skill: OptimizationSkill) -> float:
     # Breadth: number of evidence entries (capped at 20)
     breadth = min(len(skill.evidence), 20)
 
-    # Quality: average speedup across evidence
+    # Quality: SOL first (primary), speedup retained for debug/readability
+    sols = [e.get("sol_score", 0.0) for e in skill.evidence if (e.get("sol_score") or 0.0) > 0]
+    avg_sol = sum(sols) / len(sols) if sols else 0.0
+
     speedups = [e.get("speedup", 0.0) for e in skill.evidence if e.get("speedup", 0.0) > 0]
-    avg_speedup = sum(speedups) / len(speedups) if speedups else 0.0
+    avg_speedup_debug = sum(speedups) / len(speedups) if speedups else 0.0
 
     # Generality: number of unique hardware+problem combos
     combos = set()
@@ -195,6 +264,10 @@ def compute_skill_priority(skill: OptimizationSkill) -> float:
             combos.add(f"{hw}:{prob}")
     generality = min(len(combos), 10)  # cap at 10
 
-    # Weighted score
-    score = breadth * 2.0 + avg_speedup * 10.0 + generality * 3.0
+    # SOL-driven quality with a small readability weight on speedup.
+    # avg_sol is [0..1]; scaling by 10 lines it up with the prior
+    # avg_speedup scale (~1x..10x). avg_speedup_debug gets a small
+    # weight (0.5) so legacy entries without SOL still contribute but
+    # don't dominate.
+    score = breadth * 2.0 + avg_sol * 10.0 + avg_speedup_debug * 0.5 + generality * 3.0
     return score
