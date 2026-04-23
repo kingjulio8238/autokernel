@@ -1,0 +1,40 @@
+[project]
+name = "kernel-agent"
+version = "0.1.0"
+description = "Multi-worker Triton kernel generation + refinement agent"
+requires-python = ">=3.11"
+dependencies = [
+    "jinja2>=3.0",
+    "openai>=1.0",
+    "anthropic>=0.40",
+    "pydantic>=2.0",
+    "httpx>=0.27",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+# Flat layout: pyproject.toml lives INSIDE the kernel_agent/ package, so map
+# the package name to "." and enumerate subpackages explicitly.
+[tool.setuptools]
+packages = [
+    "kernel_agent",
+    "kernel_agent.ka_utils",
+    "kernel_agent.ka_utils.providers",
+    "kernel_agent.opt_worker_component",
+    "kernel_agent.opt_worker_component.benchmarking",
+    "kernel_agent.opt_worker_component.orchestrator",
+    "kernel_agent.opt_worker_component.prescribing",
+    "kernel_agent.opt_worker_component.profiling",
+    "kernel_agent.opt_worker_component.searching",
+    "kernel_agent.opt_worker_component.searching.history",
+    "kernel_agent.opt_worker_component.searching.mutation",
+    "kernel_agent.opt_worker_component.searching.sampling",
+    "kernel_agent.opt_worker_component.searching.strategy",
+    "kernel_agent.platform",
+]
+package-dir = {"kernel_agent" = "."}
+
+[tool.setuptools.package-data]
+kernel_agent = ["templates/*.j2", "templates/**/*.j2"]

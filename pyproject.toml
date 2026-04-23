@@ -4,19 +4,22 @@ version = "0.1.0"
 description = "Autonomous GPU kernel optimization engine + developer tools"
 readme = "README.md"
 requires-python = ">=3.11"
-# Depend on the workspace members so `uv sync` installs both — exposes the
-# `kernel-code` and `openkernel` console scripts in .venv/bin.
+# Depend on the workspace members so `uv sync` installs all of them —
+# exposes the kernel-code console script in .venv/bin and makes the
+# openkernel / kernel_agent packages importable from a clean install.
 dependencies = [
     "openkernel",
     "kernel-code",
+    "kernel-agent",
 ]
 
 [tool.uv.sources]
 openkernel = { workspace = true }
 kernel-code = { workspace = true }
+kernel-agent = { workspace = true }
 
 [tool.uv.workspace]
-members = ["openkernel", "kernel_code"]
+members = ["openkernel", "kernel_code", "kernel_agent"]
 
 [tool.ruff]
 target-version = "py311"

@@ -146,6 +146,7 @@ class LiveOptimizationDisplay:
         self._current_round: int = 0
         self._current_strategy: str = ""
         self._target_speedup: float | None = None
+        self._target_sol: float | None = None
         self._round_markers: list[int] = []
         self._worker_states: list[dict] = []
         self._worker_speedups: dict[int, list[tuple[int, float, float]]] = {}
@@ -167,6 +168,10 @@ class LiveOptimizationDisplay:
 
     def set_target(self, target: float) -> None:
         self._target_speedup = target
+
+    def set_target_sol(self, target_sol: float) -> None:
+        """SOL target (0.0-1.0). Rendered alongside the best-SOL line when set."""
+        self._target_sol = target_sol
 
     def start_round(self, round_num: int, strategy: str) -> None:
         self._current_round = round_num
@@ -275,10 +280,14 @@ class LiveOptimizationDisplay:
         if best_sol > 0:
             sol_color = _SUCCESS if best_sol >= 0.7 else _WARNING if best_sol >= 0.4 else _ERROR
             ctx2.append(f"SOL {best_sol:.2f}", style=f"bold {sol_color}")
+            if self._target_sol:
+                ctx2.append(f" / {self._target_sol:.2f} target", style=_DIM)
             ctx2.append(f" \u00b7 {self._best_speedup:.2f}x", style=_DIM)
         else:
             ctx2.append(f"{self._best_speedup:.2f}x", style=f"bold {sp_color}")
-        if self._target_speedup:
+        # Show speedup target ONLY when user didn't pick a SOL target.
+        # (When they picked SOL, the SOL target is the authoritative display above.)
+        if self._target_speedup and not self._target_sol:
             ctx2.append(f" / {self._target_speedup:.1f}x target", style=_DIM)
         mins = int(elapsed) // 60
         secs = int(elapsed) % 60

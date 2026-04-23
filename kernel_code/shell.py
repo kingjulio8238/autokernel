@@ -3165,7 +3165,10 @@ class KernelCodeShell:
             backend=goal.backend,
         )
         # Drive the live display off whichever metric the user picked.
-        live_display.set_target(goal.target_speedup or 2.0)
+        if "target_sol" in goal.explicit and goal.target_sol > 0:
+            live_display.set_target_sol(goal.target_sol)
+        else:
+            live_display.set_target(goal.target_speedup or 2.0)
 
         from kernel_code.run_log import RunLogger
         run_logger = RunLogger()
