@@ -2925,12 +2925,30 @@ class KernelCodeShell:
             if not goal.file:
                 return
 
-        # Target speedup
-        if "target" not in goal.explicit:
-            val = _ask("Target speedup", "2.0", "e.g. 1.5, 2.0, 3.0")
+        # Target: speedup or SOL. If user said either, skip the prompt.
+        if "target" not in goal.explicit and "target_sol" not in goal.explicit:
+            val = _ask(
+                "Target",
+                "SOL 0.8",
+                "e.g. 'SOL 0.8' (speed-of-light) or '2x' (speedup)",
+            )
             if not val:
                 return
-            goal.target_speedup = float(val)
+            # Re-parse just the target fragment so both grammars work.
+            try:
+                sub = parse_goal(val)
+            except ValueError as exc:
+                self._console.print(f"[red]Ambiguous target:[/red] {exc}")
+                return
+            if "target_sol" in sub.explicit:
+                goal.target_sol = sub.target_sol
+                goal.explicit.add("target_sol")
+            elif "target" in sub.explicit:
+                goal.target_speedup = sub.target_speedup
+                goal.explicit.add("target")
+            else:
+                self._console.print("[red]Could not parse target.[/red]")
+                return
 
         # Hardware
         if "hardware" not in goal.explicit:
@@ -2976,7 +2994,14 @@ class KernelCodeShell:
         self._console.print()
         self._console.print(f"  [bold white]\u2500\u2500 Optimization Plan \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500[/bold white]")
         self._console.print(f"  File:     [bold white]{problem_name}[/bold white]")
-        self._console.print(f"  Target:   [bold white]{goal.target_speedup:.1f}x[/bold white] speedup")
+        if "target_sol" in goal.explicit:
+            self._console.print(
+                f"  Target:   [bold white]SOL {goal.target_sol:.2f}[/bold white]  [#999999]({int(goal.target_sol*100)}% of hardware peak)[/#999999]"
+            )
+        else:
+            self._console.print(
+                f"  Target:   [bold white]{goal.target_speedup:.1f}x[/bold white] speedup"
+            )
         self._console.print(f"  Hardware: [white]{goal.hardware}[/white]  \u00b7  Backend: [white]{goal.backend}[/white]")
         self._console.print(f"  Model:    [white]{goal.model}[/white]")
         self._console.print(f"  Budget:   [white]${goal.budget_usd:.2f}[/white]")
@@ -3116,8 +3141,10 @@ class KernelCodeShell:
         from kernel_code.auto_optimizer import MetaOptimizer
         from kernel_code.live_display import LiveOptimizationDisplay
 
-        spec = GoalSpec(
-            target_speedup=goal.target_speedup,
+        # Forward target_sol only if the user set it; otherwise let GoalSpec
+        # use its own default (0.80) so the SOL-first stopping rule stays on.
+        spec_kwargs = dict(
+            target_speedup=goal.target_speedup or 2.0,
             max_budget_usd=goal.budget_usd,
             max_time_seconds=goal.time_limit_seconds or None,
             max_rounds=self._settings.max_rounds,
@@ -3127,6 +3154,9 @@ class KernelCodeShell:
             model=goal.model,
             provider=self._settings.default_provider,
         )
+        if "target_sol" in goal.explicit and goal.target_sol > 0:
+            spec_kwargs["target_sol"] = goal.target_sol
+        spec = GoalSpec(**spec_kwargs)
 
         live_display = LiveOptimizationDisplay(
             console=self._console,
@@ -3134,7 +3164,8 @@ class KernelCodeShell:
             hardware=goal.hardware,
             backend=goal.backend,
         )
-        live_display.set_target(goal.target_speedup)
+        # Drive the live display off whichever metric the user picked.
+        live_display.set_target(goal.target_speedup or 2.0)
 
         from kernel_code.run_log import RunLogger
         run_logger = RunLogger()
@@ -3142,7 +3173,9 @@ class KernelCodeShell:
             command=f"smart optimize: {text[:60]}",
             config={
                 "model": goal.model, "hardware": goal.hardware,
-                "backend": goal.backend, "target": goal.target_speedup,
+                "backend": goal.backend,
+                "target_speedup": goal.target_speedup,
+                "target_sol": goal.target_sol if "target_sol" in goal.explicit else None,
                 "budget": goal.budget_usd, "file": goal.file,
             },
         )
