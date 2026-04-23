@@ -143,6 +143,11 @@ def _has_minimax() -> bool:
     return bool(os.environ.get("MINIMAX_API_KEY"))
 
 
+def _has_nvidia() -> bool:
+    """Check if NVIDIA NIM API key is set."""
+    return bool(os.environ.get("NVIDIA_API_KEY"))
+
+
 def _has_hf() -> bool:
     """Check if Hugging Face token is set."""
     return bool(os.environ.get("HF_TOKEN"))
@@ -150,21 +155,25 @@ def _has_hf() -> bool:
 
 def _pick_best_model(creds: dict) -> tuple[str, str]:
     """Pick the best available LLM model. Returns (model_id, description)."""
+    if creds.get("nvidia"):
+        return "deepseek-ai/deepseek-v3.2", "deepseek-ai/deepseek-v3.2 (NVIDIA NIM, free)"
     if creds.get("groq"):
         return "groq/llama-3.3-70b-versatile", "groq/llama-3.3-70b-versatile (free)"
     if creds.get("minimax"):
         return "openai/MiniMax-M2.5", "openai/MiniMax-M2.5"
-    # No LLM credential found -- default to Groq (user can set up later)
-    return "groq/llama-3.3-70b-versatile", "none detected (demo mode only)"
+    # No LLM credential found -- default to NVIDIA NIM (user can set up later)
+    return "deepseek-ai/deepseek-v3.2", "none detected (demo mode only)"
 
 
 def _pick_best_provider(creds: dict) -> str:
     """Pick the best available LLM provider name."""
+    if creds.get("nvidia"):
+        return "nvidia"
     if creds.get("groq"):
         return "groq"
     if creds.get("minimax"):
         return "minimax"
-    return "groq"
+    return "nvidia"
 
 
 def _pick_gpu(creds: dict) -> tuple[str, str]:
@@ -182,6 +191,7 @@ def _step_detect_credentials(con: Console) -> dict:
 
     creds = {
         "modal": _has_modal(),
+        "nvidia": _has_nvidia(),
         "groq": _has_groq(),
         "minimax": _has_minimax(),
         "hf": _has_hf(),
@@ -194,6 +204,7 @@ def _step_detect_credentials(con: Console) -> dict:
         return f"[red]\\[--][/red] {missing_detail}"
 
     con.print(f"  Modal:   {_status(creds['modal'], 'authenticated (L40S GPU available)', 'not configured')}")
+    con.print(f"  NVIDIA:  {_status(creds['nvidia'], 'API key found (NIM free tier, 40 RPM)', 'not configured')}")
     con.print(f"  Groq:    {_status(creds['groq'], 'API key found (free tier)', 'not configured')}")
     con.print(f"  MiniMax: {_status(creds['minimax'], 'API key found', 'not configured')}")
     con.print(f"  HF Hub:  {_status(creds['hf'], 'token found', 'not configured')}")
@@ -209,11 +220,12 @@ def _step_detect_credentials(con: Console) -> dict:
     con.print()
 
     # If no LLM at all, show setup hint
-    has_any_llm = creds["groq"] or creds["minimax"]
+    has_any_llm = creds["nvidia"] or creds["groq"] or creds["minimax"]
     if not has_any_llm:
         con.print(
             "[yellow]No LLM API key detected.[/yellow] "
             "The demo will use mock data.\n"
+            "  To set up NVIDIA NIM (recommended, free 40 RPM): [bold]export NVIDIA_API_KEY=nvapi-...[/bold] (get one at https://build.nvidia.com/models)\n"
             "  To set up Groq (free): [bold]export GROQ_API_KEY=your_key[/bold]\n"
             "  To set up MiniMax:     [bold]export MINIMAX_API_KEY=your_key[/bold]"
         )

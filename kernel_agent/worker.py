@@ -14,6 +14,7 @@
 
 """Verification Worker for testing and refining individual kernels."""
 
+import ast
 import json
 import logging
 import multiprocessing as mp
@@ -34,20 +35,42 @@ from .prompt_manager import PromptManager
 from .worker_util import _run_test_multiprocess
 
 
+# LLMs occasionally emit typographic Unicode (smart quotes, em-dash, bullets)
+# inside generated code, which makes Python's parser fail immediately with
+# "SyntaxError: invalid character …" even when the surrounding code is fine.
+# We normalize on both the Modal-side write (modal_infra/app.py) AND here
+# so the local subprocess eval path gets the same treatment.
+_UNICODE_CODE_REPLACEMENTS = {
+    "‘": "'", "’": "'", "“": '"', "”": '"',
+    "–": "-", "—": "-", "‐": "-", "‑": "-",
+    "‒": "-", "−": "-", "…": "...", " ": " ",
+    "•": "#", "·": "#", "﻿": "",
+}
+
+
+def _sanitize_kernel_source(src: str) -> str:
+    """Replace typographic Unicode with ASCII equivalents. Idempotent."""
+    if not src:
+        return src
+    for bad, good in _UNICODE_CODE_REPLACEMENTS.items():
+        if bad in src:
+            src = src.replace(bad, good)
+    return src
+
+
 DISALLOWED_TORCH_PATTERNS = [
-    (
-        re.compile(r"\bimport\s+torch\.nn(\b|\s+as\b)"),
-        "importing torch.nn modules is not allowed",
-    ),
-    (
-        re.compile(r"\bfrom\s+torch\s+import\s+nn\b"),
-        "importing torch.nn modules is not allowed",
-    ),
+    # REMOVED: `import torch.nn` / `from torch import nn` / `torch.nn.Module`
+    # / `torch.nn.Parameter` — these are STRUCTURALLY REQUIRED by the
+    # KernelBench format (Model / ModelNew subclass nn.Module, declare
+    # nn.Parameter fields, etc.). The original patterns were over-strict
+    # and rejected every KB-format kernel. The real cheat patterns below
+    # (torch.nn.functional.*, torch.matmul/mm/bmm, torch.relu/etc., F.*(),
+    # torch.conv, torch.einsum, torch.ops.aten) still catch the things
+    # that would trivially bypass a Triton implementation.
     (
         re.compile(r"\bimport\s+torch\.nn\.functional\s+as\s+F\b"),
         "aliasing torch.nn.functional as F is not allowed",
     ),
-    (re.compile(r"\btorch\.nn\."), "torch.nn module usage is not allowed"),
     (
         re.compile(r"\btorch\.nn\.functional\b"),
         "torch.nn.functional usage is not allowed",
@@ -63,14 +86,11 @@ DISALLOWED_TORCH_PATTERNS = [
         ),
         "PyTorch activation/pooling helpers are not allowed",
     ),
-    (
-        re.compile(r"\bclass\s+\w+\s*\(\s*nn\.Module"),
-        "Subclassing torch.nn.Module is not allowed",
-    ),
-    (
-        re.compile(r"\.forward\("),
-        "Calling .forward() indicates torch.nn module usage and is not allowed",
-    ),
+    # REMOVED: `class X(nn.Module)` and `.forward(` patterns — these are
+    # structurally REQUIRED by KernelBench format (harness instantiates
+    # `ModelNew()` and calls it, which invokes forward via __call__). The
+    # original validator was written for gpumode-only workflow where no
+    # ModelNew class exists. See path-c-validation report for evidence.
     (
         re.compile(r"\btorch\.ops\.aten\b"),
         "Low-level torch.ops.aten.* calls are not allowed; implement these ops directly in Triton kernels instead of relying on PyTorch compute",
@@ -180,6 +200,16 @@ class VerificationWorker:
         # History for LLM context
         self.history = deque(maxlen=history_size)
 
+        # Dev logging: last LLM prompt/response for thought capture
+        self._last_prompt: str = ""
+        self._last_response: str = ""
+
+        # Last Modal-eval profile dict (populated by _run_remote_eval after
+        # each remote eval so _refine_kernel can splice it into the prompt).
+        # None on first round and whenever remote eval was not used or
+        # returned no profile.
+        self._last_profile: dict | None = None
+
         # Setup logging early so it is available for any error paths
         self._setup_logging()
 
@@ -272,7 +302,7 @@ class VerificationWorker:
 
     def _write_kernel(self, kernel_code: str):
         """Write only the kernel code to file."""
-        self.kernel_file.write_text(kernel_code)
+        self.kernel_file.write_text(_sanitize_kernel_source(kernel_code))
         self.logger.info("Updated kernel file")
 
     def _write_files(self, kernel_code: str, test_code: list[str]):
@@ -289,7 +319,7 @@ class VerificationWorker:
                 primary test written to ``test_kernel.py``; any subsequent
                 entries are written to ``test_extra_{i}_kernel.py``.
         """
-        self.kernel_file.write_text(kernel_code)
+        self.kernel_file.write_text(_sanitize_kernel_source(kernel_code))
         self.test_files = []
         for i, code in enumerate(test_code):
             name = "test_kernel.py" if i == 0 else f"test_extra_{i}_kernel.py"
@@ -299,16 +329,81 @@ class VerificationWorker:
         self.logger.info("Wrote kernel and %d test file(s)", len(self.test_files))
 
     def _strip_comments_and_strings(self, code: str) -> str:
-        """Remove comments and docstrings to avoid false positives when scanning code."""
+        """Remove comments, docstrings, and ``if __name__ == "__main__":``
+        blocks so the scanner doesn't false-positive on code that never
+        executes at eval time.
+
+        - Preserves newlines inside multi-line docstrings so line numbers
+          still map to the original source.
+        - Drops anything inside an ``if __name__ == "__main__":`` block
+          (replaced with blank lines to preserve numbering). The Modal
+          eval harness imports the kernel module — Python does not run
+          ``__main__`` blocks on import, so patterns there are harmless
+          and must not block a kernel that is otherwise clean.
+        """
         pattern = re.compile(r'("""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'|#.*)')
-        return re.sub(pattern, "", code)
+
+        def _blank_but_keep_newlines(m: "re.Match[str]") -> str:
+            matched = m.group(0)
+            if matched.startswith("#"):
+                return ""
+            return re.sub(r"[^\n]", " ", matched)
+
+        stripped = pattern.sub(_blank_but_keep_newlines, code)
+
+        # Blank out ``if __name__ == "__main__":`` + body. The block starts
+        # at column 0 and runs until EOF or the next unindented line.
+        main_re = re.compile(
+            r'^if\s+__name__\s*==\s*["\']__main__["\']\s*:\s*$',
+            re.MULTILINE,
+        )
+        m = main_re.search(stripped)
+        if m:
+            head = stripped[: m.start()]
+            tail = stripped[m.start():]
+            # Replace every non-newline char in the tail with space so the
+            # indented body is wiped but line numbers still match.
+            tail_blanked = re.sub(r"[^\n]", " ", tail)
+            stripped = head + tail_blanked
+
+        return stripped
 
     def _detect_pytorch_compute(self, kernel_code: str) -> str | None:
-        """Detect disallowed PyTorch usage inside the kernel wrapper."""
+        """Detect disallowed PyTorch usage inside the kernel wrapper.
+
+        Returns a message that includes the offending line number + the raw
+        source line (not the comment-stripped version) so the next round's
+        LLM gets a concrete pointer to what it wrote. Generic "matmul not
+        allowed" messages produce the same offending kernel on every retry
+        because the LLM can't tell which line to change.
+
+        Pre-flight: if the kernel doesn't parse (SyntaxError) we short-
+        circuit with a parse-error message BEFORE scanning for forbidden
+        patterns. Truncated LLM responses frequently leave an unclosed
+        triple-quoted docstring; without this guard the scanner sees the
+        DOCSTRING PROSE as live code and false-positives on phrases like
+        "torch.nn.functional" that are quoting our own prompt back at us.
+        """
+        try:
+            ast.parse(kernel_code)
+        except SyntaxError as exc:
+            return (
+                f"Generated file does not parse as Python — "
+                f"regenerate a COMPLETE kernel file. "
+                f"Python says: {exc.msg} (line {exc.lineno or '?'})"
+            )
+
         sanitized = self._strip_comments_and_strings(kernel_code)
         for pattern, message in DISALLOWED_TORCH_PATTERNS:
-            if pattern.search(sanitized):
-                return message
+            m = pattern.search(sanitized)
+            if not m:
+                continue
+            line_no = sanitized.count("\n", 0, m.start()) + 1
+            src_lines = kernel_code.splitlines()
+            if 1 <= line_no <= len(src_lines):
+                offending = src_lines[line_no - 1].strip()
+                return f"{message} — line {line_no}: {offending[:160]}"
+            return message
         return None
 
     def _run_test(self) -> tuple[bool, str, str]:
@@ -387,17 +482,29 @@ class VerificationWorker:
                 # GPU Mode: kernel_function() is already the right format
                 wrapped_code = kernel_code
 
-            eval_fn = modal.Function.from_name("openkernel-eval", "eval_kernel_on_gpu")
+            # Route to GPU-specific Modal function based on hardware setting
+            from kernel_code.gpu_functions import GPU_FUNCTION_MAP
+            gpu_type = os.environ.get("OPENKERNEL_GPU_TYPE", "L40S")
+            fn_name = GPU_FUNCTION_MAP.get(gpu_type, "eval_kernel_on_gpu")
+            eval_fn = modal.Function.from_name("openkernel-eval", fn_name)
             result = eval_fn.remote(
                 kernel_source=wrapped_code,
                 reference_source=reference_code,
                 eval_mode="fast",
                 problem_format=problem_format,
+                gpu_type=gpu_type,
             )
 
             correct = result.get("correct", False)
             speedup = result.get("speedup", 0.0)
             error = result.get("error", "")
+
+            # Capture Modal profile dict so the next refinement round can
+            # splice compute/bandwidth/cache metrics into the prompt.
+            # Missing or empty profile → None so the refinement template
+            # omits the PROFILE block.
+            profile = result.get("profile") if isinstance(result, dict) else None
+            self._last_profile = profile or None
 
             if correct:
                 stdout = f"PASS\nSpeedup: {speedup:.4f}x"
@@ -416,21 +523,20 @@ class VerificationWorker:
         """
         Call the LLM provider for the configured model.
 
-        Args:
-            messages: List of message dicts with 'role' and 'content'
-            **kwargs: Additional parameters for the API call
-
-        Returns:
-            Generated response text
+        Captures prompt and response on instance for dev logging.
         """
         if not self.provider:
             raise RuntimeError(f"No provider available for model {self.openai_model}")
+
+        # Capture prompt for dev logging
+        self._last_prompt = messages[-1].get("content", "") if messages else ""
 
         # Add high_reasoning_effort to kwargs if set
         if self.high_reasoning_effort:
             kwargs["high_reasoning_effort"] = True
 
         response = self.provider.get_response(self.openai_model, messages, **kwargs)
+        self._last_response = response.content
         return response.content
 
     def _refine_kernel(
@@ -449,21 +555,31 @@ class VerificationWorker:
             try:
                 self.logger.info(f"Refining kernel using {self.openai_model}")
 
-                # Build context from history
+                # Build context from history — bounded to the LAST 4 attempts
+                # with per-attempt caps. Unbounded history squeezed the LLM's
+                # output token budget (Conv2D: kernels shrank 209→82→17 lines
+                # as the prompt grew across rounds). Last-2 was too tight:
+                # workers lost the signal and produced the SAME buggy kernel
+                # across retries. Last-4 + ~1000-char stderr budget balances:
+                # the LLM sees enough error-context to iterate, without so
+                # much history that the output gets truncated.
                 history_context = ""
-                if self.history:
-                    history_context = "\n\nPREVIOUS ATTEMPTS:\n"
-                    for i, round_data in enumerate(self.history):
-                        history_context += f"\nAttempt {i + 1}:\n"
-                        history_context += f"Kernel code:\n```python\n{round_data['kernel_code'][:500]}...\n```\n"
+                recent = self.history[-4:] if self.history else []
+                if recent:
+                    history_context = "\n\nRECENT ATTEMPTS (most recent last):\n"
+                    base = len(self.history) - len(recent) + 1
+                    for i, round_data in enumerate(recent):
+                        history_context += f"\nAttempt {base + i}:\n"
+                        history_context += f"Kernel code (head):\n```python\n{round_data['kernel_code'][:400]}\n```\n"
                         if round_data.get("stderr"):
-                            history_context += f"Error: {round_data['stderr'][:2000]}\n"
+                            history_context += f"Error: {round_data['stderr'][:1000]}\n"
                         if round_data.get("stdout"):
-                            history_context += (
-                                f"Output: {round_data['stdout'][:1000]}\n"
-                            )
+                            history_context += f"Output: {round_data['stdout'][:400]}\n"
 
-                # Create refinement prompt using template
+                # Create refinement prompt using template. Thread the most
+                # recent Modal-eval profile through so the prompt's PROFILE
+                # block can guide the next round (compute/bandwidth/cache).
+                # None on round 0 or whenever remote eval produced no profile.
                 prompt = self.prompt_manager.render_kernel_refinement_prompt(
                     problem_description=problem_description,
                     test_code=test_code,
@@ -471,11 +587,16 @@ class VerificationWorker:
                     error_info=error_info,
                     history_context=history_context,
                     no_cusolver=self.no_cusolver,
+                    profile=self._last_profile,
                 )
 
                 # Call LLM API
                 messages = [{"role": "user", "content": prompt}]
                 response_text = self._call_llm(messages, max_tokens=8192)
+
+                # Store for dev logging
+                self._last_prompt = prompt
+                self._last_response = response_text
 
                 # Extract refined kernel from response
                 refined_kernel = self._extract_code_from_response(
@@ -508,9 +629,14 @@ class VerificationWorker:
         return kernel_code
 
     def _log_round(
-        self, round_num: int, success: bool, kernel_code: str, stdout: str, stderr: str
+        self, round_num: int, success: bool, kernel_code: str, stdout: str, stderr: str,
+        prompt: str = "", response: str = "",
     ):
-        """Log the results of a verification round."""
+        """Log the results of a verification round.
+
+        In dev mode (OPENKERNEL_DEV_LOG=1), also saves full LLM prompt
+        and response for analysis.
+        """
         round_data = {
             "round": round_num,
             "timestamp": datetime.now().isoformat(),
@@ -519,6 +645,28 @@ class VerificationWorker:
             "stdout": stdout,
             "stderr": stderr,
         }
+
+        # Dev mode: append full LLM thoughts to per-run log file
+        if os.environ.get("OPENKERNEL_DEV_LOG") == "1" and (prompt or response):
+            run_id = os.environ.get("OPENKERNEL_RUN_ID", "unknown")
+            log_file = Path(f".kernel-code/dev_logs/run_{run_id}.jsonl")
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            thought_data = {
+                "type": "worker",
+                "round": round_num,
+                "timestamp": datetime.now().isoformat(),
+                "worker_id": self.worker_id,
+                "model": self.openai_model,
+                "prompt": prompt,
+                "response": response,
+                "extracted_kernel_length": len(kernel_code) if kernel_code else 0,
+                "success": success,
+            }
+            try:
+                with open(log_file, "a") as f:
+                    f.write(json.dumps(thought_data) + "\n")
+            except Exception:
+                pass  # Don't break optimization for logging
 
         # Save to log file
         round_log_file = self.log_dir / f"round_{round_num}.json"
@@ -586,7 +734,8 @@ class VerificationWorker:
             )
 
             if violation:
-                self._log_round(round_num + 1, False, current_kernel, "", violation)
+                self._log_round(round_num + 1, False, current_kernel, "", violation,
+                                prompt=self._last_prompt, response=self._last_response)
                 error_info = {
                     "stdout": "",
                     "stderr": violation,
@@ -601,7 +750,8 @@ class VerificationWorker:
                 continue
 
             # Log round
-            self._log_round(round_num + 1, success, current_kernel, stdout, stderr)
+            self._log_round(round_num + 1, success, current_kernel, stdout, stderr,
+                            prompt=self._last_prompt, response=self._last_response)
 
             if success:
                 self.logger.info(

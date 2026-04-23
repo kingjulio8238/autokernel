@@ -18,6 +18,8 @@ from kernel_agent.ka_utils.providers.model_config import ModelConfig
 from kernel_agent.ka_utils.providers.openai_provider import OpenAIProvider
 from kernel_agent.ka_utils.providers.anthropic_provider import AnthropicProvider
 from kernel_agent.ka_utils.providers.relay_provider import RelayProvider
+from kernel_agent.ka_utils.providers.ollama_provider import OllamaProvider
+from kernel_agent.ka_utils.providers.nvidia_provider import NvidiaProvider
 
 
 # Registry of all available models (external/OSS version)
@@ -94,5 +96,65 @@ AVAILABLE_MODELS = [
         name="gpt-5-2",
         provider_classes=[RelayProvider],
         description="GPT-5.2 flagship model (Dec 2025) - Note the name is different from the OpenAI model",
+    ),
+    # Ollama / Self-hosted Models
+    ModelConfig(
+        name="KernelLLM",
+        provider_classes=[OllamaProvider],
+        description="facebook/KernelLLM - Llama 3.1 8B fine-tuned on 25K Triton pairs (20.2 pass@1 on KernelBench L1)",
+    ),
+    ModelConfig(
+        name="ollama/KernelLLM",
+        provider_classes=[OllamaProvider],
+        description="facebook/KernelLLM via Ollama - Triton kernel specialist",
+    ),
+    ModelConfig(
+        name="ollama/codellama",
+        provider_classes=[OllamaProvider],
+        description="CodeLlama via Ollama - general code generation",
+    ),
+    ModelConfig(
+        name="ollama/deepseek-coder-v2",
+        provider_classes=[OllamaProvider],
+        description="DeepSeek Coder V2 via Ollama - strong coding model",
+    ),
+    # NVIDIA NIM free-tier models
+    # Endpoint: https://integrate.api.nvidia.com/v1 (40 RPM free tier).
+    # Default generator is deepseek-ai/deepseek-v3.2; critic role uses
+    # moonshotai/kimi-k2-thinking (NOT the -instruct variant).
+    ModelConfig(
+        name="deepseek-ai/deepseek-v3.2",
+        provider_classes=[NvidiaProvider],
+        description="DeepSeek V3.2 - strongest open-source coder for Triton/CUDA kernels (94.67% KernelBench-Triton)",
+    ),
+    ModelConfig(
+        name="moonshotai/kimi-k2-thinking",
+        provider_classes=[NvidiaProvider],
+        description="Kimi K2 Thinking - SOTA reasoning for critic/reflexion roles (84.5 GPQA, 256K ctx)",
+    ),
+    ModelConfig(
+        name="moonshotai/kimi-k2-instruct",
+        provider_classes=[NvidiaProvider],
+        description="Kimi K2 Instruct - general-purpose, non-thinking variant",
+    ),
+    ModelConfig(
+        name="minimaxai/minimax-m2.7",
+        provider_classes=[NvidiaProvider],
+        description="MiniMax M2.7 - 230B MoE, broad capability",
+    ),
+    ModelConfig(
+        name="openai/gpt-oss-120b",
+        provider_classes=[NvidiaProvider],
+        description="GPT-OSS-120B - open-weights GPT-OSS, diversification option",
+    ),
+    ModelConfig(
+        name="thudm/glm-5-air",
+        provider_classes=[NvidiaProvider],
+        description="GLM-5 Air - fast and cheap (Haiku-class)",
+    ),
+    ModelConfig(
+        name="meta/llama-3.3-70b-instruct",
+        provider_classes=[NvidiaProvider],
+        description="Llama 3.3 70B Instruct - general-purpose baseline",
     ),
 ]

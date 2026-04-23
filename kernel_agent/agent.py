@@ -464,6 +464,7 @@ def kernel_function(*args, **kwargs):
         problem_description: str,
         test_code: str | None = None,
         generate_default_test: bool = True,
+        worker_env: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """
         Generate an optimized Triton kernel for the given problem.
@@ -528,12 +529,16 @@ def kernel_function(*args, **kwargs):
             with open(session_dir / f"seed_{i}.py", "w") as f:
                 f.write(kernel)
 
-        # Run parallel verification with session directory for worker logs
+        # Run parallel verification with session directory for worker logs.
+        # worker_env carries per-bridge config (reference_code, gpu_type, etc.)
+        # without mutating process-global env vars — needed for thread-safe
+        # concurrency when multiple bridges run simultaneously.
         result = self.manager.run_verification(
             kernel_seeds=kernel_seeds,
             test_code=test_code_list,
             problem_description=problem_description,
             session_log_dir=session_dir,
+            worker_env=worker_env,
         )
 
         # Process results

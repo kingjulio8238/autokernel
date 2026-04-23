@@ -1,0 +1,121 @@
+{
+  "id": "hw_b200_optimization",
+  "name": "Blackwell B200 Architecture Optimization",
+  "trigger": "B200, Blackwell, sm_100, compute_100, GB200, tcgen05",
+  "approach": "Target Blackwell B200: 148 SMs, 228KB SMEM per SM, 8 TB/s HBM3e, 4500 TFLOPS FP8, 2250 TFLOPS BF16. Key Blackwell features: (1) Tensor Memory (TMEM) \u2014 128x512 on-chip memory for MMA accumulators, replacing register-based accumulation from Hopper. Results must be transferred TMEM\u2192registers via tcgen05.ld before custom arithmetic. (2) TMA (cp.async.bulk.tensor) for async HBM\u2192SMEM loads. (3) tcgen05.mma instruction launched by single thread (not warpgroup like Hopper wgmma). (4) 2-CTA clustering for collaborative matrix multiply (15-20% speedup). (5) MXFP8 block-scaled MMA via tcgen05.mma...block_scale \u2014 handles dequantization in hardware, avoiding CUDA core dequant bottleneck. (6) Warp specialization: assign different warps to HBM\u2192SMEM loads, SMEM\u2192TMEM copies, MMA launches, and TMEM\u2192HBM stores. (7) Persistent grid: one threadblock per SM (148 total) for sustained occupancy.",
+  "backend": "any",
+  "evidence": [
+    {
+      "problem": "L1/custom",
+      "speedup": 0.7311,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/custom",
+      "speedup": 0.7398,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/custom",
+      "speedup": 0.9,
+      "hardware": "L40S",
+      "round": 7,
+      "strategy": "refine asynchronous TMA transfers and overlapping computation with advanced memory prefetching.",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/custom",
+      "speedup": 0.8868,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/custom",
+      "speedup": 0.7463,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/custom",
+      "speedup": 0.72,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/custom",
+      "speedup": 0.9382,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/custom",
+      "speedup": 0.725,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/custom",
+      "speedup": 0.9038,
+      "hardware": "L40S",
+      "round": 2,
+      "strategy": "Fine-tune block sizes, tile shapes, and num_warps for improved GPU speedup",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/custom",
+      "speedup": 1.7664,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    }
+  ],
+  "code_template": null,
+  "tags": [
+    "B200",
+    "Blackwell",
+    "sm_100",
+    "hardware_specific",
+    "TMEM",
+    "TMA",
+    "tcgen05",
+    "MXFP8",
+    "HBM3e",
+    "warp_specialization"
+  ],
+  "pitfalls": [
+    "TMEM\u2192register transfer (tcgen05.ld + tcgen05.wait) has significant latency \u2014 pipeline with 5-slot circular buffers to hide it",
+    "CUDA core FP32 throughput is only 80 TFLOPS vs 4500 TFLOPS FP8 tensor cores \u2014 dequantization in CUDA cores takes 1.76x the matmul time, use hardware block-scaled MMA instead",
+    "tcgen05.mma requires scale factors in TMEM (loaded via HBM\u2192SMEM\u2192TMEM path) \u2014 produce scales in tcgen05-compatible layout during quantization",
+    "2-CTA mode shares B matrix between two SMs, reducing memory traffic 15-20% \u2014 always use for FP8 matmul",
+    "Full 128x512 TMEM gives highest tensor core throughput but block-scaled MMA can only use 128x256 (half) \u2014 expect ~5% throughput drop vs non-scaled",
+    "Blackwell measured peak HBM is ~6.8 TB/s for contiguous reads \u2014 random access patterns (expert routing) reduce effective bandwidth significantly",
+    "Quantization overhead can be 76% of matmul time if not fused \u2014 fuse quantization into kernel prologues/epilogues and produce scale layout inline"
+  ]
+}

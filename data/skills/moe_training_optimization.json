@@ -1,0 +1,77 @@
+{
+  "id": "moe_training_optimization",
+  "name": "MoE Training Optimization (Grouped GEMM)",
+  "trigger": "MoE, mixture of experts, expert routing, grouped GEMM, grouped matmul, MegaBlocks, top_k experts, num_experts, expert_capacity, gate_proj, up_proj, down_proj, training, forward pass, backward pass",
+  "approach": "MoE layers account for ~53% of forward-pass time in large models. Key optimizations: (1) Grouped GEMM abstraction \u2014 factor kernel into (expert_idx, row_block, col_block, reduction_start, reduction_end) and reuse core MMA logic across Fprop/Dgrad/Wgrad. (2) Expert-wise L2 supergrouping \u2014 apply ThunderKittens supergrouping per expert submatrix (not whole output matrix) to maximize L2 reuse. Bad L2 patterns cause 50% performance loss. (3) Persistent grid \u2014 assign one threadblock per SM (148 on B200) so new tiles load while results store to HBM. (4) MXFP8 quantization fusion \u2014 fuse quantization into SwiGLU/GEGLU epilogues to avoid separate quant pass. (5) Warp specialization \u2014 3 warpgroups (384 threads): 2 for TMEM\u2192reg\u2192SMEM\u2192HBM data flow, 1 for warp-specialized loads + MMA. (6) 5-slot circular buffers in TMEM and SMEM for deep pipelining. (7) For Wgrad, use cp.reduce.async.bulk.tensor for atomic accumulation.",
+  "backend": "cuda",
+  "evidence": [
+    {
+      "problem": "L1/custom",
+      "speedup": 0.8586,
+      "hardware": "L40S",
+      "round": 2,
+      "strategy": "refine kernel block sizes, tile shapes, and num_warps for optimal parallel performance",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/custom",
+      "speedup": 0.8969,
+      "hardware": "L40S",
+      "round": 6,
+      "strategy": "utilize hardware-native instructions and specialized tensor cores to accelerate kernel execution.",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/custom",
+      "speedup": 0.7262,
+      "hardware": "L40S",
+      "round": 2,
+      "strategy": "Refine block sizes, tile shapes and warp counts to further improve kernel performance.",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/reduction",
+      "speedup": 23.9618,
+      "hardware": "L40S",
+      "round": 2,
+      "strategy": "Apply shared-memory histogram with privatized bins and warp-aggregated atomics to mitigate contention.",
+      "bottleneck": "memory_bound",
+      "sol_score": 1.0
+    },
+    {
+      "problem": "L1/gemm",
+      "speedup": 2.0674,
+      "hardware": "L40S",
+      "round": 2,
+      "strategy": "Autotune BLOCK_M/BLOCK_N/BLOCK_K tiling and warp-per-output configuration to leverage tensor core performance.",
+      "bottleneck": "compute_bound",
+      "sol_score": 1.0
+    }
+  ],
+  "code_template": null,
+  "tags": [
+    "MoE",
+    "grouped_GEMM",
+    "training",
+    "L2_supergrouping",
+    "persistent_grid",
+    "warp_specialization",
+    "MXFP8",
+    "Fprop",
+    "Dgrad",
+    "Wgrad",
+    "SwiGLU"
+  ],
+  "pitfalls": [
+    "Expert-wise L2 supergrouping is critical \u2014 applying supergrouping to the whole output matrix instead of per-expert submatrix causes up to 50% performance loss",
+    "Grouped Wgrad differs from Fprop/Dgrad: expert division occurs along K (reduction) axis, not M axis \u2014 requires different loop structure",
+    "MXFP8 quantization overhead can dominate if not fused \u2014 on Blackwell, separate quant pass adds 76% to matmul time",
+    "For 2-CTA MMA on Blackwell, block-scaled mode uses only 128x256 TMEM (half) instead of full 128x512 \u2014 expect ~5% throughput drop vs non-scaled",
+    "Persistent grid requires careful synchronization \u2014 use mbarrier.try_wait for async coordination between warpgroups",
+    "DeepGEMM uses 1x128 and 128x128 scale blocks (less accurate than 32-block scaling) \u2014 32-block MXFP8 preserves training quality",
+    "MoE forward includes both gate/up and down projections \u2014 fuse SiLU(gate) x up activation between them to avoid materializing intermediate"
+  ]
+}

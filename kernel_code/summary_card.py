@@ -61,19 +61,52 @@ def render_optimization_summary(
     next_steps: list | None = None,
     dashboard_url: str = "",
     saved_path: str = "",
+    best_sol: float = 0.0,
     console: Console | None = None,
 ) -> None:
-    """Render a comprehensive optimization summary as a Rich Panel."""
+    """Render a comprehensive optimization summary as a Rich Panel.
+
+    Phase 2 dual-display: SOL is the primary headline, speedup is shown as a
+    dim secondary row. When ``best_sol`` is falsy the panel falls back to
+    speedup-only (legacy runs, SOL profiling unavailable).
+    """
     c = console or Console()
     content = Text()
+
+    # Auto-derive best SOL from the iterations list if the caller did not
+    # pass one explicitly — keeps legacy call sites working.
+    if not best_sol:
+        for it in iterations:
+            prof = it.get("profile") or {}
+            s = prof.get("sol_score", 0.0) if isinstance(prof, dict) else 0.0
+            if s > best_sol:
+                best_sol = s
 
     # ═══ METRICS ═══
     content.append("\n")
     pct = (kept_count / total_count * 100) if total_count > 0 else 0
-    content.append_text(_metric_row("Best Speedup", f"{best_speedup:.2f}x", "bold #4ade80", f"(iter {best_iteration})"))
+    if best_sol > 0:
+        # SOL primary headline, speedup as dim secondary row.
+        sol_pct = int(best_sol * 100)
+        bn = bottleneck_type.replace("_", "-") if bottleneck_type else ""
+        primary_extra = f"{sol_pct}% of peak" + (f" · {bn}" if bn else "")
+        content.append_text(_metric_row(
+            "Best SOL", f"{best_sol:.2f}", "bold #4ade80",
+            primary_extra, "white",
+        ))
+        content.append_text(_metric_row(
+            "Best Speedup", f"{best_speedup:.2f}x speedup vs reference",
+            "#999999", f"(iter {best_iteration})", "#999999",
+        ))
+    else:
+        # Fallback: SOL unavailable, show speedup alone with explicit note.
+        content.append_text(_metric_row(
+            "Best Speedup", f"{best_speedup:.2f}x", "bold #4ade80",
+            f"(iter {best_iteration}) · SOL unknown", "white",
+        ))
     content.append_text(_metric_row("Kept / Total", f"{kept_count} / {total_count}", "bold white", f"({pct:.0f}%)"))
     if cost_summary:
-        content.append_text(_metric_row("Cost", cost_summary, "bold white"))
+        content.append_text(_metric_row("LLM Cost", cost_summary, "bold white"))
     if elapsed_seconds > 0:
         mins = int(elapsed_seconds) // 60
         secs = int(elapsed_seconds) % 60
@@ -147,10 +180,14 @@ def render_optimization_summary(
             content.append_text(_metric_row("Best saved", saved_path, "bold white"))
     content.append("")
 
+    if best_sol > 0:
+        headline = f"SOL {best_sol:.2f} · {best_speedup:.2f}x"
+    else:
+        headline = f"{best_speedup:.2f}x · SOL unknown"
     panel = Panel(
         content,
         title="[bold white] Optimization Complete [/bold white]",
-        subtitle=f"[white]{total_count} iterations • {kept_count} kept • {best_speedup:.2f}x[/white]",
+        subtitle=f"[white]{total_count} iterations • {kept_count} kept • {headline}[/white]",
         border_style="#4ade80",
         padding=(1, 3),
         width=min(c.width, 90),

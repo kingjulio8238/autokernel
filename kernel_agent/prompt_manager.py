@@ -205,6 +205,7 @@ class PromptManager:
         history_context: str | None = None,
         triton_guidelines: str | None = None,
         no_cusolver: bool = False,
+        profile: dict | None = None,
     ) -> str:
         """
         Render the kernel refinement prompt.
@@ -217,6 +218,12 @@ class PromptManager:
             history_context: Optional context from previous attempts
             triton_guidelines: Optional guidelines (if None, loads from template)
             no_cusolver: If True, disables cuSolver library usage
+            profile: Optional Modal profile dict with keys
+                ``compute_utilization``, ``bandwidth_utilization``,
+                ``cache_efficiency``, ``bottleneck_type`` (plus optional
+                ``sol_score``, ``gpu_type``). Falsy values (None / empty dict)
+                skip the PROFILE block entirely — backcompat with callers
+                that do not have eval-time profile data yet.
 
         Returns:
             Rendered prompt string
@@ -236,6 +243,7 @@ class PromptManager:
             triton_guidelines=triton_guidelines,
             kernel_guidance=self.target_platform.kernel_guidance,
             no_cusolver=no_cusolver,
+            profile=profile or None,
         )
 
     def render_kernel_optimization_prompt(
@@ -255,6 +263,7 @@ class PromptManager:
         recent_attempts: list | None = None,
         reflexions: list | None = None,
         rag_context: str | None = None,
+        profile: dict | None = None,
     ) -> str:
         """
         Render the kernel optimization prompt.
@@ -277,6 +286,8 @@ class PromptManager:
             recent_attempts: List of recent OptimizationAttempt objects for history
             reflexions: List of Reflexion objects for self-reflection analysis
             rag_context: Optional RAG-retrieved context with optimization patterns and code examples
+            profile: Optional Modal profile dict (see render_kernel_refinement_prompt).
+                When None/empty, the PROFILE block is omitted for backcompat.
 
         Returns:
             Rendered prompt string
@@ -303,14 +314,17 @@ class PromptManager:
             recent_attempts=recent_attempts,
             reflexions=reflexions,
             rag_context=rag_context,
+            profile=profile or None,
         )
 
-    def render_reflexion_prompt(self, attempt) -> str:
+    def render_reflexion_prompt(self, attempt, profile: dict | None = None) -> str:
         """
         Render the reflexion prompt for analyzing an optimization attempt.
 
         Args:
             attempt: OptimizationAttempt object with attempt details
+            profile: Optional Modal profile dict (see render_kernel_refinement_prompt).
+                When None/empty, the PROFILE block is omitted for backcompat.
 
         Returns:
             Rendered prompt string for reflexion generation
@@ -320,7 +334,7 @@ class PromptManager:
             return self._inline_reflexion_prompt(attempt)
 
         template = self.templates["reflexion_prompt"]
-        return template.render(attempt=attempt)
+        return template.render(attempt=attempt, profile=profile or None)
 
     def _inline_reflexion_prompt(self, attempt) -> str:
         """Generate inline reflexion prompt when template is not available."""

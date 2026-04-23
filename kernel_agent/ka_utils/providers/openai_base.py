@@ -14,6 +14,9 @@
 
 """Base provider for OpenAI-compatible APIs."""
 
+import os
+import threading
+import time
 from typing import Any
 import logging
 from .base import BaseProvider, LLMResponse
@@ -28,14 +31,83 @@ except ImportError:
     OpenAI = None
 
 
+logger = logging.getLogger(__name__)
+
+
 class OpenAICompatibleProvider(BaseProvider):
     """Base provider for OpenAI-compatible APIs."""
+
+    # Per-subclass requests-per-minute limit. ``None`` means unlimited
+    # (existing behaviour, byte-identical). Subclasses like ``NvidiaProvider``
+    # override this with e.g. ``40`` to match the NIM free tier.
+    rpm_limit: float | None = None
 
     def __init__(self, api_key_env: str, base_url: str | None = None):
         self.api_key_env = api_key_env
         self.base_url = base_url
         self._original_proxy_env = None
+        self._rl_lock = threading.Lock()
+        initial = self._get_rpm_limit()
+        self._rl_tokens: float = float(initial) if initial else 0.0
+        self._rl_last_refill: float = time.monotonic()
         super().__init__()
+
+    def _get_rpm_limit(self) -> float | None:
+        """Resolve RPM limit: env override → class attr → ``None`` (unlimited).
+
+        Env var name is ``OPENKERNEL_PROVIDER_RPM_<NAME_UPPER>``. A non-positive
+        or unparseable value is ignored and the class attr is used instead.
+        """
+        try:
+            name = self.name
+        except Exception:
+            name = None
+        if name:
+            env_name = f"OPENKERNEL_PROVIDER_RPM_{name.upper()}"
+            env_val = os.environ.get(env_name)
+            if env_val is not None and env_val != "":
+                try:
+                    parsed = float(env_val)
+                    if parsed > 0:
+                        return parsed
+                except ValueError:
+                    pass
+        cls_val = getattr(type(self), "rpm_limit", None)
+        if cls_val is None:
+            return None
+        try:
+            cls_float = float(cls_val)
+        except (TypeError, ValueError):
+            return None
+        return cls_float if cls_float > 0 else None
+
+    def _await_rate_limit(self) -> None:
+        """Block until a token is available. No-op if ``rpm_limit`` is None."""
+        limit = self._get_rpm_limit()
+        if not limit:
+            return
+        refill_per_sec = limit / 60.0
+        while True:
+            with self._rl_lock:
+                now = time.monotonic()
+                elapsed = now - self._rl_last_refill
+                if elapsed > 0:
+                    self._rl_tokens = min(
+                        limit, self._rl_tokens + elapsed * refill_per_sec
+                    )
+                    self._rl_last_refill = now
+                if self._rl_tokens >= 1.0:
+                    self._rl_tokens -= 1.0
+                    return
+                wait_s = (1.0 - self._rl_tokens) / refill_per_sec
+            if wait_s >= 0.01:
+                logger.debug(
+                    "rate-limit: %s sleeping %.2fs (rpm_limit=%.1f)",
+                    getattr(self, "name", "?"),
+                    wait_s,
+                    limit,
+                )
+            time.sleep(wait_s)
 
     def _initialize_client(self) -> None:
         """Initialize OpenAI-compatible client."""
@@ -60,6 +132,7 @@ class OpenAICompatibleProvider(BaseProvider):
         if not self.is_available():
             raise RuntimeError(f"{self.name} client not available")
 
+        self._await_rate_limit()
         api_params = self._build_api_params(model_name, messages, **kwargs)
         response = self.client.chat.completions.create(**api_params)
         logging.getLogger(__name__).info(
@@ -83,6 +156,7 @@ class OpenAICompatibleProvider(BaseProvider):
         if not self.is_available():
             raise RuntimeError(f"{self.name} client not available")
 
+        self._await_rate_limit()
         api_params = self._build_api_params(model_name, messages, n=n, **kwargs)
         response = self.client.chat.completions.create(**api_params)
         logging.getLogger(__name__).info(

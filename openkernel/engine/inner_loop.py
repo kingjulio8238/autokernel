@@ -14,7 +14,9 @@ optimization intent it:
 
 from __future__ import annotations
 
+import ast
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import Enum
@@ -30,6 +32,58 @@ from openkernel.eval.types import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_kb_init_hint(reference: str) -> str:
+    """Extract the KernelBench ``Model.__init__`` signature as a prompt hint.
+
+    KB references define ``class Model(nn.Module)`` and a companion
+    ``get_init_inputs()`` function; the harness calls
+    ``ModelNew(*get_init_inputs())`` on the generated kernel, so ``ModelNew``
+    must accept the SAME positional args. LLMs routinely forget this and
+    emit ``def __init__(self):`` which immediately fails with
+    "takes 1 positional argument but N were given".
+
+    Returns a single-line hint like::
+
+        Init-signature hint (KB Model): ModelNew.__init__(self, in_channels, out_channels, kernel_size, bias_shape) — mirror Model.__init__ exactly.
+
+    Or empty string for non-KB references (e.g. GPU MODE ref_kernel),
+    unparseable refs, or KB refs without get_init_inputs(). Never raises —
+    callers can trust the return value to be a string.
+    """
+    if not reference or "class Model" not in reference:
+        return ""
+    try:
+        tree = ast.parse(reference)
+    except SyntaxError:
+        return ""
+
+    model_init_args: list[str] | None = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "Model":
+            for body_node in node.body:
+                if isinstance(body_node, ast.FunctionDef) and body_node.name == "__init__":
+                    args = body_node.args
+                    names = [a.arg for a in args.args]
+                    # Drop "self" — ModelNew's __init__ needs the rest.
+                    if names and names[0] == "self":
+                        names = names[1:]
+                    model_init_args = names
+                    break
+            break
+
+    if not model_init_args:
+        return ""
+
+    sig = ", ".join(["self", *model_init_args])
+    return (
+        f"Init-signature hint (KernelBench Model): "
+        f"ModelNew.__init__({sig}) must mirror Model.__init__ exactly — "
+        f"the harness calls ModelNew(*get_init_inputs()). "
+        f"A no-arg `def __init__(self):` crashes with "
+        f"\"takes 1 positional argument but {len(model_init_args)} were given\"."
+    )
 
 
 # ------------------------------------------------------------------
@@ -97,6 +151,104 @@ class InnerLoop:
         self._on_phase = on_phase  # callback: (status_message) -> None
         # Load hardware/backend context for injection into generator prompts
         self._skills_context = self._load_context(config)
+        # Per-run retrieval cache keyed by reference source. Classification is
+        # deterministic for a given reference, so one call per distinct
+        # reference is sufficient across all rounds in a run.
+        self._retrieval_cache: dict[str, dict] = {}
+        # Lazy-loaded SkillLibrary — only instantiated when first needed.
+        self._skill_library = None
+
+    def _get_retrieval(self, reference: str, hardware: str, intent: str) -> dict:
+        """Return classifier+skills+archspec bundle, cached per reference.
+
+        The bundle shape::
+
+            {
+                "problem_context": str | None,
+                "strategy_hints": list[str] | None,
+                "skills_extra": str | None,   # appended to static skills_context
+                "archspec": dict | None,
+            }
+
+        All retrieval failures degrade to ``None``/empty — generator
+        invocation must never crash because a retrieval step failed.
+        """
+        cached = self._retrieval_cache.get(reference)
+        if cached is not None:
+            return cached
+
+        bundle: dict = {
+            "problem_context": None,
+            "strategy_hints": None,
+            "skills_extra": None,
+            "archspec": None,
+            "op_template": "",
+        }
+
+        # --- Classifier -----------------------------------------------------
+        op_tag = ""
+        op_type_value: str | None = None
+        try:
+            from kernel_code.problem_classifier import classify_problem  # lazy
+
+            classif = classify_problem(reference)
+            bundle["problem_context"] = classif.to_context_string()
+            bundle["strategy_hints"] = list(classif.strategy_hints) or None
+            op_tag = classif.op_type.value
+            op_type = getattr(classif, "op_type", None)
+            op_type_value = getattr(op_type, "value", op_type) if op_type else None
+        except Exception as exc:
+            logger.warning("InnerLoop: classify_problem failed — %s", exc)
+
+        # --- KB init-signature hint ----------------------------------------
+        # Parameterized KB models (Conv2D, Linear, GroupNorm, …) repeatedly
+        # failed with "ModelNew.__init__() takes 1 positional argument but N
+        # were given" because the LLM emitted a no-arg ``def __init__(self):``.
+        # The reference already encodes the required signature via
+        # ``get_init_inputs()``; splice it into problem_context as an
+        # unambiguous signature hint. Applies to ALL KB problems — not
+        # problem-specific.
+        try:
+            init_hint = _extract_kb_init_hint(reference)
+            if init_hint:
+                pc = bundle["problem_context"] or ""
+                bundle["problem_context"] = (pc + "\n" + init_hint).strip()
+        except Exception as exc:
+            logger.warning("InnerLoop: init-hint extraction failed — %s", exc)
+
+        # --- Op-type template ----------------------------------------------
+        try:
+            from openkernel.backends.base import load_op_template  # lazy
+
+            bundle["op_template"] = load_op_template(op_type_value)
+        except Exception as exc:
+            logger.warning("InnerLoop: load_op_template failed — %s", exc)
+
+        # --- Skill library -------------------------------------------------
+        try:
+            if self._skill_library is None:
+                from openkernel.memory.skill_library import SkillLibrary  # lazy
+
+                lib = SkillLibrary()
+                lib.load()
+                self._skill_library = lib
+            query = f"{op_tag} {intent}".strip() or intent
+            matches = self._skill_library.search_skills(query, top_k=3)
+            if matches:
+                bundle["skills_extra"] = type(self._skill_library).to_context_string(matches)
+        except Exception as exc:
+            logger.warning("InnerLoop: skill search failed — %s", exc)
+
+        # --- Archspec -------------------------------------------------------
+        try:
+            from openkernel.backends.base import _hardware_archspec  # lazy
+
+            bundle["archspec"] = _hardware_archspec(hardware)
+        except Exception as exc:
+            logger.warning("InnerLoop: archspec lookup failed — %s", exc)
+
+        self._retrieval_cache[reference] = bundle
+        return bundle
 
     @staticmethod
     def _load_context(config: OpenKernelConfig) -> str:
@@ -157,6 +309,7 @@ class InnerLoop:
         best_kernel = ""
         best_speedup = current_best
         critic_feedback: str | None = None
+        last_profile: dict | None = None
         last_diagnosis: CriticDiagnosis | None = None
         all_speedups: list[float] = []
 
@@ -179,6 +332,20 @@ class InnerLoop:
             current_best,
         )
 
+        # Retrieval happens ONCE per (reference, intent) and is cached on self
+        # across rounds to avoid redundant LLM-irrelevant work.
+        retrieval = self._get_retrieval(reference, hardware, intent.description)
+        # Merge static hardware/backend/pitfalls context with any dynamic
+        # skills found for this problem. Static context has been the default
+        # since before skill retrieval; keep it unless we actively replace it.
+        skills_combined = self._skills_context
+        if retrieval["skills_extra"]:
+            skills_combined = (
+                f"{self._skills_context}\n\n{retrieval['skills_extra']}"
+                if self._skills_context
+                else retrieval["skills_extra"]
+            )
+
         def _phase(msg: str) -> None:
             if self._on_phase is not None:
                 self._on_phase(msg)
@@ -194,7 +361,12 @@ class InnerLoop:
                     hardware=hardware,
                     intent=intent.description,
                     critic_feedback=critic_feedback,
-                    skills=self._skills_context,
+                    skills=skills_combined,
+                    problem_context=retrieval["problem_context"],
+                    strategy_hints=retrieval["strategy_hints"],
+                    archspec=retrieval["archspec"],
+                    op_template=retrieval.get("op_template") or None,
+                    profile=last_profile,
                 )
             except ValueError as exc:
                 # Validation failure from generator — treat as a soft error,
@@ -208,6 +380,12 @@ class InnerLoop:
             _phase(f"Evaluating on {hardware} (correctness + benchmark)")
             eval_result = await eval_fn(kernel_code, reference)
             all_speedups.append(eval_result.speedup)
+            last_profile = {
+                "bandwidth_utilization": eval_result.profile.bandwidth_utilization,
+                "compute_utilization": eval_result.profile.compute_utilization,
+                "cache_efficiency": eval_result.profile.cache_efficiency,
+                "bottleneck_type": eval_result.profile.bottleneck_type.value,
+            }
 
             if eval_result.status in (EvalStatus.COMPILE_ERROR, EvalStatus.ERROR):
                 # Feed error back to generator for retry

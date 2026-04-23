@@ -1,0 +1,68 @@
+{
+  "id": "hw_h100_optimization",
+  "name": "H100 Architecture Optimization",
+  "trigger": "H100, sm_90, Hopper, compute_90",
+  "approach": "Target H100 architecture: 132 SMs, 192KB shared memory per SM, 3350 GB/s HBM3 bandwidth, 989 TFLOPS FP16. Use 256-thread blocks for element-wise, vectorized __nv_bfloat162 loads for 2x bandwidth. Grid sizing should be multiples of 132 for full SM utilization. Leverage 50MB L2 cache for reuse. Warp-level reductions with __shfl_xor_sync for 32-element synchronization.",
+  "backend": "any",
+  "evidence": [
+    {
+      "problem": "L1/custom",
+      "speedup": 0.7407,
+      "hardware": "L40S",
+      "round": 2,
+      "strategy": "Switch to warp-level shuffle reduction and shared memory tiling.",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/reduction",
+      "speedup": 0.2114,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "memory_bound",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/reduction",
+      "speedup": 0.8465,
+      "hardware": "L40S",
+      "round": 2,
+      "strategy": "Switch to warp-level shuffle reduction using shared memory tiling to alleviate memory bottleneck.",
+      "bottleneck": "memory_bound",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/reduction",
+      "speedup": 23.9618,
+      "hardware": "L40S",
+      "round": 2,
+      "strategy": "Apply shared-memory histogram with privatized bins and warp-aggregated atomics to mitigate contention.",
+      "bottleneck": "memory_bound",
+      "sol_score": 1.0
+    },
+    {
+      "problem": "L1/reduction",
+      "speedup": 8.4439,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "memory_bound",
+      "sol_score": 1.0
+    }
+  ],
+  "code_template": null,
+  "tags": [
+    "H100",
+    "Hopper",
+    "sm_90",
+    "hardware_specific",
+    "high_bandwidth",
+    "bfloat16"
+  ],
+  "pitfalls": [
+    "Block count must be multiple of 132 SMs for full utilization \u2014 odd grid sizes waste SMs",
+    "Shared memory per SM is 192KB but per-block limit depends on occupancy target",
+    "BF16 vectorized loads require 2-byte alignment \u2014 ensure tensor strides are even"
+  ]
+}

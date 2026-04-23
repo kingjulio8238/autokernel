@@ -19,6 +19,7 @@ Usage::
 from __future__ import annotations
 
 import logging
+import os
 import re
 from dataclasses import dataclass
 
@@ -42,8 +43,19 @@ def _build_reflection_prompt(
     best_speedup: float,
     target_speedup: float,
     budget_remaining: float,
+    problem_context: str = "",
+    strategy_hints: list[str] | None = None,
 ) -> str:
-    """Build a compact reflection prompt (~300 tokens)."""
+    """Build a compact reflection prompt (~450 tokens).
+
+    Args:
+        problem_context: Optional string describing problem type + bottleneck
+            (e.g. "L1 elementwise, launch-bound"). Used to filter strategies.
+        strategy_hints: Optional problem-specific best-practice bullets from
+            the classifier (e.g. histogram → "warp-aggregated atomics on
+            high-contention inputs"). Surfaced verbatim so the pivot prompt
+            picks a strategy that matches the real bottleneck.
+    """
     round_summaries = []
     for r in rounds:
         strategy = r.get("strategy", "general optimization")
@@ -60,12 +72,36 @@ def _build_reflection_prompt(
 
     trajectory = "\n".join(round_summaries)
 
+    # Build problem-aware guidance
+    problem_section = ""
+    if problem_context:
+        problem_section = f"\nPROBLEM: {problem_context}\n"
+        if "launch-bound" in problem_context.lower() or "launch-overhead" in problem_context.lower():
+            problem_section += (
+                "\nIMPORTANT: This is a launch-overhead-bound problem. "
+                "PyTorch's fused elementwise kernels are already near-optimal at this size.\n"
+                "AVOID suggesting: block size tuning, shared memory tiling, tensor cores, "
+                "TMEM, pipeline fusion — these don't help when kernel launch dominates.\n"
+                "CONSIDER instead: grid-stride loops (process more elements per launch), "
+                "multi-op fusion, or STOP if 2+ rounds can't beat baseline.\n"
+            )
+
+    hints_section = ""
+    if strategy_hints:
+        bullets = "\n".join(f"- {h}" for h in strategy_hints)
+        hints_section = (
+            "\n## Problem-specific strategy hints (from classifier)\n"
+            f"{bullets}\n\n"
+            "Strongly consider these when choosing the next strategy — they "
+            "reflect known best practices for this op type.\n"
+        )
+
     return f"""\
 You are managing an autonomous GPU kernel optimization run.
 
 TARGET: {target_speedup:.1f}x speedup
 CURRENT BEST: {best_speedup:.2f}x
-BUDGET REMAINING: ${budget_remaining:.2f}
+BUDGET REMAINING: ${budget_remaining:.2f}{problem_section}{hints_section}
 ROUNDS SO FAR:
 {trajectory}
 
@@ -75,11 +111,29 @@ CONTINUE: <strategy description> — if current approach has room to improve
 PIVOT: <new strategy description> — if current approach is exhausted, try something different
 STOP: <reason> — if target is unreachable or we're at the theoretical ceiling
 
-Consider:
-- Are we making progress toward the target?
-- Is the bottleneck type suggesting a specific optimization direction?
-- Have we exhausted the obvious approaches?
-- Is the remaining budget sufficient for another meaningful round?
+Consider these levels of optimization, from most to least conventional:
+
+LEVEL 1 — Parameter tuning (try different block sizes, tile shapes, num_warps):
+- Is the current tiling/blocking configuration suboptimal?
+- Are there autotune configurations we haven't explored?
+
+LEVEL 2 — Algorithmic change (different reduction strategy, different memory access pattern):
+- Should we switch from global memory to shared memory tiling?
+- Should we use warp-level shuffle reduction instead of shared memory reduction?
+- Should we fuse multiple operations into a single kernel pass?
+
+LEVEL 3 — Parallelism axis (MOST IMPACTFUL — question the fundamental decomposition):
+- Is the parallelism axis wrong? (e.g., experts→outputs for MoE decode)
+- Are there pipeline stages that can be ELIMINATED entirely? (5/8 stages in traditional MoE are bookkeeping)
+- Can intermediate buffers be removed by accumulating in registers?
+
+LEVEL 4 — Hardware-native operations (bypass software implementation entirely):
+- Can the hardware do this operation natively? (e.g., tcgen05.mma block_scale for dequantization)
+- Is intermediate precision loss avoidable? (e.g., keep BF16 activations instead of quantizing to MXFP8)
+- Are there architecture-specific instructions we're not using? (TMA, TMEM, shfl.sync.bfly)
+
+If stuck at Level 1 for 2+ rounds, PIVOT to Level 2 or 3.
+If stuck at Level 2, consider Level 3 (parallelism axis flip) or Level 4 (hardware-native ops).
 
 Respond with EXACTLY one line in one of these formats:
 CONTINUE: <what to refine next, 10-15 words>
@@ -93,12 +147,39 @@ async def reflect_on_round(
     target_speedup: float,
     budget_remaining: float,
     llm: LLMProvider,
+    problem_context: str = "",
+    strategy_hints: list[str] | None = None,
 ) -> MetaReflection:
     """Ask the LLM to reflect on progress and decide next action."""
-    prompt = _build_reflection_prompt(rounds, best_speedup, target_speedup, budget_remaining)
+    prompt = _build_reflection_prompt(
+        rounds, best_speedup, target_speedup, budget_remaining,
+        problem_context=problem_context,
+        strategy_hints=strategy_hints,
+    )
 
     try:
         response = await llm.generate(prompt)
+
+        # Dev mode: append reflection to per-run log file
+        if os.environ.get("OPENKERNEL_DEV_LOG") == "1":
+            import json
+            from pathlib import Path
+            run_id = os.environ.get("OPENKERNEL_RUN_ID", "unknown")
+            log_file = Path(f".kernel-code/dev_logs/run_{run_id}.jsonl")
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                with open(log_file, "a") as f:
+                    f.write(json.dumps({
+                        "type": "reflection",
+                        "prompt": prompt,
+                        "response": response.strip(),
+                        "rounds_seen": len(rounds),
+                        "best_speedup": best_speedup,
+                        "target_speedup": target_speedup,
+                    }) + "\n")
+            except Exception:
+                pass
+
         return _parse_reflection(response.strip())
     except Exception as exc:
         logger.warning("Meta-reflection failed: %s", exc)

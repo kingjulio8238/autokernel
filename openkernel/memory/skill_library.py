@@ -25,6 +25,7 @@ class OptimizationSkill:
     evidence: list[dict] = field(default_factory=list)
     code_template: str | None = None
     tags: list[str] = field(default_factory=list)
+    pitfalls: list[str] = field(default_factory=list)
 
 
 class SkillLibrary:
@@ -164,6 +165,9 @@ class SkillLibrary:
                 f"**Backend**: {skill.backend}\n"
                 f"**Tags**: {tags_str}"
             )
+            if skill.pitfalls:
+                pitfalls_str = "\n".join(f"  - {p}" for p in skill.pitfalls)
+                block += f"\n**Pitfalls**:\n{pitfalls_str}"
             if skill.code_template:
                 block += f"\n**Code template**:\n```\n{skill.code_template}\n```"
             parts.append(block)

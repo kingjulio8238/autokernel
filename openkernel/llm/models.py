@@ -22,19 +22,85 @@ _RECOMMENDED_PATH = _REPO_ROOT / "data" / "models" / "recommended.json"
 
 
 def load_recommended_models() -> list[dict[str, Any]]:
-    """Load the recommended models list from the bundled JSON file.
+    """Load the recommended models list from the bundled JSON file,
+    plus any models available on the local Ollama server.
 
     Returns a list of dicts — each dict contains ``id``, ``provider``,
     ``name``, ``strengths``, ``cost_tier``, and ``recommended_for``.
     """
-    if not _RECOMMENDED_PATH.exists():
-        logger.warning("Recommended models file not found at %s", _RECOMMENDED_PATH)
+    models: list[dict[str, Any]] = []
+
+    if _RECOMMENDED_PATH.exists():
+        with open(_RECOMMENDED_PATH) as f:
+            data = json.load(f)
+        models.extend(data.get("models", []))
+
+    # Auto-discover local Ollama models
+    ollama_models = _discover_ollama_models()
+    if ollama_models:
+        # Add Ollama models that aren't already in the list
+        existing_ids = {m.get("id") for m in models}
+        for om in ollama_models:
+            if om["id"] not in existing_ids:
+                models.append(om)
+
+    return models
+
+
+def _discover_ollama_models() -> list[dict[str, Any]]:
+    """Query local Ollama server for available models.
+
+    Returns model entries in the same format as recommended.json.
+    Returns empty list if Ollama is not running.
+    """
+    import os
+    try:
+        import urllib.request
+        import urllib.error
+
+        base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+        req = urllib.request.Request(f"{base_url}/api/tags", method="GET")
+        req.add_header("Content-Type", "application/json")
+
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            data = json.loads(resp.read().decode())
+
+        models = []
+        for m in data.get("models", []):
+            name = m.get("name", "")
+            size_gb = m.get("size", 0) / 1e9
+            param_size = m.get("details", {}).get("parameter_size", "")
+            quant = m.get("details", {}).get("quantization_level", "")
+            family = m.get("details", {}).get("family", "")
+
+            # Build display name
+            short_name = name.split("/")[-1].split(":")[0] if "/" in name else name.split(":")[0]
+            display = f"{short_name} ({quant})" if quant else short_name
+
+            strengths = []
+            if "kernel" in name.lower():
+                strengths.append("Fine-tuned for Triton kernel generation")
+            if param_size:
+                strengths.append(f"Parameters: {param_size}")
+            if size_gb > 0:
+                strengths.append(f"Size: {size_gb:.1f} GB on disk")
+            strengths.append(f"Local — no API cost, runs on your machine")
+
+            models.append({
+                "id": name,
+                "name": display,
+                "provider": "ollama",
+                "env_key": "OLLAMA_API_KEY",
+                "cost_tier": "free",
+                "cost_per_m_input": 0,
+                "cost_per_m_output": 0,
+                "context_window": 8192,
+                "strengths": strengths,
+            })
+
+        return models
+    except Exception:
         return []
-
-    with open(_RECOMMENDED_PATH) as f:
-        data = json.load(f)
-
-    return data.get("models", [])
 
 
 def get_default_model() -> ModelConfig:
@@ -43,9 +109,9 @@ def get_default_model() -> ModelConfig:
     The default is read from ``recommended.json``'s ``"default"`` key.  If the
     file is missing or the key is absent, falls back to Claude Sonnet 4.
     """
-    fallback_id = "openai/MiniMax-M2.5"
-    fallback_provider = "minimax"
-    fallback_api_base = "https://api.minimax.io/v1"
+    fallback_id = "deepseek-ai/deepseek-v3.2"
+    fallback_provider = "nvidia"
+    fallback_api_base = "https://integrate.api.nvidia.com/v1"
 
     if not _RECOMMENDED_PATH.exists():
         return ModelConfig(

@@ -1,0 +1,43 @@
+{
+  "id": "integration_diffusers",
+  "name": "Diffusers Pipeline Integration",
+  "trigger": "diffusers, pipeline, LTX-Video, StableDiffusion, video generation, UNet, DiT",
+  "approach": "Inject custom kernels into diffusers pipelines via module-patching closures. Walk model.named_modules() to find target module types (e.g., RMSNorm, LayerNorm, GEGLU). Replace module.forward with a closure that captures the module's parameters and calls the custom kernel. Inject BEFORE CPU offloading. Custom kernels and torch.compile are mutually exclusive unless registered as custom ops.",
+  "backend": "any",
+  "evidence": [
+    {
+      "problem": "L1/custom",
+      "speedup": 0.7688,
+      "hardware": "L40S",
+      "round": 19,
+      "strategy": "Investigate deep integration with hardware-native operations and architecture-specific instructions.",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/custom",
+      "speedup": 0.9148,
+      "hardware": "L40S",
+      "round": 2,
+      "strategy": "Refine block sizes and tilt parameters with additional autotuning configurations for better speedup.",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    }
+  ],
+  "code_template": "def patch_rmsnorm_modules(model, custom_rmsnorm_fn):\n    \"\"\"Patch all RMSNorm modules in a diffusers model.\"\"\"\n    for name, module in model.named_modules():\n        if type(module).__name__ == 'RMSNorm':\n            eps = getattr(module, 'eps', 1e-6)\n            has_weight = hasattr(module, 'weight') and module.weight is not None\n            original_forward = module.forward\n            def make_forward(mod, _eps, _has_weight):\n                def forward(x):\n                    weight = mod.weight if _has_weight else None\n                    return custom_rmsnorm_fn(x, weight, _eps)\n                return forward\n            module.forward = make_forward(module, eps, has_weight)",
+  "tags": [
+    "diffusers",
+    "integration",
+    "module_patching",
+    "pipeline",
+    "video",
+    "inference"
+  ],
+  "pitfalls": [
+    "Use type(module).__name__ not isinstance() \u2014 diffusers RMSNorm is NOT torch.nn.RMSNorm",
+    "RMSNorm weight may be None (e.g., LTX-Video uses elementwise_affine=False)",
+    "Must inject kernels BEFORE enable_model_cpu_offload() \u2014 offloading moves params to CPU",
+    "torch.compile and custom kernels are mutually exclusive unless you register as torch custom op",
+    "Closure must capture module reference, not just weight tensor, to handle device movement"
+  ]
+}

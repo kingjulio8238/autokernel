@@ -69,14 +69,28 @@ def get_model_provider(
     """
     model_name_to_config = _get_model_name_to_config()
     if model_name not in model_name_to_config:
-        # Default to RelayProvider for unknown models
-        from .relay_provider import RelayProvider
-
-        model_config = ModelConfig(
-            name=model_name,
-            provider_classes=[RelayProvider],
-            description=f"Unknown model '{model_name}' (defaulting to Relay)",
+        # Check if this looks like an Ollama model (HF GGUF, ollama/ prefix, or local name)
+        _is_ollama = (
+            "gguf" in model_name.lower()
+            or model_name.startswith("ollama/")
+            or model_name.startswith("hf.co/")
+            or model_name.startswith("huggingface.co/")
         )
+        if _is_ollama:
+            from .ollama_provider import OllamaProvider
+            model_config = ModelConfig(
+                name=model_name,
+                provider_classes=[OllamaProvider],
+                description=f"Ollama model '{model_name}'",
+            )
+        else:
+            # Default to RelayProvider for unknown cloud models
+            from .relay_provider import RelayProvider
+            model_config = ModelConfig(
+                name=model_name,
+                provider_classes=[RelayProvider],
+                description=f"Unknown model '{model_name}' (defaulting to Relay)",
+            )
     else:
         model_config = model_name_to_config[model_name]
 

@@ -4,7 +4,196 @@
   "trigger": "GEMM followed by bias add and activation, matmul + relu, conv + bias + activation, epilogue fusion",
   "approach": "Fuse post-GEMM/Conv operations (bias add, ReLU, GELU, sigmoid, scaling) into the output loop of the main kernel. Eliminates intermediate memory writes. Use CUTLASS epilogue visitor pattern or custom inline epilogue in CUDA.",
   "backend": "cuda",
-  "evidence": [],
+  "evidence": [
+    {
+      "problem": "L1/custom",
+      "speedup": 0.7311,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/custom",
+      "speedup": 0.7407,
+      "hardware": "L40S",
+      "round": 2,
+      "strategy": "Switch to warp-level shuffle reduction and shared memory tiling.",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/custom",
+      "speedup": 0.7494,
+      "hardware": "L40S",
+      "round": 3,
+      "strategy": "Switch to algorithmic change with fused operations and shared memory tiling.",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/custom",
+      "speedup": 0.7688,
+      "hardware": "L40S",
+      "round": 19,
+      "strategy": "Investigate deep integration with hardware-native operations and architecture-specific instructions.",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/custom",
+      "speedup": 0.7398,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/custom",
+      "speedup": 0.9,
+      "hardware": "L40S",
+      "round": 7,
+      "strategy": "refine asynchronous TMA transfers and overlapping computation with advanced memory prefetching.",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/custom",
+      "speedup": 0.923,
+      "hardware": "L40S",
+      "round": 11,
+      "strategy": "Redesign parallel execution axis to eliminate synchronization overhead and buffer redundancies.",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/custom",
+      "speedup": 0.8868,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/custom",
+      "speedup": 0.7463,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/custom",
+      "speedup": 0.72,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/custom",
+      "speedup": 0.9382,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/custom",
+      "speedup": 0.725,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/custom",
+      "speedup": 1.7664,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/gemm",
+      "speedup": 2.0471,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "compute_bound",
+      "sol_score": 1.0
+    },
+    {
+      "problem": "L1/gemm",
+      "speedup": 1.4464,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "compute_bound",
+      "sol_score": 0.723214479525333
+    },
+    {
+      "problem": "L1/gemm",
+      "speedup": 1.9097,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "compute_bound",
+      "sol_score": 0.9548463204987979
+    },
+    {
+      "problem": "L1/gemm",
+      "speedup": 1.9383,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "compute_bound",
+      "sol_score": 0.969170083239086
+    },
+    {
+      "problem": "L1/gemm",
+      "speedup": 2.0383,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "compute_bound",
+      "sol_score": 1.0
+    },
+    {
+      "problem": "L1/gemm",
+      "speedup": 1.8424,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "compute_bound",
+      "sol_score": 0.9212222129607094
+    },
+    {
+      "problem": "L1/gemm",
+      "speedup": 1.4383,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "compute_bound",
+      "sol_score": 0.7191441553052097
+    }
+  ],
   "code_template": "import torch\nimport torch.nn as nn\nfrom torch.utils.cpp_extension import load_inline\n\ncuda_src = \"\"\"\n#include <torch/extension.h>\n#include <cublas_v2.h>\n\nstatic cublasHandle_t handle = nullptr;\n\n__global__ void bias_relu_kernel(float* C, const float* bias, int M, int N) {\n    int idx = blockIdx.x * blockDim.x + threadIdx.x;\n    if (idx >= M * N) return;\n    int col = idx % N;\n    float val = C[idx] + bias[col];\n    C[idx] = val > 0.0f ? val : 0.0f;  // fused ReLU\n}\n\ntorch::Tensor gemm_bias_relu(torch::Tensor A, torch::Tensor B, torch::Tensor bias) {\n    if (!handle) cublasCreate(&handle);\n    int M = A.size(0), K = A.size(1), N = B.size(1);\n    auto C = torch::empty({M, N}, A.options());\n    float alpha = 1.0f, beta = 0.0f;\n    cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,\n                N, M, K, &alpha,\n                B.data_ptr<float>(), N,\n                A.data_ptr<float>(), K,\n                &beta, C.data_ptr<float>(), N);\n    // Fused epilogue: bias + ReLU in one pass\n    int total = M * N;\n    bias_relu_kernel<<<(total+255)/256, 256>>>(C.data_ptr<float>(), bias.data_ptr<float>(), M, N);\n    return C;\n}\n\"\"\"\n\ncpp_src = \"torch::Tensor gemm_bias_relu(torch::Tensor, torch::Tensor, torch::Tensor);\"\nepilogue_mod = load_inline(name='epilogue_fusion', cpp_sources=cpp_src,\n                           cuda_sources=cuda_src, extra_ldflags=['-lcublas'],\n                           functions=['gemm_bias_relu'])\n\nclass ModelNew(nn.Module):\n    def __init__(self, in_features, out_features):\n        super().__init__()\n        self.weight = nn.Parameter(torch.randn(in_features, out_features))\n        self.bias = nn.Parameter(torch.zeros(out_features))\n\n    def forward(self, x):\n        return epilogue_mod.gemm_bias_relu(x.contiguous(), self.weight.contiguous(), self.bias)",
-  "tags": ["epilogue", "fusion", "bias", "activation", "compute_bound", "memory_savings"]
+  "tags": [
+    "epilogue",
+    "fusion",
+    "bias",
+    "activation",
+    "compute_bound",
+    "memory_savings"
+  ],
+  "pitfalls": []
 }

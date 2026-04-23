@@ -1,0 +1,99 @@
+{
+  "id": "cuda_conv2d_optimized",
+  "name": "Optimized Conv2D (CUDA)",
+  "trigger": "Conv2D, convolution, image convolution, 2D convolution",
+  "approach": "im2col + GEMM for standard convolutions. Winograd transform for 3x3 filters. Direct convolution for depthwise. Fuse batch norm and activation into conv epilogue.",
+  "backend": "cuda",
+  "evidence": [
+    {
+      "problem": "L1/custom",
+      "speedup": 0.7674,
+      "hardware": "L40S",
+      "round": 4,
+      "strategy": "Explore Level 3 parallelism axis adjustment, optimize fundamental decomposition strategy.",
+      "bottleneck": "unknown",
+      "sol_score": 0.0
+    },
+    {
+      "problem": "L1/gemm",
+      "speedup": 2.0471,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "compute_bound",
+      "sol_score": 1.0
+    },
+    {
+      "problem": "L1/gemm",
+      "speedup": 1.4464,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "compute_bound",
+      "sol_score": 0.723214479525333
+    },
+    {
+      "problem": "L1/gemm",
+      "speedup": 1.9097,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "compute_bound",
+      "sol_score": 0.9548463204987979
+    },
+    {
+      "problem": "L1/gemm",
+      "speedup": 1.9383,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "compute_bound",
+      "sol_score": 0.969170083239086
+    },
+    {
+      "problem": "L1/gemm",
+      "speedup": 2.0383,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "compute_bound",
+      "sol_score": 1.0
+    },
+    {
+      "problem": "L1/gemm",
+      "speedup": 2.0542,
+      "hardware": "L40S",
+      "round": 2,
+      "strategy": "refine BLOCK_M, BLOCK_N, and BLOCK_K tiling parameters using autotuning to mitigate compute bounds.",
+      "bottleneck": "compute_bound",
+      "sol_score": 1.0
+    },
+    {
+      "problem": "L1/gemm",
+      "speedup": 1.8424,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "compute_bound",
+      "sol_score": 0.9212222129607094
+    },
+    {
+      "problem": "L1/gemm",
+      "speedup": 1.4383,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "compute_bound",
+      "sol_score": 0.7191441553052097
+    }
+  ],
+  "code_template": "import torch\nimport torch.nn as nn\nfrom torch.utils.cpp_extension import load_inline\n\ncuda_src = \"\"\"\n#include <torch/extension.h>\n#include <cuda_runtime.h>\n\n__global__ void im2col_gemm_conv2d_kernel(\n    const float* input, const float* weight, float* output,\n    int N, int C_in, int H, int W, int C_out, int K, int H_out, int W_out) {\n    int idx = blockIdx.x * blockDim.x + threadIdx.x;\n    int total = N * C_out * H_out * W_out;\n    if (idx >= total) return;\n    int ow = idx % W_out; int oh = (idx / W_out) % H_out;\n    int co = (idx / (H_out * W_out)) % C_out; int n = idx / (C_out * H_out * W_out);\n    float sum = 0.0f;\n    int pad = K / 2;\n    for (int ci = 0; ci < C_in; ci++)\n        for (int kh = 0; kh < K; kh++)\n            for (int kw = 0; kw < K; kw++) {\n                int ih = oh + kh - pad, iw = ow + kw - pad;\n                if (ih >= 0 && ih < H && iw >= 0 && iw < W)\n                    sum += input[((n * C_in + ci) * H + ih) * W + iw]\n                         * weight[((co * C_in + ci) * K + kh) * K + kw];\n            }\n    output[idx] = sum;\n}\n\ntorch::Tensor conv2d_forward(torch::Tensor input, torch::Tensor weight) {\n    int N = input.size(0), C_in = input.size(1), H = input.size(2), W = input.size(3);\n    int C_out = weight.size(0), K = weight.size(2);\n    int H_out = H, W_out = W;  // same padding\n    auto output = torch::empty({N, C_out, H_out, W_out}, input.options());\n    int total = N * C_out * H_out * W_out;\n    im2col_gemm_conv2d_kernel<<<(total+255)/256, 256>>>(\n        input.data_ptr<float>(), weight.data_ptr<float>(), output.data_ptr<float>(),\n        N, C_in, H, W, C_out, K, H_out, W_out);\n    return output;\n}\n\"\"\"\n\ncpp_src = \"torch::Tensor conv2d_forward(torch::Tensor, torch::Tensor);\"\nconv_mod = load_inline(name='conv2d_cuda', cpp_sources=cpp_src, cuda_sources=cuda_src,\n                       functions=['conv2d_forward'])\n\nclass ModelNew(nn.Module):\n    def __init__(self, in_channels, out_channels, kernel_size):\n        super().__init__()\n        self.weight = nn.Parameter(torch.randn(out_channels, in_channels, kernel_size, kernel_size))\n\n    def forward(self, x):\n        return conv_mod.conv2d_forward(x.contiguous(), self.weight.contiguous())",
+  "tags": [
+    "conv2d",
+    "image",
+    "compute_bound",
+    "im2col",
+    "winograd"
+  ],
+  "pitfalls": []
+}

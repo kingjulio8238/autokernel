@@ -31,6 +31,13 @@ from kernel_agent.prompt_manager import PromptManager
 from kernel_agent.worker import VerificationWorker
 from kernel_agent.worker_util import _write_kernel_file
 from kernel_agent.ka_utils.providers.base import BaseProvider
+from kernel_code.optimization_gate import (
+    run_optimization_gate,
+    BottleneckType,
+    KernelStructure,
+    get_allowed_methods,
+)
+from openkernel.agents.planner import PlanDiagnostic
 
 
 def extract_triton_config(kernel_code: str) -> dict[str, Any]:
@@ -408,6 +415,67 @@ class OptimizationOrchestrator:
             else:
                 primary = bottleneck_results[0]
 
+            # --- Deterministic gate check ---
+            # Map bottleneck category string to BottleneckType enum
+            _CATEGORY_MAP = {
+                "compute": BottleneckType.COMPUTE,
+                "memory_bandwidth": BottleneckType.MEMORY_BANDWIDTH,
+                "memory_latency": BottleneckType.MEMORY_LATENCY,
+                "launch_overhead": BottleneckType.LAUNCH_OVERHEAD,
+                "gemm_tiling": BottleneckType.GEMM_TILING,
+                "gemm_tiling_needed": BottleneckType.GEMM_TILING,
+                "l1_pathology": BottleneckType.L1_PATHOLOGY,
+                "l1_saturated_access_pathology": BottleneckType.L1_PATHOLOGY,
+            }
+            gate_bottleneck = _CATEGORY_MAP.get(
+                primary.category.lower().replace("-", "_").replace(" ", "_"),
+                BottleneckType.UNKNOWN,
+            )
+            gate_result = run_optimization_gate(
+                kernel_code=current_kernel,
+                bottleneck=gate_bottleneck,
+                gpu_type=self.gpu_specs.get("name", "L40S") if self.gpu_specs else "L40S",
+                history=[
+                    {**asdict(a), "method_name": a.recommended_fix}
+                    for a in self.attempt_history
+                ] if self.attempt_history else None,
+            )
+
+            # Log gate results
+            if gate_result.violations:
+                for v in gate_result.violations:
+                    self.logger.warning(f"[{round_num}] Gate violation: {v}")
+            if gate_result.warnings:
+                for w in gate_result.warnings:
+                    self.logger.info(f"[{round_num}] Gate warning: {w}")
+
+            # Skip round if gate has critical violations (removable kernel)
+            if not gate_result.is_valid and any("REMOVABLE" in v for v in gate_result.violations):
+                self.logger.warning(f"[{round_num}] Skipping: removable kernel detected")
+                continue
+
+            # --- Build structured optimization plan ---
+            plan_diagnostic = PlanDiagnostic(
+                primary_method=primary.recommended_fixes[0].get("fix", "general optimization")
+                if primary.recommended_fixes else "general optimization",
+                bottleneck_summary=f"{primary.category}: {primary.summary}",
+                modification_plan=[
+                    fix.get("fix", "") for fix in (primary.recommended_fixes or [])
+                    if fix.get("fix")
+                ][:3],  # Limit to top 3 actions
+                evidence=[
+                    cause.get("cause", "") for cause in (primary.root_causes or [])
+                    if cause.get("cause")
+                ],
+                expected_improvements={
+                    "runtime": "decrease",
+                    primary.category: "improve utilization",
+                },
+                headroom=gate_result.tier.value if gate_result else "medium",
+                confidence=0.7,
+                warnings=gate_result.warnings if gate_result else [],
+            )
+
             # Get recent attempts for history (limit to history_size)
             recent_attempts = list(self.attempt_history)[-self.history_size :]
 
@@ -444,6 +512,18 @@ class OptimizationOrchestrator:
                 except Exception as e:
                     self.logger.warning(f"[{round_num}] RAG retrieval failed: {e}")
 
+            # Build gate context for prompt
+            gate_context = ""
+            if gate_result.allowed_methods:
+                gate_context += (
+                    f"\n\nALLOWED OPTIMIZATION METHODS (from hardware analysis):\n"
+                    f"You MUST choose from: {', '.join(gate_result.allowed_methods)}\n"
+                )
+            if gate_result.tier:
+                gate_context += f"Headroom tier: {gate_result.tier.value}\n"
+            if gate_result.warnings:
+                gate_context += "Warnings:\n" + "\n".join(f"  - {w}" for w in gate_result.warnings) + "\n"
+
             opt_prompt = self.prompt_manager.render_kernel_optimization_prompt(
                 problem_description=problem_description,
                 kernel_code=current_kernel,
@@ -464,6 +544,18 @@ class OptimizationOrchestrator:
                 if self.reflexions
                 else None,
                 rag_context=rag_context,
+            )
+            if gate_context:
+                opt_prompt += gate_context
+
+            # Inject structured optimization plan
+            plan_context = plan_diagnostic.to_prompt_string()
+            opt_prompt += f"\n\n{plan_context}"
+
+            opt_prompt += (
+                "\n\nCRITICAL: ONE-METHOD RULE — Apply exactly ONE optimization method "
+                "from the plan above. Do not combine multiple methods. Each round "
+                "addresses one bottleneck with one targeted fix."
             )
 
             # Save prompt

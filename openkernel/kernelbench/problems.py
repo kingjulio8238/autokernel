@@ -16,9 +16,10 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # Number of problems per level in the official KernelBench dataset.
+# Levels 1 and 2 ship 100 problems each; Level 3 ships 50.
 _LEVEL_PROBLEM_COUNTS: dict[int, int] = {
     1: 100,
-    2: 50,
+    2: 100,
     3: 50,
 }
 
@@ -34,7 +35,7 @@ def load_problem(
     level : int
         KernelBench level (1, 2, or 3).
     problem_id : int
-        Zero-indexed problem ID within the level.
+        1-indexed problem ID within the level (KernelBench convention).
 
     Returns
     -------
@@ -87,48 +88,30 @@ def get_problem_count(level: int) -> int:
 def _load_from_kernelbench(level: int, problem_id: int) -> dict[str, Any]:
     """Load a problem using the ``kernelbench`` package.
 
-    Wraps ``kernelbench.dataset.construct_kernelbench_dataset()`` to
-    extract the reference source for a single problem.
+    Wraps ``kernelbench.dataset.construct_kernelbench_dataset()`` and
+    uses ``get_problem_by_id`` to fetch a single problem. Uses
+    ``source="huggingface"`` so the dataset works from a plain pip
+    install — ``source="local"`` needs the KernelBench repo cloned
+    alongside the package.
     """
     try:
         from kernelbench.dataset import construct_kernelbench_dataset
     except ImportError as exc:
         raise ImportError(
-            "The 'kernelbench' package is not installed. "
-            "Install it with: pip install kernelbench"
+            "The 'kernelbench' package is not installed. Install it with: "
+            "uv pip install 'kernelbench @ git+https://github.com/ScalingIntelligence/KernelBench.git'"
         ) from exc
 
-    dataset = construct_kernelbench_dataset(level=level)
+    dataset = construct_kernelbench_dataset(level=level, source="huggingface")
+    problem = dataset.get_problem_by_id(problem_id)
 
-    if problem_id < 0 or problem_id >= len(dataset):
-        raise IndexError(
-            f"Problem ID {problem_id} out of range for level {level} "
-            f"(has {len(dataset)} problems)."
-        )
-
-    problem = dataset[problem_id]
-
-    # The kernelbench dataset returns problem objects; extract the source code.
-    # The exact attribute depends on the kernelbench version.
-    if hasattr(problem, "source"):
-        reference_source = problem.source
-    elif hasattr(problem, "code"):
-        reference_source = problem.code
-    elif isinstance(problem, dict):
-        reference_source = problem.get("source", problem.get("code", str(problem)))
-    elif isinstance(problem, str):
-        reference_source = problem
-    else:
-        # Last resort: try reading the file path if the problem is a path-like
+    reference_source = getattr(problem, "code", None)
+    if reference_source is None:
+        reference_source = getattr(problem, "source", None)
+    if reference_source is None:
         reference_source = str(problem)
 
-    # Extract the problem name if available.
-    if hasattr(problem, "name"):
-        problem_name = problem.name
-    elif isinstance(problem, dict) and "name" in problem:
-        problem_name = problem["name"]
-    else:
-        problem_name = f"L{level}_Problem_{problem_id}"
+    problem_name = getattr(problem, "name", None) or f"L{level}_Problem_{problem_id}"
 
     return {
         "reference_source": reference_source,

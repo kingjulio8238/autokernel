@@ -8,6 +8,7 @@ Usage::
 
     spec = GoalSpec(
         target_speedup=2.0,
+        target_sol=0.80,
         max_budget_usd=5.00,
         max_time_seconds=1800,
         reference_path="reference.py",
@@ -26,6 +27,9 @@ class GoalSpec:
 
     # Target
     target_speedup: float = 2.0  # stop when this speedup is reached
+    # Fraction of speed-of-light (0.0, 1.0] — always applied (no "disabled"
+    # sentinel here; ParsedGoal carries 0.0 to mean "not stated by user").
+    target_sol: float = 0.80
 
     # Resource limits
     max_budget_usd: float = 5.00  # hard cost cap
@@ -49,6 +53,8 @@ class GoalSpec:
         errors: list[str] = []
         if self.target_speedup <= 0:
             errors.append(f"target_speedup must be > 0, got {self.target_speedup}")
+        if not (0.0 < self.target_sol <= 1.0):
+            errors.append(f"target_sol must be in (0.0, 1.0], got {self.target_sol}")
         if self.max_budget_usd <= 0:
             errors.append(f"max_budget_usd must be > 0, got {self.max_budget_usd}")
         if self.max_rounds < 1:
@@ -67,7 +73,7 @@ class GoalSpec:
 
     def summary(self) -> str:
         """Human-readable summary of the goal."""
-        parts = [f"Target: {self.target_speedup:.1f}x"]
+        parts = [f"Target: {self.target_speedup:.1f}x @ SOL {self.target_sol:.2f}"]
         parts.append(f"Budget: ${self.max_budget_usd:.2f}")
         if self.max_time_seconds:
             mins = self.max_time_seconds // 60

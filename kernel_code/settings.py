@@ -62,9 +62,11 @@ _FIELD_TYPES: dict[str, type] = {
     "minimax_api_key": str,
     "anthropic_api_key": str,
     "openai_api_key": str,
+    "nvidia_api_key": str,
     "hf_token": str,
     "modal_token_id": str,
     "modal_token_secret": str,
+    "ollama_base_url": str,
 }
 
 
@@ -73,8 +75,8 @@ class KernelCodeSettings:
     """Merged settings from global -> project -> local."""
 
     # Model
-    default_model: str = "openai/MiniMax-M2.5"
-    default_provider: str = "minimax"
+    default_model: str = "deepseek-ai/deepseek-v3.2"
+    default_provider: str = "nvidia"
 
     # Backend
     default_backend: str = "triton"
@@ -86,7 +88,7 @@ class KernelCodeSettings:
     max_rounds: int = 10              # max refinement rounds per worker
     iterations_per_round: int = 5     # iterations per autopilot round
     max_autopilot_rounds: int = 100   # safety cap (budget/time are the real limits)
-    engine: str = "kernel-agent"      # "kernel-agent" or "native"
+    engine: str = "kernel-agent"      # "kernel-agent", "kernel-agent-opt", or "native"
 
     # Budget
     max_budget: float | None = None   # per-session spending cap ($)
@@ -113,9 +115,11 @@ class KernelCodeSettings:
     minimax_api_key: str | None = None
     anthropic_api_key: str | None = None
     openai_api_key: str | None = None
+    nvidia_api_key: str | None = None
     hf_token: str | None = None
     modal_token_id: str | None = None
     modal_token_secret: str | None = None
+    ollama_base_url: str = "http://localhost:11434"
 
     # Internal: tracks which files were merged (in order)
     source_files: list[str] = field(default_factory=list)
@@ -294,9 +298,11 @@ _API_KEY_ENV_MAP = {
     "minimax_api_key": "MINIMAX_API_KEY",
     "anthropic_api_key": "ANTHROPIC_API_KEY",
     "openai_api_key": "OPENAI_API_KEY",
+    "nvidia_api_key": "NVIDIA_API_KEY",
     "hf_token": "HF_TOKEN",
     "modal_token_id": "MODAL_TOKEN_ID",
     "modal_token_secret": "MODAL_TOKEN_SECRET",
+    "ollama_base_url": "OLLAMA_BASE_URL",
 }
 
 
