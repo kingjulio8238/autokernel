@@ -4,6 +4,16 @@ version = "0.1.0"
 description = "Autonomous GPU kernel optimization engine + developer tools"
 readme = "README.md"
 requires-python = ">=3.11"
+# Depend on the workspace members so `uv sync` installs both — exposes the
+# `kernel-code` and `openkernel` console scripts in .venv/bin.
+dependencies = [
+    "openkernel",
+    "kernel-code",
+]
+
+[tool.uv.sources]
+openkernel = { workspace = true }
+kernel-code = { workspace = true }
 
 [tool.uv.workspace]
 members = ["openkernel", "kernel_code"]

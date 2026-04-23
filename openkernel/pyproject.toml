@@ -2,7 +2,6 @@
 name = "openkernel"
 version = "0.1.0"
 description = "Self-recursive GPU kernel optimization engine"
-readme = "../README.md"
 requires-python = ">=3.11"
 dependencies = [
     "click>=8.0",
@@ -11,7 +10,9 @@ dependencies = [
     "litellm",
     "pydantic>=2.0",
     "torch>=2.9",
-    "triton",
+    # Triton has no macOS wheels (CUDA-only). GPU eval runs on Modal Linux,
+    # so Mac users don't need triton locally — gate it to Linux.
+    "triton ; sys_platform == 'linux'",
     "huggingface-hub>=0.25",
     "pandas>=2.0",
     "pyarrow>=15.0",
@@ -22,9 +23,38 @@ dependencies = [
 [project.scripts]
 openkernel = "openkernel.cli:main"
 
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+# pyproject.toml lives INSIDE the openkernel/ package. Map the package name
+# to "." and enumerate subpackages; auto-discovery from CWD would otherwise
+# produce an empty MAPPING and break imports under the editable install.
+[tool.setuptools]
+packages = [
+    "openkernel",
+    "openkernel.agents",
+    "openkernel.agents.prompts",
+    "openkernel.backends",
+    "openkernel.benchmarks",
+    "openkernel.engine",
+    "openkernel.eval",
+    "openkernel.eval.profilers",
+    "openkernel.hub",
+    "openkernel.kernelbench",
+    "openkernel.llm",
+    "openkernel.memory",
+    "openkernel.traces",
+]
+package-dir = {"openkernel" = "."}
+
 [tool.uv.sources]
+# Linux installs pull torch from NVIDIA's CU128 wheel index so GPU builds
+# get the matching CUDA runtime. macOS has no CU128 wheel; gate the index
+# to linux only so `uv sync --all-packages` succeeds on Mac (falls back to
+# PyPI CPU wheels), which registers the `kernel-code` console script.
 torch = [
-    { index = "pytorch-cu128" },
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
 ]
 kernelbench = { git = "https://github.com/ScalingIntelligence/KernelBench.git" }
 

@@ -2,7 +2,6 @@
 name = "kernel-code"
 version = "0.1.0"
 description = "Terminal-native kernel optimization developer tool"
-readme = "../README.md"
 requires-python = ">=3.11"
 dependencies = [
     "openkernel",
@@ -22,3 +21,25 @@ openkernel = { workspace = true }
 
 [project.scripts]
 kernel-code = "kernel_code.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+# pyproject.toml lives INSIDE the kernel_code/ package directory, so we map
+# the package name to "." and enumerate nested packages explicitly. Without
+# this, auto-discovery looks for kernel_code/kernel_code/ and finds nothing,
+# producing an editable finder with an empty MAPPING.
+[tool.setuptools]
+packages = [
+    "kernel_code",
+    "kernel_code.benchmarks",
+    "kernel_code.dashboard",
+    "kernel_code.dashboard.layouts",
+    "kernel_code.integration",
+    "kernel_code.tools",
+    "kernel_code.tui",
+    "kernel_code.tui.panels",
+    "kernel_code.tui.widgets",
+]
+package-dir = {"kernel_code" = "."}
