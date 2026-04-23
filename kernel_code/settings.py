@@ -62,6 +62,7 @@ _FIELD_TYPES: dict[str, type] = {
     "minimax_api_key": str,
     "anthropic_api_key": str,
     "openai_api_key": str,
+    "nvidia_api_key": str,
     "hf_token": str,
     "modal_token_id": str,
     "modal_token_secret": str,
@@ -114,6 +115,7 @@ class KernelCodeSettings:
     minimax_api_key: str | None = None
     anthropic_api_key: str | None = None
     openai_api_key: str | None = None
+    nvidia_api_key: str | None = None
     hf_token: str | None = None
     modal_token_id: str | None = None
     modal_token_secret: str | None = None
@@ -296,6 +298,7 @@ _API_KEY_ENV_MAP = {
     "minimax_api_key": "MINIMAX_API_KEY",
     "anthropic_api_key": "ANTHROPIC_API_KEY",
     "openai_api_key": "OPENAI_API_KEY",
+    "nvidia_api_key": "NVIDIA_API_KEY",
     "hf_token": "HF_TOKEN",
     "modal_token_id": "MODAL_TOKEN_ID",
     "modal_token_secret": "MODAL_TOKEN_SECRET",

@@ -3,8 +3,8 @@ default_gpu: L40S
 max_budget: 5.0
 auto_save: true
 dashboard_port: 8050
-default_model: o3-mini
-default_provider: openai
+default_model: deepseek-ai/deepseek-v3.2
+default_provider: nvidia
 num_workers: 4
 last_version_seen: 0.1.0
 max_rounds: 2
