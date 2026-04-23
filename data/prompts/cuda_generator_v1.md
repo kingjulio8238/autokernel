@@ -90,8 +90,13 @@ Generate a complete, self-contained Python file defining `ModelNew` (Format A) o
 
 ## Refinement Template (after profiler feedback)
 
-The previous kernel achieved {speedup}x speedup. The Critic's diagnosis:
+The previous kernel achieved {speedup}x speedup. Hardware profile:
+- Bandwidth utilization: {bandwidth_utilization}% of peak
+- Compute utilization: {compute_utilization}% of peak
+- L2 cache hit rate: {cache_efficiency}%
 - Bottleneck: {bottleneck_type}
+
+Critic's diagnosis:
 - Specific issue: {specific_issue}
 - Recommendation: {recommendation}
 - Estimated headroom: {estimated_headroom}x

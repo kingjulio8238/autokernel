@@ -1321,21 +1321,43 @@ def _collect_basic_profile(
     bandwidth_util = _sol_compute_bandwidth_sol(total_bytes, kernel_runtime_us, gpu_type)
 
     profile_result["sol_score"] = sol_score
+    # `compute_util` / `bandwidth_util` are percentages in 0-100 (SOL-style).
+    # Keep those as-is for the live display, but expose the canonical
+    # `compute_utilization` / `bandwidth_utilization` keys as 0.0-1.0
+    # fractions so prompt templates can multiply by 100 uniformly (same
+    # convention as `cache_efficiency`). Spec: pipeline-plumbing task #1.
     profile_result["compute_util"] = compute_util
     profile_result["bandwidth_util"] = bandwidth_util
-    # Keep the existing contract keys populated so downstream consumers that
-    # read bandwidth_utilization / compute_utilization stay in sync.
-    profile_result["bandwidth_utilization"] = bandwidth_util
-    profile_result["compute_utilization"] = compute_util
+    profile_result["bandwidth_utilization"] = bandwidth_util / 100.0
+    profile_result["compute_utilization"] = compute_util / 100.0
 
+    # Hardware peaks (handy for prompt labels like "of peak on L40S").
+    specs = _SOL_GPU_SPECS.get(gpu_type, {})
+    profile_result["gpu_type"] = gpu_type
+    profile_result["hardware_peak_tflops"] = specs.get("peak_tflops_fp16", 0)
+    profile_result["hardware_peak_gbps"] = specs.get("bandwidth_gb_s", 0)
+
+    # Bottleneck classification — spec key set is
+    # {"compute_bound", "memory_bound", "latency_bound", "unknown"}
+    # (underscored; matches prompt template `Guidance:` section).
     if compute_util == 0 and bandwidth_util == 0:
-        profile_result["bottleneck_type"] = "unknown"
+        # Both utilizations at zero → either kernel never ran long enough
+        # to saturate anything, or FLOPs/bytes estimation failed. Treat as
+        # latency_bound when we at least have runtime data, else unknown.
+        if kernel_runtime_us > 0 and total_flops == 0 and total_bytes == 0:
+            profile_result["bottleneck_type"] = "latency_bound"
+        else:
+            profile_result["bottleneck_type"] = "unknown"
+    elif compute_util < 20 and bandwidth_util < 20:
+        # Both utilizations very low → likely launch/latency-bound
+        # (too little work per launch to saturate SMs or DRAM).
+        profile_result["bottleneck_type"] = "latency_bound"
     elif compute_util > bandwidth_util:
-        profile_result["bottleneck_type"] = "compute-bound"
+        profile_result["bottleneck_type"] = "compute_bound"
     elif bandwidth_util > compute_util:
-        profile_result["bottleneck_type"] = "memory-bound"
-    else:
-        profile_result["bottleneck_type"] = "balanced"
+        profile_result["bottleneck_type"] = "memory_bound"
+    # Exactly balanced → keep the existing value (OI-based heuristic if it
+    # ran, else the initial "unknown").
 
     return profile_result
 

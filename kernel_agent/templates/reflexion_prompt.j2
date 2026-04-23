@@ -36,6 +36,22 @@ Analyze this kernel optimization attempt and generate a self-reflection.
 - Error: {{ attempt.error_message[:200] }}
 {% endif %}
 
+{% if profile %}
+## PROFILE FROM LAST ATTEMPT
+
+- Bandwidth: {{ "%.0f"|format((profile.bandwidth_utilization or 0.0) * 100) }}% of peak{% if profile.gpu_type %} ({{ profile.gpu_type }}){% endif +%}
+- Compute:   {{ "%.0f"|format((profile.compute_utilization or 0.0) * 100) }}% of peak
+- L2 cache hit rate: {{ "%.0f"|format((profile.cache_efficiency or 0.0) * 100) }}%
+- Bottleneck: {{ profile.bottleneck_type or "unknown" }}
+{% if profile.sol_score %}- SOL: {{ "%.2f"|format(profile.sol_score) }}
+{% endif %}
+Guidance:
+- If bottleneck is `memory_bound` and bandwidth < 60%: the kernel under-utilizes memory bandwidth — verify loads are coalesced (consecutive offsets in `tl.load`), load multiple elements per iteration to increase memory-level parallelism, or reduce tile size / reorder loops for better L2/L1 locality.
+- If bottleneck is `compute_bound` and compute < 60%: the kernel under-utilizes arithmetic units — increase arithmetic intensity via loop fusion or caching (more ops per memory load); for small-tensor kernels fuse with neighboring ops instead. Block-size changes are low-ROI unless confirmed by occupancy profiling.
+- If bottleneck is `latency_bound` (both utilizations low): likely high memory-stall or instruction-latency cycles — fuse adjacent ops to hide latency, widen blocks to keep more loads in-flight per SM, and overlap loads with arithmetic. (Grid size affects throughput, not per-kernel latency.)
+- If L2 cache hit rate < 40%: working set is exceeding L2 — reduce tile size, transpose or reorder layout so access stride matches cache lines, tile the reduction dim separately, and verify loop order aligns with memory strides. Layout mismatches are often the root cause.
+{% endif %}
+
 ## Task
 Analyze whether the bottleneck diagnosis was correct and whether the applied fix was effective.
 Consider:

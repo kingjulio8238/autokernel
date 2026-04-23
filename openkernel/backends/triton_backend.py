@@ -10,6 +10,7 @@ from openkernel.backends.base import (
     BackendBase,
     format_archspec,
     format_hints,
+    profile_placeholders,
     safe_format,
 )
 
@@ -35,9 +36,10 @@ class TritonBackend(BackendBase):
         strategy_hints: list[str] | None = None,
         archspec: dict | None = None,
         op_template: str | None = None,
+        profile: dict | None = None,
     ) -> str:
         # Use safe_format to avoid KeyError on extra placeholders in the
-        # prompt template (e.g. refinement section's {speedup}, {bottleneck_type}).
+        # prompt template (e.g. refinement section's {speedup}).
         prompt = safe_format(
             self._template,
             reference_code=reference,
@@ -49,6 +51,7 @@ class TritonBackend(BackendBase):
             strategy_hints=format_hints(strategy_hints) or "None provided",
             archspec=format_archspec(archspec) or "No structured hardware spec available",
             op_template=op_template or "No op-specific template available",
+            **profile_placeholders(profile),
         )
         return prompt
 

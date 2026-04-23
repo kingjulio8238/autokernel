@@ -119,13 +119,6 @@ Step 3 — implement the Triton kernel, respecting the forbidden-patterns list.
 
 Generate a complete, self-contained Python file. Return the code inside a ```python code block.
 
-## Refinement Template (after profiler feedback)
+## Refinement (last-attempt profile)
 
-The previous kernel achieved {speedup}x speedup. The Critic's diagnosis:
-- Bottleneck: {bottleneck_type}
-- Specific issue: {specific_issue}
-- Recommendation: {recommendation}
-- Estimated headroom: {estimated_headroom}x
-- Failure root cause (if incorrect): {failure_root_cause}
-
-Generate an improved kernel addressing the specific bottleneck identified. Keep the same reference format (A or B) as the previous attempt.
+Profile: BW {bandwidth_utilization}% / compute {compute_utilization}% / L2 {cache_efficiency}% — bottleneck {bottleneck_type}. Use `{critic_feedback}` above for the Critic's diagnosis. Address the bottleneck; keep the same reference format (A or B).

@@ -32,6 +32,7 @@ class BackendBase(ABC):
         strategy_hints: list[str] | None = None,
         archspec: dict | None = None,
         op_template: str | None = None,
+        profile: dict | None = None,
     ) -> str:
         """Build the full generator prompt for the LLM.
 
@@ -107,6 +108,34 @@ def format_hints(hints: list[str] | None) -> str:
     if not hints:
         return ""
     return "\n".join(f"- {h}" for h in hints)
+
+
+def profile_placeholders(profile: dict | None) -> dict[str, str]:
+    """Extract the 4 metric placeholders from a profile dict.
+
+    Accepts both fractional (0-1) and percentage (0-100) ``*_utilization`` /
+    ``cache_efficiency`` values; values <= 1.0 are treated as fractions and
+    scaled to percent. Missing keys default to 0.0 / ``"unknown"`` so callers
+    never crash on a partial profile dict.
+    """
+    p = profile or {}
+
+    def _pct(key: str) -> str:
+        v = p.get(key, 0.0)
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            f = 0.0
+        if f <= 1.0:
+            f *= 100.0
+        return f"{f:.1f}"
+
+    return {
+        "bandwidth_utilization": _pct("bandwidth_utilization"),
+        "compute_utilization": _pct("compute_utilization"),
+        "cache_efficiency": _pct("cache_efficiency"),
+        "bottleneck_type": str(p.get("bottleneck_type") or "unknown"),
+    }
 
 
 def format_archspec(archspec: dict | None) -> str:

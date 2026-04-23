@@ -9,6 +9,7 @@ from openkernel.backends.base import (
     BackendBase,
     format_archspec,
     format_hints,
+    profile_placeholders,
     safe_format,
 )
 
@@ -34,6 +35,7 @@ class CudaBackend(BackendBase):
         strategy_hints: list[str] | None = None,
         archspec: dict | None = None,
         op_template: str | None = None,
+        profile: dict | None = None,
     ) -> str:
         prompt = safe_format(
             self._template,
@@ -46,6 +48,7 @@ class CudaBackend(BackendBase):
             strategy_hints=format_hints(strategy_hints) or "None provided",
             archspec=format_archspec(archspec) or "No structured hardware spec available",
             op_template=op_template or "No op-specific template available",
+            **profile_placeholders(profile),
         )
         return prompt
 

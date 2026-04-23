@@ -33,6 +33,7 @@ class Generator:
         strategy_hints: list[str] | None = None,
         archspec: dict | None = None,
         op_template: str | None = None,
+        profile: dict | None = None,
     ) -> str:
         """Generate a kernel implementation.
 
@@ -78,6 +79,7 @@ class Generator:
             strategy_hints=strategy_hints,
             archspec=archspec,
             op_template=op_template,
+            profile=profile,
         )
 
         # 2. Call LLM

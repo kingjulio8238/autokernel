@@ -204,6 +204,12 @@ class VerificationWorker:
         self._last_prompt: str = ""
         self._last_response: str = ""
 
+        # Last Modal-eval profile dict (populated by _run_remote_eval after
+        # each remote eval so _refine_kernel can splice it into the prompt).
+        # None on first round and whenever remote eval was not used or
+        # returned no profile.
+        self._last_profile: dict | None = None
+
         # Setup logging early so it is available for any error paths
         self._setup_logging()
 
@@ -493,6 +499,13 @@ class VerificationWorker:
             speedup = result.get("speedup", 0.0)
             error = result.get("error", "")
 
+            # Capture Modal profile dict so the next refinement round can
+            # splice compute/bandwidth/cache metrics into the prompt.
+            # Missing or empty profile → None so the refinement template
+            # omits the PROFILE block.
+            profile = result.get("profile") if isinstance(result, dict) else None
+            self._last_profile = profile or None
+
             if correct:
                 stdout = f"PASS\nSpeedup: {speedup:.4f}x"
                 self.logger.info("Remote eval PASS: %.2fx speedup", speedup)
@@ -563,7 +576,10 @@ class VerificationWorker:
                         if round_data.get("stdout"):
                             history_context += f"Output: {round_data['stdout'][:400]}\n"
 
-                # Create refinement prompt using template
+                # Create refinement prompt using template. Thread the most
+                # recent Modal-eval profile through so the prompt's PROFILE
+                # block can guide the next round (compute/bandwidth/cache).
+                # None on round 0 or whenever remote eval produced no profile.
                 prompt = self.prompt_manager.render_kernel_refinement_prompt(
                     problem_description=problem_description,
                     test_code=test_code,
@@ -571,6 +587,7 @@ class VerificationWorker:
                     error_info=error_info,
                     history_context=history_context,
                     no_cusolver=self.no_cusolver,
+                    profile=self._last_profile,
                 )
 
                 # Call LLM API

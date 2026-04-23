@@ -309,6 +309,7 @@ class InnerLoop:
         best_kernel = ""
         best_speedup = current_best
         critic_feedback: str | None = None
+        last_profile: dict | None = None
         last_diagnosis: CriticDiagnosis | None = None
         all_speedups: list[float] = []
 
@@ -365,6 +366,7 @@ class InnerLoop:
                     strategy_hints=retrieval["strategy_hints"],
                     archspec=retrieval["archspec"],
                     op_template=retrieval.get("op_template") or None,
+                    profile=last_profile,
                 )
             except ValueError as exc:
                 # Validation failure from generator — treat as a soft error,
@@ -378,6 +380,12 @@ class InnerLoop:
             _phase(f"Evaluating on {hardware} (correctness + benchmark)")
             eval_result = await eval_fn(kernel_code, reference)
             all_speedups.append(eval_result.speedup)
+            last_profile = {
+                "bandwidth_utilization": eval_result.profile.bandwidth_utilization,
+                "compute_utilization": eval_result.profile.compute_utilization,
+                "cache_efficiency": eval_result.profile.cache_efficiency,
+                "bottleneck_type": eval_result.profile.bottleneck_type.value,
+            }
 
             if eval_result.status in (EvalStatus.COMPILE_ERROR, EvalStatus.ERROR):
                 # Feed error back to generator for retry
