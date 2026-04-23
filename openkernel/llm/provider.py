@@ -49,6 +49,7 @@ _PROVIDER_ENV_VARS = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
     "google": "GOOGLE_API_KEY",
+    "nvidia": "NVIDIA_API_KEY",
 }
 
 
@@ -90,9 +91,10 @@ class LLMProvider:
             warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
             import litellm
             litellm.suppress_debug_info = True
-            # API base (only MiniMax needs a custom one)
+            # API base (providers reached via LiteLLM's OpenAI-compatible path)
             _PROVIDER_API_BASE = {
                 "minimax": "https://api.minimax.io/v1",
+                "nvidia": "https://integrate.api.nvidia.com/v1",
             }
             if config.api_base:
                 self._api_base = config.api_base
@@ -271,6 +273,19 @@ class LLMProvider:
     # litellm (everything else)
     # ------------------------------------------------------------------
 
+    def _litellm_model_id(self) -> str:
+        """Return the model string to hand to LiteLLM.
+
+        NVIDIA NIM serves OpenAI-compatible REST, but its model IDs
+        (e.g. ``deepseek-ai/deepseek-v3.2``) have no LiteLLM-recognized
+        prefix, so LiteLLM can't infer a provider. Prepending ``openai/``
+        tells LiteLLM to use its OpenAI client against our ``api_base``.
+        """
+        model_id = self._config.model_id
+        if self._config.provider == "nvidia" and not model_id.startswith("openai/"):
+            return f"openai/{model_id}"
+        return model_id
+
     async def _litellm_call(
         self,
         prompt: str,
@@ -278,8 +293,8 @@ class LLMProvider:
     ) -> str:
         import litellm
 
+        model_id = self._litellm_model_id()
         # O-series models (o1, o3, o4) only support temperature=1
-        model_id = self._config.model_id
         is_o_series = any(model_id.startswith(p) for p in ("o1", "o3", "o4"))
 
         kwargs: dict[str, Any] = {
@@ -310,7 +325,7 @@ class LLMProvider:
     async def _litellm_stream(self, prompt: str) -> AsyncIterator[str]:
         import litellm
 
-        model_id = self._config.model_id
+        model_id = self._litellm_model_id()
         is_o_series = any(model_id.startswith(p) for p in ("o1", "o3", "o4"))
 
         kwargs: dict[str, Any] = {

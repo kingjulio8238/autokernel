@@ -10,9 +10,11 @@ Uses Claude Code's visual language:
 
 from __future__ import annotations
 
+import os
 import time
 from typing import TYPE_CHECKING
 
+from rich import box
 from rich.console import Console, Group
 from rich.table import Table
 from rich.text import Text
@@ -155,6 +157,25 @@ class LiveOptimizationDisplay:
         self._current_compute_pct: float = 0.0
         self._run_finalized: bool = False
 
+        # --- Table layout (Option B) --------------------------------------
+        # Default presentation: a single growing table, one row per completed
+        # worker. The prior multi-band chart layout is preserved verbatim in
+        # ``_build_legacy_view`` and opted into with OPENKERNEL_LEGACY_DISPLAY=1.
+        self._use_table_layout: bool = (
+            os.environ.get("OPENKERNEL_LEGACY_DISPLAY", "").strip() != "1"
+        )
+        # Finalized rows, in append order. Each row:
+        #   {id, global_id, round_num, speedup, runtime_us, sol_score,
+        #    status: "passed" | "cancelled" | "failed"}
+        self._worker_rows: list[dict] = []
+        # Global IDs we've already materialized a row for (dedupe the
+        # 2-Hz polling that keeps re-reporting the same "passed" state).
+        self._emitted_global_ids: set[int] = set()
+        # Baseline runtime (µs) captured from the pre-run reference profile.
+        # ``None`` means the caller didn't supply one — runtime column renders
+        # as "—" in that case.
+        self._baseline_us: float | None = None
+
     def start(self) -> None:
         self._start_time = time.time()
         self._run_finalized = False
@@ -173,6 +194,12 @@ class LiveOptimizationDisplay:
         """SOL target (0.0-1.0). Rendered alongside the best-SOL line when set."""
         self._target_sol = target_sol
 
+    def set_baseline(self, ref_runtime_us: float) -> None:
+        """Record the reference runtime (µs) used to derive per-worker
+        runtime in the table view. No-op when <= 0."""
+        if ref_runtime_us and ref_runtime_us > 0:
+            self._baseline_us = float(ref_runtime_us)
+
     def start_round(self, round_num: int, strategy: str) -> None:
         self._current_round = round_num
         self._current_strategy = strategy
@@ -190,6 +217,19 @@ class LiveOptimizationDisplay:
             history = self._worker_speedups.setdefault(gid, [])
             if rnd > 0 and speedup > 0 and (not history or history[-1][0] < rnd):
                 history.append((rnd, speedup, now))
+
+        # Table layout: emit one row the first time a worker reaches a
+        # terminal success state. Other terminal states ("stopped"/"failed")
+        # are recorded at finish() so we don't race pollers marking a
+        # worker "stopped" for a single tick mid-search.
+        if self._use_table_layout:
+            for w in workers:
+                gid = w.get("global_id", w.get("id", 0))
+                if gid in self._emitted_global_ids:
+                    continue
+                if w.get("status") != "passed":
+                    continue
+                self._append_worker_row(w, terminal_status="passed")
         self._refresh()
 
     def update_iteration(
@@ -207,6 +247,14 @@ class LiveOptimizationDisplay:
             "intent": intent, "is_best": is_best, "sol_score": sol_score,
         })
         self._speedups.append(speedup)
+        # Table layout: iteration data arrives only for the round's winning
+        # kernel (after Modal re-eval). Latch its SOL onto the most recent
+        # row that's still missing one so the % SOL column lights up.
+        if self._use_table_layout and sol_score and sol_score > 0.0:
+            for row in reversed(self._worker_rows):
+                if row.get("sol_score") is None and row.get("status") == "passed":
+                    row["sol_score"] = float(sol_score)
+                    break
         self._refresh()
 
     def update_phase(self, message: str) -> None:
@@ -222,6 +270,16 @@ class LiveOptimizationDisplay:
     def finish(self, stop_reason: str = "") -> None:
         self._current_phase = ""
         self._run_finalized = True
+        # Table layout: any worker that never reached "passed" gets a
+        # terminal row so the user sees the full 1:1 worker→row mapping.
+        if self._use_table_layout:
+            for w in self._worker_states:
+                gid = w.get("global_id", w.get("id", 0))
+                if gid in self._emitted_global_ids:
+                    continue
+                status = w.get("status", "")
+                terminal = "stopped" if status == "stopped" else "cancelled"
+                self._append_worker_row(w, terminal_status=terminal)
         self._refresh()
         if self._live:
             self._live.stop()
@@ -233,12 +291,166 @@ class LiveOptimizationDisplay:
         if self._live:
             self._live.console.print(message)
 
+    def _append_worker_row(self, worker: dict, terminal_status: str) -> None:
+        """Append a table-view row for a completed worker. Idempotent per
+        ``global_id`` — the caller is expected to pre-check, but we also
+        guard here so double-invocations at finalize time are safe."""
+        gid = worker.get("global_id", worker.get("id", 0))
+        if gid in self._emitted_global_ids:
+            return
+        self._emitted_global_ids.add(gid)
+
+        speedup = float(worker.get("speedup", 0.0) or 0.0)
+        runtime_us: float | None = None
+        if speedup > 0.0 and self._baseline_us and self._baseline_us > 0.0:
+            runtime_us = self._baseline_us / speedup
+
+        self._worker_rows.append({
+            "id": worker.get("id", gid),
+            "global_id": gid,
+            "round_num": self._current_round,
+            "speedup": speedup,
+            "runtime_us": runtime_us,
+            "sol_score": None,  # filled in update_iteration for the winner
+            "status": terminal_status,
+        })
+
     def _refresh(self) -> None:
         if self._live:
             self._live.update(self._build())
 
     def _build(self) -> Group:
-        """Option A layout: 3 bands — status, live work, history."""
+        """Dispatch between the default table view (Option B) and the
+        legacy 3-band chart layout. Toggle with OPENKERNEL_LEGACY_DISPLAY=1."""
+        if self._use_table_layout:
+            return self._build_table_view()
+        return self._build_legacy_view()
+
+    # ------------------------------------------------------------------
+    # Option B — single growing table
+    # ------------------------------------------------------------------
+
+    def _build_table_view(self) -> Group:
+        """One table, one row per completed worker. Header line above the
+        table carries the run context + baseline so each row only shows
+        per-worker information."""
+        parts: list = []
+        elapsed = time.time() - self._start_time
+
+        # ---- Header: problem · hw · backend · baseline · elapsed ------
+        header = Text()
+        header.append("\n  \u2500\u2500 ", style=_DIM)
+        header.append((self._problem or "Optimizing")[:40], style="bold white")
+        ctx = [self._hardware, self._backend]
+        if self._problem_tier:
+            ctx.append(self._problem_tier)
+        if self._problem_type:
+            ctx.append(self._problem_type)
+        header.append(" \u00b7 " + " \u00b7 ".join(ctx), style=_DIM)
+        if self._baseline_us:
+            header.append(f" \u00b7 baseline {self._baseline_us:.0f} \u00b5s", style=_DIM)
+        mins, secs = divmod(int(elapsed), 60)
+        elapsed_str = f"{mins}m{secs:02d}s" if mins else f"{secs}s"
+        header.append(f" \u00b7 {elapsed_str}", style=_DIM)
+        header.append(" \u2500\u2500", style=_DIM)
+        parts.append(header)
+
+        # ---- Strategy (subtle, one line) -----------------------------
+        if self._current_strategy:
+            strat = self._current_strategy
+            if len(strat) > 72:
+                strat = strat[:70].rsplit(" ", 1)[0] + "\u2026"
+            s_line = Text()
+            s_line.append("  \u25b6 ", style=_CLAY)
+            s_line.append(strat, style="white")
+            parts.append(s_line)
+
+        parts.append(Text(""))
+
+        # ---- Table -----------------------------------------------------
+        table = Table(
+            box=box.SIMPLE,
+            show_header=True,
+            header_style=f"bold {_DIM}",
+            pad_edge=False,
+            padding=(0, 2),
+            expand=False,
+        )
+        table.add_column("worker", style="white", no_wrap=True)
+        table.add_column("runtime", justify="right", no_wrap=True)
+        table.add_column("% SOL", justify="right", no_wrap=True)
+        table.add_column("speedup", justify="right", no_wrap=True)
+
+        for row in self._worker_rows:
+            gid = row.get("global_id", row.get("id", 0))
+            worker_label = f"W{gid + 1}"
+            if row.get("round_num"):
+                worker_label = f"R{row['round_num']}\u00b7W{gid + 1}"
+
+            speedup = float(row.get("speedup") or 0.0)
+            runtime_us = row.get("runtime_us")
+            sol_score = row.get("sol_score")
+            status = row.get("status", "")
+
+            if status == "passed" and speedup > 0.0:
+                sp_color = _SUCCESS if speedup >= 1.0 else _WARNING
+                runtime_cell = (
+                    f"{runtime_us:.0f} \u00b5s" if runtime_us is not None else "\u2014"
+                )
+                sol_cell = (
+                    f"{int(round(sol_score * 100))}%" if sol_score else "\u2014"
+                )
+                speedup_cell = f"{speedup:.2f}\u00d7"
+                table.add_row(
+                    Text(worker_label, style="bold white"),
+                    Text(runtime_cell, style="white"),
+                    Text(sol_cell, style="white"),
+                    Text(speedup_cell, style=f"bold {sp_color}"),
+                )
+            else:
+                # Cancelled / stopped / zero-speedup rows render dim.
+                label = {
+                    "cancelled": "cancelled",
+                    "stopped": "stopped",
+                }.get(status, status or "\u2014")
+                table.add_row(
+                    Text(worker_label, style=_DIM),
+                    Text("\u2014", style=_DIM),
+                    Text("\u2014", style=_DIM),
+                    Text(label, style=_DIM),
+                )
+
+        if not self._worker_rows:
+            # Empty-state placeholder so the table renders something immediately.
+            table.add_row(
+                Text("\u2014", style=_DIM),
+                Text("\u2014", style=_DIM),
+                Text("\u2014", style=_DIM),
+                Text("waiting...", style=_DIM),
+            )
+
+        parts.append(table)
+
+        # ---- Phase line (spinner) — only while a phase is active ------
+        if self._current_phase and not self._run_finalized:
+            phase = self._current_phase
+            if len(phase) > 60:
+                phase = phase[:58].rsplit(" ", 1)[0] + "\u2026"
+            spinner_chars = "\u2818\u2838\u2830\u2834\u2826\u2827\u2807\u280f"
+            sc = spinner_chars[int(elapsed * 4) % len(spinner_chars)]
+            status_line = Text()
+            status_line.append(f"  {sc} ", style=_CLAY)
+            status_line.append(phase, style=_DIM)
+            parts.append(status_line)
+
+        return Group(*parts)
+
+    # ------------------------------------------------------------------
+    # Legacy 3-band chart layout (opt-in via OPENKERNEL_LEGACY_DISPLAY=1)
+    # ------------------------------------------------------------------
+
+    def _build_legacy_view(self) -> Group:
+        """Legacy layout: 3 bands — status, live work, history."""
         width = min(self._console.width, 90)
         elapsed = time.time() - self._start_time
         parts: list = []

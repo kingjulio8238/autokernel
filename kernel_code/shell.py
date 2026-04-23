@@ -3170,6 +3170,13 @@ class KernelCodeShell:
         else:
             live_display.set_target(goal.target_speedup or 2.0)
 
+        # Table view derives per-worker runtime from the pre-run reference
+        # profile. Legacy view ignores this — no-op if the profile failed.
+        last_prof = getattr(self, "_last_profile", {}) or {}
+        ref_us_for_display = float(last_prof.get("ref_runtime_us", 0.0) or 0.0)
+        if ref_us_for_display > 0.0:
+            live_display.set_baseline(ref_us_for_display)
+
         from kernel_code.run_log import RunLogger
         run_logger = RunLogger()
         run_logger.start_run(
@@ -3247,21 +3254,26 @@ class KernelCodeShell:
             pass
 
         # --- Post-optimization charts (all at bottom) ---
-        self._console.print()
-        try:
-            from kernel_code.worker_plots import render_round_columns
-            if len(result.round_history) > 1:
-                self._console.print(render_round_columns(result.round_history))
-        except Exception:
-            pass
+        # Disabled by default — the Option B table view is the single source of
+        # visual truth. Opt back in with OPENKERNEL_LEGACY_DISPLAY=1 to restore
+        # round-columns / SOL trajectory / strategy timeline.
+        import os as _os
+        if _os.environ.get("OPENKERNEL_LEGACY_DISPLAY", "").strip() == "1":
+            self._console.print()
+            try:
+                from kernel_code.worker_plots import render_round_columns
+                if len(result.round_history) > 1:
+                    self._console.print(render_round_columns(result.round_history))
+            except Exception:
+                pass
 
-        try:
-            from kernel_code.sol_plots import render_sol_trajectory, render_strategy_timeline
-            if result.round_history:
-                self._console.print(render_sol_trajectory(result.round_history))
-                self._console.print(render_strategy_timeline(result.round_history))
-        except Exception:
-            pass
+            try:
+                from kernel_code.sol_plots import render_sol_trajectory, render_strategy_timeline
+                if result.round_history:
+                    self._console.print(render_sol_trajectory(result.round_history))
+                    self._console.print(render_strategy_timeline(result.round_history))
+            except Exception:
+                pass
 
         self._console.print()
 

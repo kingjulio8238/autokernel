@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 
+import pytest
 from rich.console import Console
 
 from kernel_code.kernel_profile import render_kernel_profile
@@ -124,7 +125,13 @@ def test_live_display_history_speedup_only_when_sol_missing() -> None:
     assert "1.80x" in rendered
 
 
-def test_live_display_band1_best_line_sol_primary() -> None:
+def test_live_display_band1_best_line_sol_primary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Band 1 only exists in the legacy 3-band layout. The Option B default
+    # shows a table instead — opt into legacy explicitly for this assertion.
+    monkeypatch.setenv("OPENKERNEL_LEGACY_DISPLAY", "1")
+
     buf = io.StringIO()
     console = Console(file=buf, width=100, force_terminal=False, color_system=None)
     disp = LiveOptimizationDisplay(console=console, problem="matmul", max_iterations=3)
@@ -143,7 +150,11 @@ def test_live_display_band1_best_line_sol_primary() -> None:
     assert "1.80x" in out
 
 
-def test_live_display_band1_best_line_speedup_fallback_when_no_sol() -> None:
+def test_live_display_band1_best_line_speedup_fallback_when_no_sol(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENKERNEL_LEGACY_DISPLAY", "1")
+
     buf = io.StringIO()
     console = Console(file=buf, width=100, force_terminal=False, color_system=None)
     disp = LiveOptimizationDisplay(console=console, problem="matmul", max_iterations=3)

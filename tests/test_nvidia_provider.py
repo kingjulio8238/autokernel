@@ -59,6 +59,47 @@ def test_nvidia_api_key_injection(monkeypatch: pytest.MonkeyPatch) -> None:
     assert os.environ["NVIDIA_API_KEY"] == "nvapi-test"
 
 
+def test_llmprovider_routes_nvidia_through_litellm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: LLMProvider must prefix nvidia model ids with ``openai/``
+    and set the NIM api_base, otherwise LiteLLM raises
+    ``BadRequestError: LLM Provider NOT provided``.
+
+    This is the failure mode that previously broke ``kernel_code.meta_reflect``.
+    """
+    from openkernel.config import ModelConfig
+    from openkernel.llm.provider import LLMProvider
+
+    monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-test")
+
+    provider = LLMProvider(
+        ModelConfig(provider="nvidia", model_id="deepseek-ai/deepseek-v3.2")
+    )
+
+    assert provider._api_key == "nvapi-test"
+    assert provider._api_base == "https://integrate.api.nvidia.com/v1"
+    assert provider._litellm_model_id() == "openai/deepseek-ai/deepseek-v3.2"
+
+    # Already-prefixed ids must not be double-prefixed.
+    prefixed = LLMProvider(
+        ModelConfig(provider="nvidia", model_id="openai/deepseek-ai/deepseek-v3.2")
+    )
+    assert prefixed._litellm_model_id() == "openai/deepseek-ai/deepseek-v3.2"
+
+
+def test_config_validates_nvidia_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``OpenKernelConfig.validate_config`` must know about the nvidia provider
+    so the default config (provider=nvidia) passes validation whenever
+    ``NVIDIA_API_KEY`` is set."""
+    from openkernel.config import OpenKernelConfig
+
+    monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-test")
+
+    # Default config uses provider="nvidia"; validation should now succeed.
+    OpenKernelConfig().validate_config()
+
+
 @pytest.mark.skipif(
     os.environ.get("NVIDIA_API_KEY") is None,
     reason="requires NVIDIA_API_KEY",

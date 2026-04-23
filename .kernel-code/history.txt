@@ -550,3 +550,24 @@
 
 # 2026-04-22 17:45:29.106607
 +/optimize
+
+# 2026-04-23 16:50:42.407159
++/exit
+
+# 2026-04-23 16:51:22.273110
++/config set nvidia_api_key <redacted>
+
+# 2026-04-23 16:51:32.973255
++/optimize reference.py target SOL 0.5
+
+# 2026-04-23 16:52:18.404634
++/exit
+
+# 2026-04-23 16:55:05.474452
++/optimize reference.py target SOL 0.5
+
+# 2026-04-23 16:57:32.173663
++/exit
+
+# 2026-04-23 17:00:02.292031
++/optimize reference.py target SOL 0.5 L40S $1

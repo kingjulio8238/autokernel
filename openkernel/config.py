@@ -118,6 +118,7 @@ class OpenKernelConfig(BaseModel):
         "anthropic": "ANTHROPIC_API_KEY",
         "openai": "OPENAI_API_KEY",
         "google": "GOOGLE_API_KEY",
+        "nvidia": "NVIDIA_API_KEY",
     }
 
     def validate_config(self) -> None:
