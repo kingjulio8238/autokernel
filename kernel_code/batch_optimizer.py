@@ -659,7 +659,7 @@ def run_suite(
     budget_per_problem: float = 0.50,
     concurrency: int = 4,
     date: str | None = None,
-    model: str = "o3-mini",
+    model: str = "deepseek-ai/deepseek-v3.2",
     target_sol: float = 0.80,
     settings: Any = None,
     leaderboard_root: Path | None = None,

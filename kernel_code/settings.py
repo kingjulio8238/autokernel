@@ -75,8 +75,8 @@ class KernelCodeSettings:
     """Merged settings from global -> project -> local."""
 
     # Model
-    default_model: str = "openai/MiniMax-M2.5"
-    default_provider: str = "minimax"
+    default_model: str = "deepseek-ai/deepseek-v3.2"
+    default_provider: str = "nvidia"
 
     # Backend
     default_backend: str = "triton"

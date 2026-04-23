@@ -109,9 +109,9 @@ def get_default_model() -> ModelConfig:
     The default is read from ``recommended.json``'s ``"default"`` key.  If the
     file is missing or the key is absent, falls back to Claude Sonnet 4.
     """
-    fallback_id = "openai/MiniMax-M2.5"
-    fallback_provider = "minimax"
-    fallback_api_base = "https://api.minimax.io/v1"
+    fallback_id = "deepseek-ai/deepseek-v3.2"
+    fallback_provider = "nvidia"
+    fallback_api_base = "https://integrate.api.nvidia.com/v1"
 
     if not _RECOMMENDED_PATH.exists():
         return ModelConfig(

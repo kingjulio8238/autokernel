@@ -43,8 +43,8 @@ class ModelConfig(BaseModel):
     with a custom api_base pointing to ``api.minimax.io``.
     """
 
-    provider: str = "minimax"  # minimax, groq, openai, anthropic, google, local, etc.
-    model_id: str = "openai/MiniMax-M2.5"  # openai/ prefix for litellm with custom api_base
+    provider: str = "nvidia"  # nvidia, minimax, groq, openai, anthropic, google, local, etc.
+    model_id: str = "deepseek-ai/deepseek-v3.2"  # NVIDIA NIM (OpenAI-compatible, free 40 RPM)
     api_key: str | None = None  # loaded from env if not set
     api_base: str | None = None  # set per-provider; None = litellm uses provider default
     temperature: float = 0.7
