@@ -164,13 +164,20 @@ class LiveOptimizationDisplay:
         self._use_table_layout: bool = (
             os.environ.get("OPENKERNEL_LEGACY_DISPLAY", "").strip() != "1"
         )
-        # Finalized rows, in append order. Each row:
+        # Live rows, in append order. Each row:
         #   {id, global_id, round_num, speedup, runtime_us, sol_score,
-        #    status: "passed" | "cancelled" | "failed"}
+        #    status: "working" | "passed" | "failed" | "cancelled" | "stopped"}
+        # Rows are created the first time a worker reports any progress and
+        # updated in place on subsequent polls so the table animates as
+        # rounds complete instead of waiting until finish().
         self._worker_rows: list[dict] = []
-        # Global IDs we've already materialized a row for (dedupe the
-        # 2-Hz polling that keeps re-reporting the same "passed" state).
-        self._emitted_global_ids: set[int] = set()
+        # Index: global_id -> row dict (reference into _worker_rows) for O(1)
+        # in-place updates from the 2-Hz poller.
+        self._rows_by_gid: dict[int, dict] = {}
+        # Global IDs that have reached a terminal state ("passed" / "failed"
+        # / "cancelled" / "stopped"). Terminal rows stop updating so a late
+        # "working" tick can't overwrite a final result.
+        self._terminal_gids: set[int] = set()
         # Baseline runtime (µs) captured from the pre-run reference profile.
         # ``None`` means the caller didn't supply one — runtime column renders
         # as "—" in that case.
@@ -218,18 +225,13 @@ class LiveOptimizationDisplay:
             if rnd > 0 and speedup > 0 and (not history or history[-1][0] < rnd):
                 history.append((rnd, speedup, now))
 
-        # Table layout: emit one row the first time a worker reaches a
-        # terminal success state. Other terminal states ("stopped"/"failed")
-        # are recorded at finish() so we don't race pollers marking a
-        # worker "stopped" for a single tick mid-search.
+        # Table layout: create a row the first time a worker reports
+        # progress, and update it in place on every subsequent poll so the
+        # table animates as rounds complete. Terminal states
+        # ("passed"/"failed"/"cancelled"/"stopped") are locked once reached.
         if self._use_table_layout:
             for w in workers:
-                gid = w.get("global_id", w.get("id", 0))
-                if gid in self._emitted_global_ids:
-                    continue
-                if w.get("status") != "passed":
-                    continue
-                self._append_worker_row(w, terminal_status="passed")
+                self._upsert_worker_row(w)
         self._refresh()
 
     def update_iteration(
@@ -270,16 +272,20 @@ class LiveOptimizationDisplay:
     def finish(self, stop_reason: str = "") -> None:
         self._current_phase = ""
         self._run_finalized = True
-        # Table layout: any worker that never reached "passed" gets a
-        # terminal row so the user sees the full 1:1 worker→row mapping.
+        # Table layout: lock any still-live row to a terminal state so the
+        # final frame shows the full 1:1 worker→row mapping.
         if self._use_table_layout:
             for w in self._worker_states:
                 gid = w.get("global_id", w.get("id", 0))
-                if gid in self._emitted_global_ids:
+                if gid in self._terminal_gids:
                     continue
                 status = w.get("status", "")
                 terminal = "stopped" if status == "stopped" else "cancelled"
-                self._append_worker_row(w, terminal_status=terminal)
+                if gid not in self._rows_by_gid:
+                    self._upsert_worker_row(dict(w, status=terminal))
+                else:
+                    self._rows_by_gid[gid]["status"] = terminal
+                self._terminal_gids.add(gid)
         self._refresh()
         if self._live:
             self._live.stop()
@@ -291,29 +297,55 @@ class LiveOptimizationDisplay:
         if self._live:
             self._live.console.print(message)
 
-    def _append_worker_row(self, worker: dict, terminal_status: str) -> None:
-        """Append a table-view row for a completed worker. Idempotent per
-        ``global_id`` — the caller is expected to pre-check, but we also
-        guard here so double-invocations at finalize time are safe."""
-        gid = worker.get("global_id", worker.get("id", 0))
-        if gid in self._emitted_global_ids:
-            return
-        self._emitted_global_ids.add(gid)
+    _TERMINAL_STATUSES = ("passed", "failed", "cancelled", "stopped")
 
+    def _upsert_worker_row(self, worker: dict) -> None:
+        """Create or update the table row for ``worker``. Rows stay live
+        (status/speedup/runtime update each poll) until the worker reports
+        a terminal status — once terminal, the row is locked so a late
+        "working" tick can't overwrite a final result.
+        """
+        gid = worker.get("global_id", worker.get("id", 0))
+        if gid in self._terminal_gids:
+            return
+
+        status = worker.get("status", "") or "working"
         speedup = float(worker.get("speedup", 0.0) or 0.0)
         runtime_us: float | None = None
         if speedup > 0.0 and self._baseline_us and self._baseline_us > 0.0:
             runtime_us = self._baseline_us / speedup
 
-        self._worker_rows.append({
-            "id": worker.get("id", gid),
-            "global_id": gid,
-            "round_num": self._current_round,
-            "speedup": speedup,
-            "runtime_us": runtime_us,
-            "sol_score": None,  # filled in update_iteration for the winner
-            "status": terminal_status,
-        })
+        action = (worker.get("action") or "").strip()
+        row = self._rows_by_gid.get(gid)
+        if row is None:
+            row = {
+                "id": worker.get("id", gid),
+                "global_id": gid,
+                "round_num": self._current_round,
+                "speedup": speedup,
+                "runtime_us": runtime_us,
+                "sol_score": None,
+                "status": status,
+                "action": action,
+            }
+            self._rows_by_gid[gid] = row
+            self._worker_rows.append(row)
+        else:
+            # Monotonic on speedup — never regress the displayed best.
+            if speedup > float(row.get("speedup") or 0.0):
+                row["speedup"] = speedup
+                row["runtime_us"] = runtime_us
+            row["status"] = status
+            # Only overwrite action on a non-empty update — terminal sweeps
+            # carry diagnostics that the 2-Hz poller doesn't, and we want
+            # them to stick.
+            if action:
+                row["action"] = action
+            if self._current_round and not row.get("round_num"):
+                row["round_num"] = self._current_round
+
+        if status in self._TERMINAL_STATUSES:
+            self._terminal_gids.add(gid)
 
     def _refresh(self) -> None:
         if self._live:
@@ -369,18 +401,52 @@ class LiveOptimizationDisplay:
 
         # ---- Table -----------------------------------------------------
         table = Table(
-            box=box.SIMPLE,
+            box=box.ROUNDED,  # full borders (top/bottom/sides) around the table
             show_header=True,
+            show_edge=True,
+            show_lines=True,  # horizontal divider between every row
             header_style="bold white",
             border_style="white",
-            pad_edge=False,
+            # pad_edge=True so the leftmost/rightmost columns get symmetric
+            # padding. Combined with justify="center" on every column this
+            # makes headers and cells visually centered under/over each other.
+            pad_edge=True,
             padding=(0, 2),
             expand=False,
         )
-        table.add_column("worker", style="white", no_wrap=True)
-        table.add_column("runtime", style="white", justify="right", no_wrap=True)
-        table.add_column("% SOL", style="white", justify="right", no_wrap=True)
-        table.add_column("speedup", style="white", justify="right", no_wrap=True)
+        # All columns center-aligned (headers + cells) for a consistent
+        # visual grid. Rich applies column ``justify`` to both header and
+        # body cells, so centering here fixes the user-visible misalignment
+        # on column headings that was most noticeable on the numeric columns.
+        table.add_column("worker", style="white", justify="center", header_style="bold white", no_wrap=True)
+        table.add_column("runtime", style="white", justify="center", header_style="bold white", no_wrap=True)
+        table.add_column("% SOL", style="white", justify="center", header_style="bold white", no_wrap=True)
+        table.add_column("speedup", style="white", justify="center", header_style="bold white", no_wrap=True)
+        table.add_column("status", style="white", justify="center", header_style="bold white", no_wrap=True)
+
+        # Status label mapping \u2014 no color, no bold. Minimalist. The status
+        # column reads as plain white text for every outcome; "best" is
+        # communicated via a bold speedup cell on the winning row instead.
+        _STATUS_LABEL = {
+            "passed":    "success",
+            "failed":    "failed",
+            "cancelled": "cancelled",
+            "stopped":   "stopped",
+            "working":   "running",
+            "waiting":   "queued",
+        }
+
+        # Find the winning row: passed worker with the maximum speedup. Ties
+        # break on first occurrence so the marker is deterministic.
+        best_gid: object = None
+        best_speedup = 0.0
+        for row in self._worker_rows:
+            if row.get("status") != "passed":
+                continue
+            sp = float(row.get("speedup") or 0.0)
+            if sp > best_speedup:
+                best_speedup = sp
+                best_gid = row.get("global_id", row.get("id", 0))
 
         for row in self._worker_rows:
             gid = row.get("global_id", row.get("id", 0))
@@ -391,33 +457,37 @@ class LiveOptimizationDisplay:
             speedup = float(row.get("speedup") or 0.0)
             runtime_us = row.get("runtime_us")
             sol_score = row.get("sol_score")
-            status = row.get("status", "")
+            status = row.get("status", "") or "waiting"
 
-            if status == "passed" and speedup > 0.0:
-                runtime_cell = (
-                    f"{runtime_us:.0f} \u00b5s" if runtime_us is not None else "\u2014"
-                )
-                sol_cell = (
-                    f"{int(round(sol_score * 100))}%" if sol_score else "\u2014"
-                )
-                speedup_cell = f"{speedup:.2f}\u00d7"
-                table.add_row(
-                    Text(worker_label, style="bold white"),
-                    Text(runtime_cell, style="white"),
-                    Text(sol_cell, style="white"),
-                    Text(speedup_cell, style="bold white"),
-                )
-            else:
-                label = {
-                    "cancelled": "cancelled",
-                    "stopped": "stopped",
-                }.get(status, status or "\u2014")
-                table.add_row(
-                    Text(worker_label, style="white"),
-                    Text("\u2014", style="white"),
-                    Text("\u2014", style="white"),
-                    Text(label, style="white"),
-                )
+            runtime_cell = (
+                f"{runtime_us:.0f} \u00b5s" if runtime_us is not None else "\u2014"
+            )
+            sol_cell = (
+                f"{int(round(sol_score * 100))}%" if sol_score else "\u2014"
+            )
+            speedup_cell = f"{speedup:.2f}\u00d7" if speedup > 0.0 else "\u2014"
+            status_label = _STATUS_LABEL.get(status, status or "\u2014")
+            # Append the diagnostic action on non-success terminals so the
+            # user can see *why* a row ended. Example: "failed (syntax
+            # error)", "cancelled (LLM timeout)".
+            action = (row.get("action") or "").strip()
+            if action and status in ("failed", "cancelled", "stopped"):
+                status_label = f"{status_label} ({action})"
+
+            # Only the single winning row gets a bold speedup cell \u2014 that's
+            # the sole visual signal of "this is the best". No color coding
+            # on status, no "(best)" appendage: the bold number is the
+            # signal.
+            is_best = best_gid is not None and gid == best_gid
+            speedup_style = "bold white" if is_best else "white"
+
+            table.add_row(
+                Text(worker_label, style="white"),
+                Text(runtime_cell, style="white"),
+                Text(sol_cell, style="white"),
+                Text(speedup_cell, style=speedup_style),
+                Text(status_label, style="white"),
+            )
 
         if not self._worker_rows:
             # Empty-state placeholder so the table renders something immediately.
@@ -425,7 +495,8 @@ class LiveOptimizationDisplay:
                 Text("\u2014", style="white"),
                 Text("\u2014", style="white"),
                 Text("\u2014", style="white"),
-                Text("waiting...", style="white"),
+                Text("\u2014", style="white"),
+                Text("waiting\u2026", style="#999999"),
             )
 
         parts.append(table)

@@ -24,6 +24,7 @@ import shlex
 import uuid
 import webbrowser
 from collections.abc import Callable
+from contextlib import nullcontext as _nullcontext
 from pathlib import Path
 
 from rich.console import Console
@@ -109,6 +110,86 @@ _SESSIONS_DIR = _PROJECT_ROOT / "cache" / "sessions"
 
 # History file for prompt_toolkit (lives alongside other dot-files)
 _HISTORY_PATH = _PROJECT_ROOT / ".kernel-code" / "history.txt"
+
+
+# Per-GPU peak HBM bandwidth in GB/s. Mirrors welcome.py's _GPU_SPECS but
+# as a numeric value (the welcome table stores display strings like
+# "864 GB/s"). Used by the speed-of-light ceiling check.
+_HBM_BW_GBPS: dict[str, float] = {
+    "H100": 3350.0,
+    "A100-80GB": 2039.0,
+    "A100-40GB": 1555.0,
+    "L40S": 864.0,
+    "RTX4090": 1008.0,
+}
+
+# Bytes per element for the dtypes we recognize in reference sources.
+_DTYPE_BYTES: dict[str, int] = {
+    "float16": 2, "fp16": 2, "half": 2, "bfloat16": 2, "bf16": 2,
+    "float32": 4, "fp32": 4, "float": 4,
+    "float64": 8, "fp64": 8, "double": 8,
+    "int8": 1, "uint8": 1, "bool": 1,
+    "int16": 2, "int32": 4, "int": 4,
+    "int64": 8, "long": 8,
+}
+
+
+def _hbm_ceiling_check(
+    ref_us: float,
+    ref_code: str,
+    classif,
+    hardware: str,
+    target_speedup: float,
+) -> str | None:
+    """Return a warning string if ``target_speedup`` exceeds the HBM
+    speed-of-light ceiling for this problem, else ``None``.
+
+    Only fires for memory-bound problems with a meaningful tensor-size
+    estimate. We intentionally skip compute-bound problems (matmul,
+    attention) because their ceiling is TFLOPs, not HBM — a separate
+    check (not yet implemented) would cover those.
+    """
+    if ref_us <= 0 or target_speedup <= 0:
+        return None
+    if not getattr(classif, "is_memory_bound_likely", False):
+        return None
+    elements = int(getattr(classif, "estimated_tensor_elements", 0) or 0)
+    if elements < 1024:
+        return None
+    bw_gbps = _HBM_BW_GBPS.get(hardware)
+    if not bw_gbps:
+        return None
+
+    import re as _re
+    dtype_match = _re.search(
+        r"torch\.(float16|bfloat16|float32|float64|int8|uint8|int16|int32|int64|bool|half|float|double|long|int)\b",
+        ref_code,
+    )
+    dtype = dtype_match.group(1) if dtype_match else "float32"
+    bytes_per = _DTYPE_BYTES.get(dtype, 4)
+
+    # Assume one read + one write pass (lower bound for elementwise; real
+    # ops may touch more tensors, which makes the ceiling tighter — we're
+    # being generous so we only warn on clearly unreachable targets).
+    min_bytes = elements * bytes_per * 2
+    min_time_us = min_bytes / (bw_gbps * 1e9) * 1e6
+    if min_time_us <= 0:
+        return None
+    ceiling = ref_us / min_time_us
+
+    # Warn only when the target is within 5% of the ceiling or above.
+    # Below that we have headroom and the advisor can reasonably chase it.
+    if target_speedup <= ceiling * 0.95:
+        return None
+
+    return (
+        f"Target {target_speedup:.2f}× is at/above HBM speed-of-light "
+        f"(~{ceiling:.2f}× on {hardware}: "
+        f"{elements:,} × {bytes_per}B × 2 = {min_bytes / 1e9:.2f} GB "
+        f"at {bw_gbps:.0f} GB/s → {min_time_us:.0f}µs floor vs "
+        f"{ref_us:.0f}µs baseline). The kernel cannot physically "
+        f"exceed this."
+    )
 
 
 # ------------------------------------------------------------------
@@ -482,7 +563,7 @@ class KernelCodeShell:
         )
         from kernel_code.settings import inject_api_keys as _inject
         _inject(self._settings)
-        _hw = detect_hw(self._settings)
+        _hw = detect_hw(settings=self._settings)
         # Returning = has run before (settings exist, or run logs exist, or session resumed)
         _returning = (
             bool(self._explicit_session_id)
@@ -1755,6 +1836,9 @@ class KernelCodeShell:
         budget = float(budget_str.lstrip("$"))
 
         # --- Step 7: Time limit ---
+        # Default "none" (unlimited) — budget + max_rounds already cap the run.
+        # A wall-clock cap tends to chop off a run right after the target is
+        # met (exploratory round mid-way), so users must opt in explicitly.
         time_str = _ask("Time limit", "none", "e.g. 30m, 1h, or none")
         time_limit = None
         if time_str and time_str != "none":
@@ -1764,6 +1848,14 @@ class KernelCodeShell:
                 time_limit = int(time_str[:-1]) * 3600
             else:
                 time_limit = int(time_str)
+            # Reject obviously-typo'd tiny caps — a single round takes >60s
+            # once Modal provisioning + LLM generation + eval are counted.
+            if time_limit is not None and time_limit < 60:
+                self._console.print(
+                    f"[yellow]Time limit {time_limit}s is too small "
+                    f"(a single round takes at least a minute) — using 'none'.[/yellow]"
+                )
+                time_limit = None
 
         # --- Step 8: Rounds ---
         rounds_str = _ask("Max rounds", "5", "outer loop iterations")
@@ -2435,9 +2527,9 @@ class KernelCodeShell:
     def _cmd_profile_ref(self, args_str: str, *, quiet: bool = False) -> None:
         """Profile the reference kernel on Modal — shows runtime, bottleneck, SOL.
 
-        ``quiet=True`` (used by the /optimize autopath) runs only the Modal
-        eval: prints ``> profiling reference...`` and ``> reference profiled``
-        on success, and skips the kernel-profile card + guidance. Use full
+        ``quiet=True`` (used by the /optimize autopath) runs the Modal eval
+        under a transient spinner ("profiling reference…") that auto-clears
+        on exit, and skips the kernel-profile card + guidance. Use full
         output from ``/profile`` in the REPL.
         """
         from pathlib import Path as _Path
@@ -2481,23 +2573,43 @@ class KernelCodeShell:
 
         if not quiet:
             self._console.print("  \u23bf  [#999999]Evaluating on Modal (5 trials for stability)...[/#999999]")
-        else:
-            self._console.print("  [white]> profiling reference...[/white]")
 
-        # Multi-trial baseline: run N times, take median + report variance
+        # Multi-trial baseline: run N times, take median + report variance.
+        # In quiet mode, wrap in a transient spinner (same dots as the
+        # worker status line); both the spinner and any transient context
+        # disappear on exit so the final UI starts clean.
         trials = []
+        status_cm = (
+            self._console.status(
+                "[white]profiling reference\u2026[/white]",
+                spinner="dots",
+                spinner_style="white",
+            )
+            if quiet
+            else _nullcontext()
+        )
         try:
             import modal
+            import concurrent.futures as _cf
             eval_fn = modal.Function.from_name("openkernel-eval", "eval_kernel_on_gpu")
-            for i in range(5):
-                r = eval_fn.remote(
+
+            def _one_trial(_: int) -> dict:
+                return eval_fn.remote(
                     kernel_source=kernel_source,
                     reference_source=reference_source,
                     eval_mode="fast",
                     problem_format=pf,
                 )
-                if r.get("ref_runtime_us", 0) > 0:
-                    trials.append(r)
+
+            # Parallelize the 5 trials. They're independent measurements;
+            # Modal fans them out across containers (or queues onto one
+            # warm one) either way, and we stop paying the serial tax.
+            # Wallclock: was 5 × (eval time) serial; now max(eval time).
+            with status_cm:
+                with _cf.ThreadPoolExecutor(max_workers=5) as _pool:
+                    for r in _pool.map(_one_trial, range(5)):
+                        if r.get("ref_runtime_us", 0) > 0:
+                            trials.append(r)
         except Exception as exc:
             self._console.print(f"  [#ff6b80]Profile failed: {exc}[/#ff6b80]")
             return
@@ -2561,9 +2673,8 @@ class KernelCodeShell:
                 )
                 self._console.print("  \u23bf  [#999999]Run /optimize to generate a faster kernel[/#999999]")
             self._console.print()
-        else:
-            self._console.print("  [white]> reference profiled[/white]")
-            self._console.print()
+        # Quiet mode: spinner already auto-cleared; the caller wipes the
+        # "Loaded …" line right before the live display starts.
 
     def _cmd_roofline(self, args_str: str) -> None:
         """/roofline [--me] [--mem] — show roofline plot."""
@@ -2983,6 +3094,9 @@ class KernelCodeShell:
             goal.budget_usd = float(val.lstrip("$"))
 
         # Time limit
+        # Default "none" (unlimited) — budget + max_rounds already bound the
+        # run. A wall-clock cap risks cutting off mid-exploratory-round right
+        # after the target is met, so users must opt in.
         if "time" not in goal.explicit:
             val = _ask("Time limit", "none", "e.g. 30m, 1h, or none")
             if val and val != "none":
@@ -2990,6 +3104,14 @@ class KernelCodeShell:
                     goal.time_limit_seconds = int(val[:-1]) * 60
                 elif val.endswith("h"):
                     goal.time_limit_seconds = int(val[:-1]) * 3600
+                # Reject values < 60s — a single round can't finish that fast
+                # once Modal provisioning + LLM generation + eval are counted.
+                if 0 < goal.time_limit_seconds < 60:
+                    self._console.print(
+                        f"  [yellow]Time limit {goal.time_limit_seconds}s is too small "
+                        f"(a single round takes at least a minute) — using 'none'.[/yellow]"
+                    )
+                    goal.time_limit_seconds = 0
 
         # --- Validate ---
         from kernel_code.goal_parser import validate_goal
@@ -3039,6 +3161,19 @@ class KernelCodeShell:
         # Clear the optimization plan + confirm prompt so the run starts on a
         # clean screen (table + quiet profile only).
         self._console.clear()
+
+        # --- Pre-warm Modal (fire-and-forget) ------------------------------
+        # Fire an async health_check so the L40S container starts booting
+        # while we load/sanitize/classify/profile locally. By the time the
+        # baseline profile's first eval lands, the container is already
+        # warm and we skip the ~30s cold boot on the critical path.
+        # Failures are silent — this is a best-effort optimization.
+        try:
+            import modal as _modal
+            _warm_fn = _modal.Function.from_name("openkernel-eval", "health_check")
+            _warm_fn.spawn()  # non-blocking, discard return handle
+        except Exception:
+            pass
 
         # --- Save as reference.py if it's a different file ---
         if goal.file != "reference.py":
@@ -3103,6 +3238,20 @@ class KernelCodeShell:
                     f"PyTorch's fused elementwise kernels are already near-optimal at this size."
                 )
 
+            # HBM speed-of-light ceiling check. For memory-bound problems,
+            # the hardware bandwidth caps how much speedup is achievable
+            # regardless of generator quality. If the user's target sits at
+            # or above that ceiling we must say so before burning budget.
+            sol_ceiling_info = _hbm_ceiling_check(
+                ref_us=ref_us,
+                ref_code=ref_src,
+                classif=classif,
+                hardware=goal.hardware,
+                target_speedup=goal.target_speedup or 0.0,
+            )
+            if sol_ceiling_info:
+                warnings_list.append(sol_ceiling_info)
+
             if warnings_list:
                 self._console.print()
                 self._console.print("  [#ffc107]\u26a0  Unwinnable problem warning:[/#ffc107]")
@@ -3153,6 +3302,26 @@ class KernelCodeShell:
                         "  [#999999]Keeping Triton. If all workers fail, "
                         "try CUDA next run.[/#999999]"
                     )
+        except Exception:
+            pass  # Non-critical
+
+        # --- Auto-route elementwise / launch-bound to a cheaper non-reasoning model ---
+        # Reasoning traces are wasted on simple elementwise kernels; gpt-4o-mini
+        # lands correct kernels much faster. Respect the user's explicit model choice.
+        # Defer the user-visible notice until after live_display starts — the
+        # pre-display console.clear() would otherwise wipe a raw print.
+        _routing_notice: str | None = None
+        try:
+            op_type_val = getattr(classif.op_type, "value", "")
+            should_route = (
+                op_type_val == "elementwise" or bool(classif.is_launch_bound_likely)
+            )
+            if should_route and "model" not in getattr(goal, "explicit", set()):
+                goal.model = "gpt-4o-mini"
+                _routing_notice = (
+                    f"  [#999999]Auto-routing to gpt-4o-mini for {op_type_val} "
+                    f"problem (reasoning model not needed)[/#999999]"
+                )
         except Exception:
             pass  # Non-critical
 
@@ -3210,7 +3379,15 @@ class KernelCodeShell:
             },
         )
 
+        # Wipe the pre-run scrollback ("Loaded … → reference.py", transient
+        # profile spinner residue, any backend-suggestion prompt) so the
+        # live display opens on a clean screen.
+        self._console.clear()
         live_display.start()
+        # Surface any pre-run notices (routing decisions, etc.) inside the
+        # Live context so they aren't wiped by the clear above.
+        if _routing_notice:
+            live_display.print_permanent(_routing_notice)
         optimizer = MetaOptimizer(
             goal=spec,
             settings=self._settings,
@@ -3228,15 +3405,35 @@ class KernelCodeShell:
 
         self._last_auto_result = result
 
+        # Reconcile the summary "best" with what the table actually showed.
+        # ``result.best_speedup`` is the Modal re-eval of each round's
+        # winner kernel (canonical, but noisy). The live display rows carry
+        # per-worker iteration speedups (what the user reads off the
+        # table). When those disagree at the second decimal — e.g. the
+        # table shows 1.00× (from 0.9975) while result says 0.99× (from a
+        # 0.995 Modal re-eval) — the summary looked broken. Use whichever
+        # is larger so the two sources of truth agree in the display.
+        display_best = float(result.best_speedup or 0.0)
+        try:
+            _max_row = max(
+                (float(r.get("speedup") or 0.0) for r in live_display._worker_rows),
+                default=0.0,
+            )
+            if _max_row > display_best:
+                display_best = _max_row
+        except Exception:
+            pass
+
         # --- Result summary (compact) ---
+        from kernel_code.auto_optimizer import fmt_speedup as _fmt_s
         self._console.print()
         if result.target_reached:
             self._console.print(
-                f"  [bold #4eba65]TARGET REACHED: {result.best_speedup:.2f}x[/bold #4eba65]"
+                f"  [bold #4eba65]TARGET REACHED: {_fmt_s(display_best)}[/bold #4eba65]"
             )
         else:
             self._console.print(
-                f"  [white]Best: {result.best_speedup:.2f}x "
+                f"  [white]Best: {_fmt_s(display_best)} "
                 f"(target: {goal.target_speedup:.1f}x) "
                 f"\u00b7 {result.rounds_completed} round{'' if result.rounds_completed == 1 else 's'} "
                 f"\u00b7 ${result.total_cost_usd:.2f} "
@@ -3249,7 +3446,7 @@ class KernelCodeShell:
             self._console.print(f"  [#4eba65]Saved:[/#4eba65] reference_optimized.py")
         elif result.best_kernel:
             self._console.print(
-                f"  [#999999]No kernel beat baseline (best {result.best_speedup:.2f}x) "
+                f"  [#999999]No kernel beat baseline (best {_fmt_s(display_best)}) "
                 f"— reference_optimized.py unchanged.[/#999999]"
             )
 

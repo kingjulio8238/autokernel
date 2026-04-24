@@ -66,11 +66,17 @@ def _render_headline(
     speedup: float,
     sol_score: float,
     bottleneck_type: str,
+    profile_available: bool = True,
 ) -> None:
     """Emit the dual-display headline block.
 
     SOL primary when ``sol_score > 0`` (speedup drops to dim secondary).
     Fallback: speedup-only with explicit ``SOL unknown`` tag.
+
+    When ``profile_available`` is False the SOL number is still displayed
+    (it's the runtime-relative fallback: ref_us / kernel_us rescaled, which
+    is meaningful) but the "X% of hardware peak" suffix is replaced with
+    "runtime-relative" so we don't falsely claim we measured peak.
     """
     bn_label = (
         bottleneck_type.replace("_", "-")
@@ -86,7 +92,10 @@ def _render_headline(
         else:
             sol_color = _CLAY
         pct = int(sol_score * 100)
-        suffix_bits = [f"{pct}% of hardware peak"]
+        if profile_available:
+            suffix_bits = [f"{pct}% of hardware peak"]
+        else:
+            suffix_bits = ["runtime-relative"]
         if bn_label:
             suffix_bits.append(bn_label)
         suffix = " · ".join(suffix_bits)
@@ -176,6 +185,7 @@ def render_kernel_profile(
         _render_headline(
             c, speedup=speedup, sol_score=float(prof.get("sol_score", 0.0) or 0.0),
             bottleneck_type=prof.get("bottleneck_type", ""),
+            profile_available=bool(prof.get("profile_available", True)),
         )
 
     _sol_present = float(prof.get("sol_score", 0.0) or 0.0) > 0

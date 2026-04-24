@@ -10,7 +10,7 @@ Usage::
         target_speedup=2.0,
         target_sol=0.80,
         max_budget_usd=5.00,
-        max_time_seconds=1800,
+        max_time_seconds=None,  # None = unlimited, rely on budget/rounds cap
         reference_path="reference.py",
     )
 """
@@ -33,7 +33,12 @@ class GoalSpec:
 
     # Resource limits
     max_budget_usd: float = 5.00  # hard cost cap
-    max_time_seconds: int | None = None  # wall-clock cap (None = no limit)
+    # Wall-clock cap. Default None = unlimited; budget + max_rounds are the real
+    # stops. A time cap is a blunt instrument — it can cut off a run mid-round
+    # right after a target is met (see exploratory-round branch in
+    # auto_optimizer) — so callers must opt in rather than inherit a surprise
+    # default.
+    max_time_seconds: int | None = None
     max_rounds: int = 5  # outer loop cap (each round = one orchestrator run)
 
     # Problem

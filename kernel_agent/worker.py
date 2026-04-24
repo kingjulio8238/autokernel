@@ -524,7 +524,14 @@ class VerificationWorker:
         Call the LLM provider for the configured model.
 
         Captures prompt and response on instance for dev logging.
+
+        Retries on transient provider failures (rate limits, timeouts,
+        connection errors) with exponential backoff — these would otherwise
+        surface as silent worker failures that fall back to mock refinement
+        and produce garbage kernels.
         """
+        import time as _time
+
         if not self.provider:
             raise RuntimeError(f"No provider available for model {self.openai_model}")
 
@@ -535,9 +542,49 @@ class VerificationWorker:
         if self.high_reasoning_effort:
             kwargs["high_reasoning_effort"] = True
 
-        response = self.provider.get_response(self.openai_model, messages, **kwargs)
-        self._last_response = response.content
-        return response.content
+        # Retry transient failures with exponential backoff. Bug spec classes
+        # by exception-class name + message substring so we don't have to
+        # import every provider SDK just to catch their exception types.
+        _TRANSIENT_NAMES = (
+            "RateLimitError", "APITimeoutError", "APIConnectionError",
+            "Timeout", "ServiceUnavailable", "InternalServerError",
+        )
+        _TRANSIENT_SUBSTRINGS = (
+            "rate limit", "timeout", "timed out", "connection",
+            "temporarily unavailable", "overloaded", "502", "503", "504",
+        )
+
+        def _is_transient(exc: BaseException) -> bool:
+            name = type(exc).__name__
+            if any(t in name for t in _TRANSIENT_NAMES):
+                return True
+            msg = str(exc).lower()
+            return any(s in msg for s in _TRANSIENT_SUBSTRINGS)
+
+        max_attempts = 3
+        delays = (1.0, 2.0, 4.0)
+        last_exc: BaseException | None = None
+        for attempt in range(max_attempts):
+            try:
+                response = self.provider.get_response(
+                    self.openai_model, messages, **kwargs
+                )
+                self._last_response = response.content
+                return response.content
+            except BaseException as exc:
+                last_exc = exc
+                if attempt < max_attempts - 1 and _is_transient(exc):
+                    self.logger.warning(
+                        "LLM call failed (%s: %s), retry %d/%d in %.1fs",
+                        type(exc).__name__, str(exc)[:120],
+                        attempt + 1, max_attempts - 1, delays[attempt],
+                    )
+                    _time.sleep(delays[attempt])
+                    continue
+                raise
+
+        # Unreachable (loop either returns or raises), but keep type-checker happy.
+        raise last_exc if last_exc else RuntimeError("LLM call failed with no exception")
 
     def _refine_kernel(
         self,
@@ -564,7 +611,15 @@ class VerificationWorker:
                 # the LLM sees enough error-context to iterate, without so
                 # much history that the output gets truncated.
                 history_context = ""
-                recent = self.history[-4:] if self.history else []
+                # `self.history` is a deque (line 201), which does NOT support
+                # slicing — ``deque[-4:]`` raises ``TypeError: sequence index
+                # must be integer, not 'slice'``. Convert to list first.
+                # This was the silent cause of "Error refining kernel…" on
+                # ~25% of workers for months: the first refinement attempt in
+                # any worker with ≥1 past attempt tripped the TypeError on
+                # line 1 of the try block, bailed to the (now-removed) mock
+                # fallback, and emitted garbage kernels.
+                recent = list(self.history)[-4:] if self.history else []
                 if recent:
                     history_context = "\n\nRECENT ATTEMPTS (most recent last):\n"
                     base = len(self.history) - len(recent) + 1
@@ -615,17 +670,28 @@ class VerificationWorker:
                     return kernel_code
 
             except Exception as e:
-                self.logger.error(f"Error refining kernel with LLM API: {e}")
-                # Fall back to mock refinement
+                # Surface the exception class + message + full traceback (was:
+                # bare `{e}` which loses the type; then just type+message which
+                # hid traceback). Include traceback at exc_info so future
+                # forensics have the call stack. The post-run diagnostic sweep
+                # keys off this log line to classify the failure.
+                self.logger.error(
+                    "Error refining kernel with LLM API: %s: %s",
+                    type(e).__name__, str(e)[:300],
+                    exc_info=True,
+                )
+                # Return the original kernel unchanged. The prior behavior
+                # fell through to a "mock refinement" path that appended
+                # `# Refinement attempt N` to the kernel and returned it as
+                # if it had been refined — the outer loop then evaluated this
+                # unchanged kernel and counted it as a legitimate iteration,
+                # wasting budget on a guaranteed no-op. Returning the input
+                # kernel here makes the failure visible without polluting the
+                # search.
+                return kernel_code
 
-        # Mock refinement (fallback)
-        self.logger.info("Refining kernel (mock implementation)")
-
-        # For testing, make a simple modification
-        if "error" in error_info.get("stderr", "").lower():
-            # Add a comment to show refinement happened
-            return f"# Refinement attempt {len(self.history) + 1}\n{kernel_code}"
-
+        # No provider available — return the input unchanged. Mock-refinement
+        # path removed; see the exception branch above for rationale.
         return kernel_code
 
     def _log_round(

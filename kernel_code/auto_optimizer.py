@@ -82,6 +82,20 @@ def _clear_per_run_env() -> None:
         os.environ.pop(k, None)
 
 
+def fmt_speedup(s: float) -> str:
+    """Format a speedup value as ``'X.XXx'`` — but use 3 decimals when 2-decimal
+    rounding would hide whether the value is actually ``< 1.0`` or ``>= 1.0``.
+
+    Prevents the UX bug where 0.9991 prints as ``"1.00x"`` in the summary but
+    the stop-reason text says ``"best 1.00x < 1.0x"`` (because the comparison
+    uses the raw value). With this helper both sites render ``"0.999x"``, so
+    the message is internally consistent.
+    """
+    if 0.99 <= s < 1.005:
+        return f"{s:.3f}x"
+    return f"{s:.2f}x"
+
+
 @dataclass
 class AutoResult:
     """Final result of an autonomous optimization run."""
@@ -128,6 +142,11 @@ class MetaOptimizer:
         self._total_iterations: int = 0
         self._current_strategy: str = "general optimization"
         self._exploratory_round_done: bool = False
+        # Set when a round meets the target but the loop intentionally
+        # continues for one exploratory round. Lets _check_gates attribute
+        # a subsequent time/budget trip to the exploration step rather than
+        # reporting a plain "Time limit reached" as if the target was missed.
+        self._target_hit_context: str = ""
         self._iter_counter: int = 0
         self._optimization_log = OptimizationLog(
             target_speedup=goal.target_speedup,
@@ -367,7 +386,7 @@ class MetaOptimizer:
                 )
                 criterion = "speedup"
                 target_str = (
-                    f"{self._best_speedup:.2f}x >= {self._goal.target_speedup:.1f}x"
+                    f"{fmt_speedup(self._best_speedup)} >= {self._goal.target_speedup:.1f}x"
                 )
 
             if target_met:
@@ -376,6 +395,10 @@ class MetaOptimizer:
                         and not self._exploratory_round_done
                         and self._goal.max_rounds >= 2):
                     self._exploratory_round_done = True
+                    # Remember the target-hit context so if time/budget trips
+                    # mid-exploration the final stop_reason attributes the
+                    # outcome correctly instead of reading as a plain timeout.
+                    self._target_hit_context = target_str
                     if self._live_display:
                         self._live_display.print_permanent(
                             f"  [#f5a850]Overshot {criterion} target by "
@@ -384,8 +407,8 @@ class MetaOptimizer:
                         )
                     if self._run_logger:
                         self._run_logger.log_event(
-                            f"stopping: {criterion} overshoot ({target_str}) — "
-                            f"exploratory round deferred"
+                            f"target hit ({criterion} {target_str}) — "
+                            f"running one exploratory round for extra upside"
                         )
                     # don't break; let loop continue for one more round
                 else:
@@ -430,10 +453,47 @@ class MetaOptimizer:
             if len(self._round_history) >= 2 and self._best_speedup < 1.0:
                 stop_reason = (
                     f"Sub-baseline after {len(self._round_history)} rounds "
-                    f"(best {self._best_speedup:.2f}x < 1.0x) — "
+                    f"(best {fmt_speedup(self._best_speedup)} < 1.0x) — "
                     f"reference likely near-optimal, stopping to save budget"
                 )
                 break
+
+            # --- Early stop: worker convergence with no headroom ---
+            # If all *successful* workers this round landed within 2% of each
+            # other AND the best is still <=1.05x baseline, the search has
+            # converged on the reference implementation — additional rounds +
+            # meta-reflection won't pry open new speedup.
+            #
+            # Filter failed workers (speedup<=0 or status!=passed) before the
+            # check. A failed worker contributes speedup=0 and would otherwise
+            # tank ``min_sp``, making max-min look like a big spread and
+            # suppressing convergence even when the real workers all agree.
+            worker_speedups = []
+            for w in (round_result.get("per_worker") or []):
+                sp = float(w.get("speedup", 0.0) or 0.0)
+                status = str(w.get("status", "") or "")
+                if sp > 0.0 and status in ("", "passed"):
+                    worker_speedups.append(sp)
+            converged_no_headroom = False
+            if len(worker_speedups) >= 2:
+                max_sp = max(worker_speedups)
+                min_sp = min(worker_speedups)
+                if (max_sp - min_sp) < 0.05 and max_sp < 1.05:
+                    converged_no_headroom = True
+                    stop_reason = (
+                        f"Converged after round {round_num} — all workers "
+                        f"within 2% of each other at <=1.05x baseline, "
+                        f"no headroom detected"
+                    )
+                    if self._live_display:
+                        self._live_display.print_permanent(
+                            f"  [#f5a850]{stop_reason}[/#f5a850]"
+                        )
+                    else:
+                        self._console.print(f"  [#f5a850]{stop_reason}[/#f5a850]")
+                    if self._run_logger:
+                        self._run_logger.log_event(f"stopping: {stop_reason}")
+                    break
 
             # --- Plateau detection: inform but don't stop ---
             # Keep iterating toward target — only budget/time can stop us
@@ -453,7 +513,7 @@ class MetaOptimizer:
                 if reflection.action == "stop":
                     stop_reason = (
                         f"Stopped: {reflection.reason} "
-                        f"(best: {self._best_speedup:.2f}x, target: {self._goal.target_speedup:.1f}x, "
+                        f"(best: {fmt_speedup(self._best_speedup)}, target: {self._goal.target_speedup:.1f}x, "
                         f"LLM budget remaining: ${self._goal.max_budget_usd - self._total_cost:.2f})"
                     )
                     break
@@ -513,15 +573,34 @@ class MetaOptimizer:
 
     def _check_gates(self, start_time: float) -> str:
         """Check stopping gates. Returns reason string if should stop, empty if OK."""
+        # If the target was already met on a prior round and we're only
+        # continuing for one exploratory round, frame the stop_reason as a
+        # successful outcome rather than a plain timeout/over-budget read.
+        hit_ctx = self._target_hit_context
+
         # Budget
         if self._total_cost >= self._goal.max_budget_usd:
-            return f"Budget exhausted: ${self._total_cost:.2f} >= ${self._goal.max_budget_usd:.2f}"
+            budget_msg = (
+                f"Budget exhausted: ${self._total_cost:.2f} "
+                f">= ${self._goal.max_budget_usd:.2f}"
+            )
+            if hit_ctx:
+                return (
+                    f"Target hit ({hit_ctx}). Extra exploration round "
+                    f"terminated by budget limit."
+                )
+            return budget_msg
 
         # Time
         if self._goal.max_time_seconds:
             elapsed = time.time() - start_time
             if elapsed >= self._goal.max_time_seconds:
                 mins = int(elapsed) // 60
+                if hit_ctx:
+                    return (
+                        f"Target hit ({hit_ctx}). Extra exploration round "
+                        f"terminated by time limit ({mins}m)."
+                    )
                 return f"Time limit reached: {mins}m"
 
         return ""

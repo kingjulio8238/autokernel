@@ -317,6 +317,21 @@ def _estimate_tensor_elements(code: str) -> int:
     Looks for torch.randn(N, M, ...) or shape references.
     Returns 0 if nothing identifiable.
     """
+    # Constant-propagate module-level int assignments (``M = 16384`` …) so
+    # that ``torch.randn(M, N)`` is recognized as ``torch.randn(16384, N_value)``.
+    # KernelBench and GPU Mode references universally declare tensor dims
+    # this way; without the pass we'd return 0 for every real reference.
+    const_env: dict[str, int] = {}
+    for m in re.finditer(r"^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(\d+)\s*$", code, flags=re.MULTILINE):
+        try:
+            const_env[m.group(1)] = int(m.group(2))
+        except ValueError:
+            continue
+    if const_env:
+        def _sub(match: re.Match) -> str:
+            return str(const_env.get(match.group(0), match.group(0)))
+        code = re.sub(r"\b[A-Z_][A-Z0-9_]*\b", _sub, code)
+
     # Match torch.randn(a, b, ...) etc. — capture the full dim list until
     # the first kwarg (dtype=, device=, generator=, ...) or closing paren.
     # The greedy [\d\s,]+ now captures all leading dim args.

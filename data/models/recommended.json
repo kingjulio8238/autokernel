@@ -59,7 +59,7 @@
     },
     {
       "id": "moonshotai/kimi-k2.5",
-      "provider": "openai",
+      "provider": "nvidia",
       "name": "Kimi K2.5",
       "strengths": [
         "85.0 LiveCodeBench (highest open-source)",
@@ -72,10 +72,10 @@
       "cost_per_m_input": 0.50,
       "cost_per_m_output": 2.80,
       "context_window": 262000,
-      "api_base": null,
-      "env_key": null,
+      "api_base": "https://integrate.api.nvidia.com/v1",
+      "env_key": "NVIDIA_API_KEY",
       "recommended_for": ["speed", "coding", "parallel_exploration"],
-      "providers": ["fireworks", "together", "deepinfra", "openrouter"]
+      "providers": ["nvidia", "fireworks", "together", "deepinfra", "openrouter"]
     },
     {
       "id": "groq/llama-3.3-70b-versatile",

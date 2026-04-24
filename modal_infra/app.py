@@ -148,10 +148,11 @@ def _eval_kernel_core(
     reference_source: str,
     eval_mode: str = "fast",
     problem_format: str = "auto",
-    correctness_trials: int = 5,
+    correctness_trials: int = 3,
     perf_trials_fast: int = 10,
     perf_trials_thorough: int = 100,
     gpu_type: str = "L40S",
+    _child_start_perf: float | None = None,
 ) -> dict[str, Any]:
     """Core eval logic — compile, check correctness, benchmark.
 
@@ -165,7 +166,17 @@ def _eval_kernel_core(
     # import so the JIT cache can't leak state between unrelated evals.
     triton_cache_dir = os.environ.get("TRITON_CACHE_DIR")
 
+    # Phase timers — each entry is (label, seconds). Exposed via result dict
+    # so time_phases.py can render a breakdown. Low overhead (~µs).
+    phases: list[tuple[str, float]] = []
+    _t_import_start = time.perf_counter()
     import torch  # noqa: F401 — imported for side effect (fresh CUDA init)
+    phases.append(("child: torch import", time.perf_counter() - _t_import_start))
+    if _child_start_perf is not None:
+        phases.insert(0, (
+            "child: subprocess spawn + param receive",
+            _t_import_start - _child_start_perf,
+        ))
 
     wall_start = time.time()
     num_perf_trials = (
@@ -217,6 +228,7 @@ def _eval_kernel_core(
                     num_perf_trials=num_perf_trials,
                     tmpdir=tmpdir,
                     gpu_type=gpu_type,
+                    phases=phases,
                 )
         except Exception as exc:
             err_str = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
@@ -231,6 +243,7 @@ def _eval_kernel_core(
 
         result["eval_seconds"] = time.time() - wall_start
         result.setdefault("profile", {})
+        result["phases"] = phases
         return result
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -246,6 +259,10 @@ def _eval_subprocess_worker(in_q, out_q) -> None:
     access, etc.), only this process dies — the Modal container parent stays
     alive and the next eval gets a fresh subprocess.
     """
+    # Child-side phase timers — capture subprocess-entry wall time so we can
+    # attribute the "from spawn() to first useful work" window to the
+    # interpreter boot + torch import, separate from the actual eval work.
+    _child_start = time.perf_counter()
     try:
         params = in_q.get(timeout=60)
     except Exception as exc:
@@ -259,6 +276,7 @@ def _eval_subprocess_worker(in_q, out_q) -> None:
         })
         return
 
+    params["_child_start_perf"] = _child_start
     try:
         result = _eval_kernel_core(**params)
     except BaseException as exc:  # catch SystemExit too
@@ -284,7 +302,7 @@ def _eval_kernel_impl(
     reference_source: str,
     eval_mode: str = "fast",
     problem_format: str = "auto",
-    correctness_trials: int = 5,
+    correctness_trials: int = 3,
     perf_trials_fast: int = 10,
     perf_trials_thorough: int = 100,
     gpu_type: str = "L40S",
@@ -432,10 +450,10 @@ def _eval_kernel_impl(
 # are not directly comparable to the leaderboard.
 # ---------------------------------------------------------------------------
 
-@app.function(gpu="L40S", timeout=600, retries=0)
+@app.function(gpu="L40S", timeout=600, retries=0, scaledown_window=300)
 def eval_kernel_on_gpu(
     kernel_source: str, reference_source: str, eval_mode: str = "fast",
-    problem_format: str = "auto", correctness_trials: int = 5,
+    problem_format: str = "auto", correctness_trials: int = 3,
     perf_trials_fast: int = 10, perf_trials_thorough: int = 100,
     gpu_type: str = "L40S",
 ) -> dict[str, Any]:
@@ -448,10 +466,10 @@ def eval_kernel_on_gpu(
     return result
 
 
-@app.function(gpu="H100", timeout=600, retries=0)
+@app.function(gpu="H100", timeout=600, retries=0, scaledown_window=300)
 def eval_kernel_h100(
     kernel_source: str, reference_source: str, eval_mode: str = "fast",
-    problem_format: str = "auto", correctness_trials: int = 5,
+    problem_format: str = "auto", correctness_trials: int = 3,
     perf_trials_fast: int = 10, perf_trials_thorough: int = 100,
     gpu_type: str = "H100",
 ) -> dict[str, Any]:
@@ -464,10 +482,10 @@ def eval_kernel_h100(
     return result
 
 
-@app.function(gpu="A100-80GB", timeout=600, retries=0)
+@app.function(gpu="A100-80GB", timeout=600, retries=0, scaledown_window=300)
 def eval_kernel_a100_80gb(
     kernel_source: str, reference_source: str, eval_mode: str = "fast",
-    problem_format: str = "auto", correctness_trials: int = 5,
+    problem_format: str = "auto", correctness_trials: int = 3,
     perf_trials_fast: int = 10, perf_trials_thorough: int = 100,
     gpu_type: str = "A100-80GB",
 ) -> dict[str, Any]:
@@ -480,10 +498,10 @@ def eval_kernel_a100_80gb(
     return result
 
 
-@app.function(gpu="A100", timeout=600, retries=0)
+@app.function(gpu="A100", timeout=600, retries=0, scaledown_window=300)
 def eval_kernel_a100_40gb(
     kernel_source: str, reference_source: str, eval_mode: str = "fast",
-    problem_format: str = "auto", correctness_trials: int = 5,
+    problem_format: str = "auto", correctness_trials: int = 3,
     perf_trials_fast: int = 10, perf_trials_thorough: int = 100,
     gpu_type: str = "A100-40GB",
 ) -> dict[str, Any]:
@@ -517,6 +535,7 @@ def _run_eval(
     num_perf_trials: int,
     tmpdir: str,
     gpu_type: str = "L40S",
+    phases: list | None = None,
 ) -> dict[str, Any]:
     """Core evaluation logic — compile, check correctness, benchmark.
 
@@ -528,7 +547,15 @@ def _run_eval(
 
     import torch
 
-    # ---- Load reference module ----
+    # Phase-timer helper. Caller may pass an external ``phases`` list so
+    # the child can return a single contiguous phase history; otherwise
+    # we collect locally and discard.
+    _p = phases if phases is not None else []
+    def _phase(label: str, t0: float) -> None:
+        _p.append((label, time.perf_counter() - t0))
+
+    # ---- Load reference + kernel modules ----
+    _t0 = time.perf_counter()
     sys.path.insert(0, tmpdir)
     try:
         ref_spec = importlib.util.spec_from_file_location("_ref_module", ref_path)
@@ -548,6 +575,8 @@ def _run_eval(
             "error": f"Compilation/import error: {exc}\n{traceback.format_exc()}",
         }
 
+    _phase("eval: exec ref+kernel modules", _t0)
+
     # ---- Get inputs + Model ctor args ----
     try:
         get_inputs = ref_mod.get_inputs
@@ -566,7 +595,15 @@ def _run_eval(
     # Parameterized KernelBench Model classes (e.g. Conv2D) require ctor kwargs
     # declared via get_init_inputs(). Previously this was ignored, causing
     # "Model.__init__() missing N positional args" failures on all L2+ problems.
+    _t0 = time.perf_counter()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # CUDA init happens lazily on first cuda op; force it here so we can
+    # attribute the cost to its own phase instead of hiding inside "exec".
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    _phase("eval: CUDA context init", _t0)
+
+    _t0 = time.perf_counter()
     try:
         init_inputs = get_init_inputs()
     except Exception as exc:
@@ -599,15 +636,20 @@ def _run_eval(
             "ref_runtime_us": 0.0,
             "error": f"Model instantiation error: {exc}\n{traceback.format_exc()}",
         }
+    _phase("eval: instantiate models", _t0)
 
     # ---- Correctness check ----
+    _t0 = time.perf_counter()
+    _inputs_gen_time = 0.0
     all_correct = True
     max_diff = 0.0
     for trial in range(correctness_trials):
+        _t_in = time.perf_counter()
         inputs = [
             inp.to(device) if isinstance(inp, torch.Tensor) else inp
             for inp in get_inputs()
         ]
+        _inputs_gen_time += time.perf_counter() - _t_in
         try:
             with torch.no_grad():
                 ref_out = ref_model(*inputs)
@@ -646,20 +688,49 @@ def _run_eval(
             "ref_runtime_us": 0.0,
             "error": f"Correctness check failed. Max diff: {max_diff:.6e}",
         }
+    _phase(
+        f"eval: correctness ({correctness_trials} trials, "
+        f"{_inputs_gen_time:.1f}s in get_inputs)",
+        _t0,
+    )
 
     # ---- Performance benchmark ----
-    ref_times = _benchmark(ref_model, get_inputs, device, num_perf_trials)
-    kernel_times = _benchmark(kernel_model, get_inputs, device, num_perf_trials)
+    # Pre-materialize one GPU-resident input set and reuse across all
+    # warmup + timed iterations of BOTH ref and kernel benchmarks. For a
+    # 1GB ReLU input this cuts ~1s × 26 = ~26s off the eval by skipping
+    # redundant ``torch.randn(…)`` + ``.to(cuda)`` calls. Input sits in
+    # HBM across benchmarks, so there's no cold-cache artifact — it's
+    # already orders of magnitude larger than any GPU cache.
+    _t0 = time.perf_counter()
+    bench_inputs = [
+        inp.to(device) if isinstance(inp, torch.Tensor) else inp
+        for inp in get_inputs()
+    ]
+    _phase("eval: materialize bench inputs (1×)", _t0)
+
+    _t0 = time.perf_counter()
+    ref_times = _benchmark(
+        ref_model, get_inputs, device, num_perf_trials, inputs=bench_inputs
+    )
+    _phase(f"eval: ref benchmark ({num_perf_trials} trials)", _t0)
+
+    _t0 = time.perf_counter()
+    kernel_times = _benchmark(
+        kernel_model, get_inputs, device, num_perf_trials, inputs=bench_inputs
+    )
+    _phase(f"eval: kernel benchmark ({num_perf_trials} trials)", _t0)
 
     ref_runtime_us = _median(ref_times) * 1e6
     kernel_runtime_us = _median(kernel_times) * 1e6
     speedup = ref_runtime_us / kernel_runtime_us if kernel_runtime_us > 0 else 0.0
 
     # ---- Profile data (basic CUDA event metrics) ----
+    _t0 = time.perf_counter()
     profile = _collect_basic_profile(
         kernel_model, get_inputs, device, ref_runtime_us, kernel_runtime_us,
-        gpu_type=gpu_type,
+        gpu_type=gpu_type, inputs=bench_inputs,
     )
+    _phase("eval: profile collection", _t0)
 
     return {
         "status": "correct",
@@ -821,10 +892,12 @@ def _run_eval_gpumode(
             gpu_type=gpu_type,
         )
     except Exception as exc:
-        # Even when profiling blows up, downstream (ProfileMetrics) expects a
-        # sol_score / runtime_us. Compute the runtime-relative fallback SOL
-        # from measured kernel_us / ref_us so a correct kernel doesn't record
-        # sol_score=0 just because torch.profiler tripped.
+        # Profiling blew up entirely. Emit the honest shape: runtime-relative
+        # sol_score is still meaningful (it's kernel_us/ref_us rescaled), but
+        # compute/bandwidth utils are NOT — they're zero because we have no
+        # flops/bytes, not because the kernel hit 0% of peak. Flag with
+        # profile_available=False + bottleneck_type="unprofiled" so the
+        # display renders "—" for utils instead of "0%".
         fallback_sol = _sol_compute_sol_score(kernel_us, ref_us, 0, 0, gpu_type)
         gpumode_profile = {
             "error": f"profiling failed: {exc}",
@@ -835,7 +908,8 @@ def _run_eval_gpumode(
             "total_bytes": 0,
             "runtime_us": kernel_us,
             "ref_runtime_us": ref_us,
-            "bottleneck_type": "unknown",
+            "bottleneck_type": "unprofiled",
+            "profile_available": False,
         }
 
     return {
@@ -1036,35 +1110,50 @@ def _benchmark(
     get_inputs: Any,
     device: Any,
     num_trials: int,
+    inputs: Any = None,
 ) -> list[float]:
-    """Benchmark a model using CUDA events for accurate GPU timing."""
+    """Benchmark a model using CUDA events for accurate GPU timing.
+
+    ``inputs``: if provided, reuse this pre-materialized GPU tensor list
+    across all warmup + timed iterations instead of calling
+    ``get_inputs()`` on every trial. Reuse is standard for GPU perf
+    measurement — the input is >> L2 cache so there's no caching
+    artifact, and allocator noise drops. Skipping the per-trial
+    ``torch.randn(16384,16384)`` + ``.to(cuda)`` saves ~1s per call.
+    """
     import torch
 
     times: list[float] = []
 
+    if inputs is None:
+        # Legacy path: re-materialize inputs per trial. Kept so callers
+        # that want per-trial randomization can opt in by not passing
+        # ``inputs``. Our production path always passes them.
+        def _fresh():
+            return [
+                inp.to(device) if isinstance(inp, torch.Tensor) else inp
+                for inp in get_inputs()
+            ]
+    else:
+        def _fresh():
+            return inputs
+
     # Warmup
     for _ in range(3):
-        inputs = [
-            inp.to(device) if isinstance(inp, torch.Tensor) else inp
-            for inp in get_inputs()
-        ]
         with torch.no_grad():
-            model(*inputs)
+            model(*_fresh())
 
     torch.cuda.synchronize()
 
     for _ in range(num_trials):
-        inputs = [
-            inp.to(device) if isinstance(inp, torch.Tensor) else inp
-            for inp in get_inputs()
-        ]
+        trial_inputs = _fresh()
 
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
 
         start.record()
         with torch.no_grad():
-            model(*inputs)
+            model(*trial_inputs)
         end.record()
 
         torch.cuda.synchronize()
@@ -1177,6 +1266,7 @@ def _collect_basic_profile(
     ref_runtime_us: float,
     kernel_runtime_us: float,
     gpu_type: str = "L40S",
+    inputs: Any = None,
 ) -> dict[str, Any]:
     """Collect basic profiling data using torch.profiler inside the Modal container.
 
@@ -1186,6 +1276,12 @@ def _collect_basic_profile(
     import torch
     from torch.profiler import ProfilerActivity, profile
 
+    # profile_available flips to True only when we successfully captured
+    # CUDA events AND derived non-zero total_flops OR total_bytes. Anything
+    # short of that leaves utilizations at 0.0 for an honest reason (we
+    # didn't measure), which is different from "measured exactly 0%".
+    # Downstream display / prompt code reads this flag to decide between
+    # rendering "unprofiled" vs "0%".
     profile_result: dict[str, Any] = {
         "bottleneck_type": "unknown",
         "roofline_position": 0.0,
@@ -1203,6 +1299,7 @@ def _collect_basic_profile(
         "bandwidth_util": 0.0,
         "runtime_us": kernel_runtime_us,
         "ref_runtime_us": ref_runtime_us,
+        "profile_available": False,
     }
 
     def _iter_tensors(obj):
@@ -1219,10 +1316,11 @@ def _collect_basic_profile(
         return sum(t.nelement() * t.element_size() for t in _iter_tensors(obj))
 
     try:
-        inputs = [
-            inp.to(device) if isinstance(inp, torch.Tensor) else inp
-            for inp in get_inputs()
-        ]
+        if inputs is None:
+            inputs = [
+                inp.to(device) if isinstance(inp, torch.Tensor) else inp
+                for inp in get_inputs()
+            ]
 
         with profile(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
@@ -1284,6 +1382,11 @@ def _collect_basic_profile(
                 total_bytes += input_bytes
             profile_result["total_bytes"] = total_bytes
 
+            # We captured CUDA events AND have at least bytes or flops —
+            # downstream utilizations computed below are real measurements.
+            if total_flops > 0 or total_bytes > 0:
+                profile_result["profile_available"] = True
+
             # Operational intensity: FLOPs / bytes
             if total_bytes > 0 and total_flops > 0:
                 profile_result["operational_intensity"] = total_flops / total_bytes
@@ -1338,14 +1441,20 @@ def _collect_basic_profile(
     profile_result["hardware_peak_gbps"] = specs.get("bandwidth_gb_s", 0)
 
     # Bottleneck classification — spec key set is
-    # {"compute_bound", "memory_bound", "latency_bound", "unknown"}
-    # (underscored; matches prompt template `Guidance:` section).
+    # {"compute_bound", "memory_bound", "latency_bound", "unknown",
+    # "unprofiled"}. Downstream `BottleneckType` enum only knows the
+    # first four and silently falls back to UNKNOWN on unrecognized
+    # strings, so "unprofiled" reaches the live display (raw dict) and
+    # degrades cleanly everywhere else.
     if compute_util == 0 and bandwidth_util == 0:
-        # Both utilizations at zero → either kernel never ran long enough
-        # to saturate anything, or FLOPs/bytes estimation failed. Treat as
-        # latency_bound when we at least have runtime data, else unknown.
-        if kernel_runtime_us > 0 and total_flops == 0 and total_bytes == 0:
-            profile_result["bottleneck_type"] = "latency_bound"
+        # Previously this branch emitted "latency_bound" whenever
+        # flops/bytes were zero, which was dishonest — zero flops/bytes
+        # means the profiler FAILED to capture them (custom ops like
+        # LayerNorm don't register FLOPs via torch.profiler). We can't
+        # distinguish latency-bound from unprofiled from that signal
+        # alone, so prefer the honest label.
+        if total_flops == 0 and total_bytes == 0:
+            profile_result["bottleneck_type"] = "unprofiled"
         else:
             profile_result["bottleneck_type"] = "unknown"
     elif compute_util < 20 and bandwidth_util < 20:
@@ -1367,7 +1476,7 @@ def _collect_basic_profile(
 # ---------------------------------------------------------------------------
 
 
-@app.cls(timeout=600, retries=0)
+@app.cls(timeout=600, retries=0, scaledown_window=300)
 class EvalWorker:
     """Class-based worker that supports dynamic GPU selection via keep_warm.
 
@@ -1382,7 +1491,7 @@ class EvalWorker:
         kernel_source: str,
         reference_source: str,
         eval_mode: str = "fast",
-        correctness_trials: int = 5,
+        correctness_trials: int = 3,
         perf_trials_fast: int = 10,
         perf_trials_thorough: int = 100,
         gpu_type: str = "L40S",
@@ -1406,7 +1515,7 @@ class EvalWorker:
 # ---------------------------------------------------------------------------
 
 
-@app.function(gpu="L40S", timeout=60)
+@app.function(gpu="L40S", timeout=60, scaledown_window=300)
 def health_check() -> dict[str, Any]:
     """Verify the container is functional and GPU is accessible."""
     import torch

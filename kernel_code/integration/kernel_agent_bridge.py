@@ -498,6 +498,55 @@ class KernelAgentBridge:
                         break
             return None
 
+        def _get_worker_error(wdir: Path) -> str:
+            """Read the worker log tail for an ERROR/WARNING/CRITICAL line.
+
+            Used when the post-run sweep finds a worker with no round
+            files — so the table can show *why* it cancelled ("generation
+            returned empty kernel", "compile error", "timeout") rather
+            than a bare "cancelled" label.
+            """
+            log_file = None
+            try:
+                for f in wdir.iterdir():
+                    if f.suffix == ".log":
+                        log_file = f
+                        break
+            except Exception:
+                return ""
+            if not log_file or not log_file.exists():
+                return ""
+            try:
+                size = log_file.stat().st_size
+                with open(log_file, "r") as fh:
+                    # Read last 4 KB — errors often include a short traceback.
+                    if size > 4096:
+                        fh.seek(size - 4096)
+                    lines = fh.readlines()
+                for line in reversed(lines):
+                    for level in (" - ERROR - ", " - CRITICAL - ", " - WARNING - "):
+                        if level in line:
+                            msg = line.split(level, 1)[1].strip()
+                            for tag, short in (
+                                ("SyntaxError", "syntax error"),
+                                ("empty kernel", "empty kernel"),
+                                ("no code block", "no kernel emitted"),
+                                ("RateLimitError", "LLM rate-limited"),
+                                ("Timeout", "LLM timeout"),
+                                ("timed out", "eval timeout"),
+                                ("CUDA out of memory", "OOM"),
+                                ("import", "import error"),
+                                ("compile", "compile error"),
+                            ):
+                                if tag.lower() in msg.lower():
+                                    return short
+                            if len(msg) > 25:
+                                return msg[:25].rsplit(" ", 1)[0] + "…"
+                            return msg
+            except Exception:
+                return ""
+            return ""
+
         def _get_worker_action(wdir: Path) -> str:
             """Parse the last log line to get the worker's current action."""
             log_file = None
@@ -548,7 +597,26 @@ class KernelAgentBridge:
         def _poll_workers():
             """Poll worker directories for round progress and current action."""
             workers_dir = _find_workers_dir()
+            # Until KernelAgent has created its workspace (model load,
+            # scratch dirs), emit placeholder "queued" rows so the live
+            # table shows the four workers from t=0 instead of the empty-
+            # state placeholder.
             if not workers_dir:
+                if self._live_display:
+                    round_offset = int(os.environ.get("OPENKERNEL_ROUND_OFFSET", "0"))
+                    placeholder = [
+                        {
+                            "id": i,
+                            "global_id": round_offset + i,
+                            "round": 0,
+                            "max_rounds": self._max_rounds,
+                            "status": "waiting",
+                            "action": "",
+                            "speedup": 0.0,
+                        }
+                        for i in range(self._num_workers)
+                    ]
+                    self._live_display.update_workers(placeholder)
                 return
             worker_states = []
             for i in range(self._num_workers):
@@ -624,6 +692,64 @@ class KernelAgentBridge:
                 if self._live_display:
                     self._live_display._refresh()
             future.result()
+
+        # Post-run terminal sweep: the live poller only emits "passed" or
+        # "working" because it can't distinguish "round_N.json written,
+        # eval still computing" from "worker gave up". Now that the agent
+        # future has completed, any worker still "working" is finalized:
+        # "failed" if it produced round files but never passed, "cancelled"
+        # if it never started a round at all.
+        if self._live_display:
+            workers_dir = _find_workers_dir()
+            round_offset = int(os.environ.get("OPENKERNEL_ROUND_OFFSET", "0"))
+            final_states = []
+            for i in range(self._num_workers):
+                wdir = workers_dir / f"worker_{i}" if workers_dir else None
+                rounds = (
+                    len(list(wdir.glob("round_*.json")))
+                    if wdir and wdir.exists() else 0
+                )
+                latest_success = False
+                best_speedup = 0.0
+                if rounds > 0 and wdir:
+                    import re as _re
+                    for rf in sorted(wdir.glob("round_*.json"), key=lambda p: p.name):
+                        try:
+                            data = json.loads(rf.read_text())
+                            sp = float(data.get("speedup", 0.0))
+                            if sp == 0.0:
+                                sp_match = _re.search(
+                                    r"Speedup:\s*([\d.]+)x", data.get("stdout", "")
+                                )
+                                if sp_match:
+                                    sp = float(sp_match.group(1))
+                            if sp > best_speedup:
+                                best_speedup = sp
+                            latest_success = bool(data.get("success"))
+                        except Exception:
+                            continue
+                if latest_success:
+                    status = "passed"
+                elif rounds > 0:
+                    status = "failed"
+                else:
+                    status = "cancelled"
+                # For non-passed workers, probe the log for a diagnostic
+                # so the table row can say *why* it ended (syntax error,
+                # empty kernel, rate-limit, etc.) instead of a bare status.
+                action = ""
+                if status != "passed" and wdir and wdir.exists():
+                    action = _get_worker_error(wdir)
+                final_states.append({
+                    "id": i,
+                    "global_id": round_offset + i,
+                    "round": rounds,
+                    "max_rounds": self._max_rounds,
+                    "status": status,
+                    "action": action,
+                    "speedup": best_speedup,
+                })
+            self._live_display.update_workers(final_states)
 
         if error:
             logger.error("KernelAgent failed: %s", error)
