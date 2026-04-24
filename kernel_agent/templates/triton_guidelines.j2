@@ -73,6 +73,71 @@ TRITON KERNEL PROGRAMMING GUIDELINES:
    - All compute runs in Triton kernels; no torch.nn, torch.nn.functional (e.g., F.*), or other PyTorch compute ops, including general tensor-tensor math like torch.matmul/mm/bmm/einsum or their Tensor method forms, and no low-level torch.ops.aten.* calls (e.g., torch.ops.aten.conv2d, torch.ops.aten.layer_norm, torch.ops.aten.addmm, torch.ops.aten.mean).
    - PyTorch allowed only for allocation, dtype/device checks, and packaging results.
 
+8. AUTOTUNE — HIGH-ROI DEFAULT:
+   Wrap @triton.jit with @triton.autotune to let Triton pick the best
+   block size / num_warps / num_stages per input shape. A single hard-coded
+   BLOCK_SIZE is almost always leaving speedup on the table.
+
+   Use autotune WHEN:
+     - The kernel has a tileable inner loop (matmul, reduction, elementwise
+       over a large tensor, attention, conv, layer-norm, softmax).
+     - The target is bandwidth- or compute-bound (speedup headroom exists).
+     - Kernel wallclock per launch is >= ~50µs (so autotune search cost is
+       amortized across the N timed runs the harness does).
+     - Any shape argument that changes between calls is in the ``key`` list,
+       so autotune caches per-shape rather than per-call.
+
+   SKIP autotune WHEN:
+     - The kernel is launch-overhead bound (<50µs total). Autotune's warmup
+       evaluates each config at least once — for a ~20µs kernel with 8
+       configs that's ~160µs+ of search every new shape. Pick one good
+       BLOCK_SIZE and move on.
+     - The reference runs exactly one op once (no repeat), since autotune
+       can't amortize over a single launch.
+
+   CONFIG GENERATION RULE:
+     Emit 4-8 diverse configs spanning the tuning axes. Defaults by pattern:
+       - Elementwise / memory-bound:
+           BLOCK_SIZE in {256, 512, 1024, 2048, 4096}
+           num_warps in {4, 8}; num_stages=2
+       - Matmul / tileable compute:
+           (BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K) in product of
+           {64, 128, 256} x {64, 128, 256} x {32, 64}, culled to 6-8
+           total; num_warps in {4, 8}; num_stages in {3, 4}
+       - Reduction / normalization (per-row):
+           BLOCK_SIZE in {128, 256, 512, 1024, 2048}
+           num_warps in {4, 8}; num_stages=2
+     key= should list every shape dimension the kernel's perf depends on
+     (e.g. ["M", "N", "K"] for matmul, ["hidden"] for layer-norm per-row).
+
+   CANONICAL ELEMENTWISE EXAMPLE (copy-ready):
+   ```python
+   import triton
+   import triton.language as tl
+
+   @triton.autotune(
+       configs=[
+           triton.Config({"BLOCK_SIZE": 256},  num_warps=4, num_stages=2),
+           triton.Config({"BLOCK_SIZE": 512},  num_warps=4, num_stages=2),
+           triton.Config({"BLOCK_SIZE": 1024}, num_warps=4, num_stages=2),
+           triton.Config({"BLOCK_SIZE": 1024}, num_warps=8, num_stages=2),
+           triton.Config({"BLOCK_SIZE": 2048}, num_warps=8, num_stages=2),
+           triton.Config({"BLOCK_SIZE": 4096}, num_warps=8, num_stages=2),
+       ],
+       key=["n_elements"],
+   )
+   @triton.jit
+   def elementwise_kernel(x_ptr, y_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+       pid = tl.program_id(0)
+       offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+       mask = offsets < n_elements
+       x = tl.load(x_ptr + offsets, mask=mask)
+       tl.store(y_ptr + offsets, x, mask=mask)  # replace with real op
+   ```
+
+   Launch: grid is a function of META (the chosen config), e.g.:
+     grid = lambda META: (triton.cdiv(n_elements, META["BLOCK_SIZE"]),)
+
 Here are real examples of Triton kernels:
 
 ## Example 1: Persistent Matrix Multiplication

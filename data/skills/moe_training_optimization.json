@@ -49,6 +49,15 @@
       "strategy": "Autotune BLOCK_M/BLOCK_N/BLOCK_K tiling and warp-per-output configuration to leverage tensor core performance.",
       "bottleneck": "compute_bound",
       "sol_score": 1.0
+    },
+    {
+      "problem": "L1/gemm",
+      "speedup": 1.8802,
+      "hardware": "L40S",
+      "round": 2,
+      "strategy": "refine BLOCK_M/BLOCK_N/BLOCK_K tiling autotune while exploring tensor core instructions for compute-bound improvement.",
+      "bottleneck": "compute_bound",
+      "sol_score": 0.9400799429555413
     }
   ],
   "code_template": null,

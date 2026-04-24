@@ -22,6 +22,15 @@
       "strategy": "explore persistent kernel design eliminating buffers with direct SM mapping and fused operations.",
       "bottleneck": "unknown",
       "sol_score": 0.0
+    },
+    {
+      "problem": "L1/gemm",
+      "speedup": 1.1048,
+      "hardware": "L40S",
+      "round": 2,
+      "strategy": "Systematically autotune BLOCK_M, BLOCK_N, and BLOCK_K configurations for optimized compute performance.",
+      "bottleneck": "compute_bound",
+      "sol_score": 0.5524095340766932
     }
   ],
   "code_template": "import torch\nimport torch.nn as nn\nfrom torch.utils.cpp_extension import load_inline\n\ncuda_src = \"\"\"\n#include <torch/extension.h>\n#include <cublas_v2.h>\n\nstatic cublasHandle_t handle = nullptr;\n\ntorch::Tensor cublas_gemm(torch::Tensor A, torch::Tensor B) {\n    if (!handle) cublasCreate(&handle);\n    int M = A.size(0), K = A.size(1), N = B.size(1);\n    auto C = torch::empty({M, N}, A.options());\n    float alpha = 1.0f, beta = 0.0f;\n    // cuBLAS uses column-major: C = A @ B -> C^T = B^T @ A^T\n    cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,\n                N, M, K, &alpha,\n                B.data_ptr<float>(), N,\n                A.data_ptr<float>(), K,\n                &beta, C.data_ptr<float>(), N);\n    return C;\n}\n\"\"\"\n\ncpp_src = \"torch::Tensor cublas_gemm(torch::Tensor A, torch::Tensor B);\"\n\ngemm_module = load_inline(name='cublas_gemm', cpp_sources=cpp_src,\n                          cuda_sources=cuda_src, extra_ldflags=['-lcublas'],\n                          functions=['cublas_gemm'])\n\nclass ModelNew(nn.Module):\n    def __init__(self):\n        super().__init__()\n\n    def forward(self, A, B):\n        return gemm_module.cublas_gemm(A.contiguous(), B.contiguous())",

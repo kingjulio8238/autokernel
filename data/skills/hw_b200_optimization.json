@@ -94,6 +94,24 @@
       "strategy": "general optimization",
       "bottleneck": "unknown",
       "sol_score": 0.0
+    },
+    {
+      "problem": "L1/custom",
+      "speedup": 1.0041,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "unknown",
+      "sol_score": 0.5020566073153487
+    },
+    {
+      "problem": "L1/custom",
+      "speedup": 1.047,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "unknown",
+      "sol_score": 0.5234864971203187
     }
   ],
   "code_template": null,
