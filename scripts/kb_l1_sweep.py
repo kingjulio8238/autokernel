@@ -18,6 +18,14 @@ Usage::
     python scripts/kb_l1_sweep.py --count 20 --budget 2    # 20 problems, $2 each
     python scripts/kb_l1_sweep.py --start-id 50 --count 5  # problems 50-54
 
+Resuming a partial sweep: pass ``--resume`` to skip per-problem dirs that
+already contain a complete ``result.json`` (parseable + has either
+``best_speedup`` and ``target_reached`` fields OR an ``error`` field).
+Partial dirs (no result.json or malformed) are wiped and re-run. Resumed
+problems contribute identically to summary.json aggregation::
+
+    python scripts/kb_l1_sweep.py --resume --out-dir .kernel-code/sweeps/strat_l1_abc1234
+
 Prerequisites: MODAL_PROFILE=kernel+ exported, kernelbench pip-installed,
 OPENAI_API_KEY set (or whatever the configured default_model needs).
 """
@@ -357,6 +365,34 @@ def _run_single_problem(
     return final
 
 
+def _load_complete_result(problem_dir: Path) -> dict | None:
+    """Return a parsed result.json iff it indicates a fully-finished run.
+
+    A result is considered complete when it parses as JSON and either:
+      * carries an ``error`` field (the prior run errored — re-running
+        unlikely to help and would burn budget), OR
+      * carries both ``best_speedup`` and ``target_reached`` fields (the
+        prior run finished cleanly).
+
+    Anything else (missing file, malformed JSON, missing fields) returns
+    None so the caller can wipe + re-run.
+    """
+    rj = problem_dir / "result.json"
+    if not rj.exists():
+        return None
+    try:
+        data = json.loads(rj.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if "error" in data:
+        return data
+    if "best_speedup" in data and "target_reached" in data:
+        return data
+    return None
+
+
 def _write_summary(out_root: Path, per_problem: list[dict]) -> None:
     """Write summary.json + summary.csv with aggregate stats."""
     total = len(per_problem)
@@ -415,6 +451,15 @@ def main() -> int:
     ap.add_argument("--hardware", default="L40S", help="Hardware (default L40S)")
     ap.add_argument("--backend", default="triton", help="Backend (default triton)")
     ap.add_argument("--out-dir", default=None, help="Output dir (default .kernel-code/sweeps/l1_<ts>)")
+    ap.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Skip per-problem dirs that already contain a complete result.json. "
+            "Partial/malformed dirs are wiped and re-run. Resumed problems are "
+            "aggregated into summary.json identically to fresh runs."
+        ),
+    )
     args = ap.parse_args()
 
     _ensure_env("MODAL_PROFILE", "Export with: export MODAL_PROFILE=kernel+")
@@ -433,7 +478,37 @@ def main() -> int:
     for i in range(args.count):
         problem_id = args.start_id + i
         problem_dir = out_root / f"problem_{problem_id:03d}"
+
+        resumed_result: dict | None = None
+        if args.resume and problem_dir.exists():
+            resumed_result = _load_complete_result(problem_dir)
+            if resumed_result is None:
+                # Partial/malformed dir — wipe before re-running so stale
+                # artifacts don't bleed into the new attempt.
+                shutil.rmtree(problem_dir)
+
         problem_dir.mkdir(parents=True, exist_ok=True)
+
+        if resumed_result is not None:
+            per_problem.append(resumed_result)
+            sp = float(resumed_result.get("best_speedup") or 0)
+            if "error" in resumed_result:
+                print(
+                    f"[{i + 1}/{args.count}] problem {problem_id}… (resumed) "
+                    f"ERROR: {resumed_result['error']}",
+                    flush=True,
+                )
+            else:
+                hit = "✓" if resumed_result.get("target_reached") else "·"
+                print(
+                    f"[{i + 1}/{args.count}] problem {problem_id}… (resumed) "
+                    f"{hit} best={sp:.2f}x "
+                    f"cost=${float(resumed_result.get('total_cost_usd') or 0):.3f} "
+                    f"elapsed={float(resumed_result.get('elapsed_seconds') or 0):.0f}s "
+                    f"({(resumed_result.get('stop_reason') or '')[:60]})",
+                    flush=True,
+                )
+            continue
 
         print(f"[{i + 1}/{args.count}] problem {problem_id}…", flush=True)
         t0 = time.time()

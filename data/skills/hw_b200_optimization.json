@@ -112,6 +112,15 @@
       "strategy": "general optimization",
       "bottleneck": "unknown",
       "sol_score": 0.5234864971203187
+    },
+    {
+      "problem": "L1/custom",
+      "speedup": 1.0514,
+      "hardware": "L40S",
+      "round": 2,
+      "strategy": "Profile kernel execution thoroughly to identify precise L1 custom bottleneck and refine tuning.",
+      "bottleneck": "unknown",
+      "sol_score": 0.5257122229132482
     }
   ],
   "code_template": null,

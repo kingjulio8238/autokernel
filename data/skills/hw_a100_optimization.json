@@ -4,7 +4,17 @@
   "trigger": "A100, sm_80, Ampere, compute_80, A100-80GB, A100-40GB",
   "approach": "Target A100 architecture: 108 SMs, 164KB shared memory per SM (configurable up to 163KB), 2039 GB/s HBM2e bandwidth (80GB variant) or 1555 GB/s (40GB variant), 312 TFLOPS FP16. Use 256-thread blocks, vectorized half2 loads. Grid multiples of 108. L2 cache is 40MB. Register pressure: 65536 registers per SM.",
   "backend": "any",
-  "evidence": [],
+  "evidence": [
+    {
+      "problem": "L1/pooling",
+      "speedup": 2.0145,
+      "hardware": "L40S",
+      "round": 1,
+      "strategy": "general optimization",
+      "bottleneck": "memory_bound",
+      "sol_score": 1.0
+    }
+  ],
   "code_template": null,
   "tags": [
     "A100",

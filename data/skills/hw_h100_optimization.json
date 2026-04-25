@@ -49,6 +49,15 @@
       "strategy": "general optimization",
       "bottleneck": "memory_bound",
       "sol_score": 1.0
+    },
+    {
+      "problem": "L1/elementwise",
+      "speedup": 1.0588,
+      "hardware": "L40S",
+      "round": 2,
+      "strategy": "tune block sizes and optimize vectorized load patterns with grid-stride loops.",
+      "bottleneck": "memory_bound",
+      "sol_score": 0.529413907679652
     }
   ],
   "code_template": null,

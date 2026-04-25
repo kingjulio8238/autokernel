@@ -123,6 +123,24 @@ _HBM_BW_GBPS: dict[str, float] = {
     "RTX4090": 1008.0,
 }
 
+# Per-GPU peak FP16 TFLOPs (approximate, tensor-core dense).
+_COMPUTE_TFLOPS_FP16: dict[str, float] = {
+    "H100": 989.0,
+    "A100-80GB": 312.0,
+    "A100-40GB": 312.0,
+    "L40S": 733.0,
+    "RTX4090": 661.0,
+}
+
+# Per-GPU HBM capacity in GB.
+_GPU_MEMORY_GB: dict[str, float] = {
+    "H100": 80.0,
+    "A100-80GB": 80.0,
+    "A100-40GB": 40.0,
+    "L40S": 48.0,
+    "RTX4090": 24.0,
+}
+
 # Bytes per element for the dtypes we recognize in reference sources.
 _DTYPE_BYTES: dict[str, int] = {
     "float16": 2, "fp16": 2, "half": 2, "bfloat16": 2, "bf16": 2,
@@ -132,6 +150,18 @@ _DTYPE_BYTES: dict[str, int] = {
     "int16": 2, "int32": 4, "int": 4,
     "int64": 8, "long": 8,
 }
+
+
+def _infer_dtype_bytes(ref_code: str) -> int:
+    """Extract the dominant dtype from a reference source and return its
+    byte size. Defaults to 4 (fp32) when nothing matches."""
+    import re as _re
+    dtype_match = _re.search(
+        r"torch\.(float16|bfloat16|float32|float64|int8|uint8|int16|int32|int64|bool|half|float|double|long|int)\b",
+        ref_code,
+    )
+    dtype = dtype_match.group(1) if dtype_match else "float32"
+    return _DTYPE_BYTES.get(dtype, 4)
 
 
 def _hbm_ceiling_check(
@@ -145,9 +175,8 @@ def _hbm_ceiling_check(
     speed-of-light ceiling for this problem, else ``None``.
 
     Only fires for memory-bound problems with a meaningful tensor-size
-    estimate. We intentionally skip compute-bound problems (matmul,
-    attention) because their ceiling is TFLOPs, not HBM — a separate
-    check (not yet implemented) would cover those.
+    estimate. Compute-bound problems are handled by
+    ``_compute_ceiling_check``.
     """
     if ref_us <= 0 or target_speedup <= 0:
         return None
@@ -160,13 +189,7 @@ def _hbm_ceiling_check(
     if not bw_gbps:
         return None
 
-    import re as _re
-    dtype_match = _re.search(
-        r"torch\.(float16|bfloat16|float32|float64|int8|uint8|int16|int32|int64|bool|half|float|double|long|int)\b",
-        ref_code,
-    )
-    dtype = dtype_match.group(1) if dtype_match else "float32"
-    bytes_per = _DTYPE_BYTES.get(dtype, 4)
+    bytes_per = _infer_dtype_bytes(ref_code)
 
     # Assume one read + one write pass (lower bound for elementwise; real
     # ops may touch more tensors, which makes the ceiling tighter — we're
@@ -190,6 +213,124 @@ def _hbm_ceiling_check(
         f"{ref_us:.0f}µs baseline). The kernel cannot physically "
         f"exceed this."
     )
+
+
+def _compute_ceiling_check(
+    ref_us: float,
+    ref_code: str,
+    classif,
+    hardware: str,
+    target_speedup: float,
+) -> str | None:
+    """Return a warning string if ``target_speedup`` exceeds the FP16
+    compute speed-of-light ceiling for matmul-like problems, else
+    ``None``.
+
+    Treats the classifier's element estimate as N for an NxN matmul
+    (the classifier records a single "elements" number; without shape
+    info this is the safest interpretation — if the real problem is a
+    smaller cubic matmul our estimate will be optimistic, meaning we'll
+    fire *less* often, which is the intended conservative direction).
+    """
+    if ref_us <= 0 or target_speedup <= 0:
+        return None
+    if not getattr(classif, "is_compute_bound_likely", False):
+        return None
+    op_type_val = getattr(getattr(classif, "op_type", None), "value", "")
+    # Only matmul-like ops have a clean 2*M*N*K FLOP count. Attention /
+    # conv need more shape info than the classifier currently exposes;
+    # err on the side of not firing.
+    if op_type_val not in ("gemm",):
+        return None
+    elements = int(getattr(classif, "estimated_tensor_elements", 0) or 0)
+    if elements < 1024:
+        return None
+    peak_tflops = _COMPUTE_TFLOPS_FP16.get(hardware)
+    if not peak_tflops:
+        return None
+
+    # Heuristic: assume a square NxN matmul where N*N == elements.
+    import math as _math
+    n = int(_math.sqrt(elements))
+    if n < 16:
+        return None
+    flops = 2.0 * n * n * n
+    peak_flops_per_s = peak_tflops * 1e12
+    min_time_us = flops / peak_flops_per_s * 1e6
+    if min_time_us <= 0:
+        return None
+    ceiling = ref_us / min_time_us
+    if target_speedup <= ceiling * 0.95:
+        return None
+
+    return (
+        f"Target {target_speedup:.2f}× is at/above FP16 compute "
+        f"speed-of-light (~{ceiling:.2f}× on {hardware}: "
+        f"2·{n}³ = {flops / 1e9:.1f} GFLOP at {peak_tflops:.0f} TFLOPs "
+        f"→ {min_time_us:.0f}µs floor vs {ref_us:.0f}µs baseline). "
+        f"The kernel cannot physically exceed this."
+    )
+
+
+def _memory_capacity_check(
+    ref_code: str,
+    classif,
+    hardware: str,
+) -> str | None:
+    """Return a warning string if the estimated working set exceeds
+    ~90% of HBM capacity on this GPU, else ``None``."""
+    elements = int(getattr(classif, "estimated_tensor_elements", 0) or 0)
+    if elements < 1024:
+        return None
+    gpu_gb = _GPU_MEMORY_GB.get(hardware)
+    if not gpu_gb:
+        return None
+    bytes_per = _infer_dtype_bytes(ref_code)
+
+    # Rough tensor-count heuristic driven by op type / patterns.
+    op_type_val = getattr(getattr(classif, "op_type", None), "value", "")
+    patterns = " ".join(getattr(classif, "detected_patterns", []) or [])
+    if op_type_val == "norm" or "layer_norm" in patterns or "rms_norm" in patterns:
+        tensor_count = 3  # input + gamma/beta (approx) + output
+    elif op_type_val == "attention":
+        tensor_count = 4  # q, k, v, out
+    elif op_type_val == "gemm":
+        tensor_count = 3  # A, B, C
+    elif op_type_val == "elementwise":
+        tensor_count = 2  # in + out
+    else:
+        tensor_count = 2
+
+    working_set_bytes = elements * bytes_per * tensor_count
+    working_set_gb = working_set_bytes / 1e9
+    if working_set_gb <= gpu_gb * 0.9:
+        return None
+    return (
+        f"Estimated working set ~{working_set_gb:.1f} GB exceeds 90% of "
+        f"{hardware} HBM capacity ({gpu_gb:.0f} GB). "
+        f"The kernel will OOM or thrash before it can run, regardless "
+        f"of optimization quality."
+    )
+
+
+def check_reachability(
+    ref_us: float,
+    ref_code: str,
+    classif,
+    hardware: str,
+    target_speedup: float,
+) -> list[str]:
+    """Unified reachability oracle. Runs HBM, compute, and memory-capacity
+    ceilings and returns a list of warning strings (empty = reachable)."""
+    warnings: list[str] = []
+    for warn in (
+        _hbm_ceiling_check(ref_us, ref_code, classif, hardware, target_speedup),
+        _compute_ceiling_check(ref_us, ref_code, classif, hardware, target_speedup),
+        _memory_capacity_check(ref_code, classif, hardware),
+    ):
+        if warn:
+            warnings.append(warn)
+    return warnings
 
 
 # ------------------------------------------------------------------
@@ -3238,19 +3379,18 @@ class KernelCodeShell:
                     f"PyTorch's fused elementwise kernels are already near-optimal at this size."
                 )
 
-            # HBM speed-of-light ceiling check. For memory-bound problems,
-            # the hardware bandwidth caps how much speedup is achievable
-            # regardless of generator quality. If the user's target sits at
-            # or above that ceiling we must say so before burning budget.
-            sol_ceiling_info = _hbm_ceiling_check(
+            # Reachability oracle: HBM, FP16 compute, and HBM-capacity
+            # ceilings. Any of these firing means the target is physically
+            # unreachable regardless of generator quality; surface all of
+            # them so the user can make an informed call.
+            for warn in check_reachability(
                 ref_us=ref_us,
                 ref_code=ref_src,
                 classif=classif,
                 hardware=goal.hardware,
                 target_speedup=goal.target_speedup or 0.0,
-            )
-            if sol_ceiling_info:
-                warnings_list.append(sol_ceiling_info)
+            ):
+                warnings_list.append(warn)
 
             if warnings_list:
                 self._console.print()
